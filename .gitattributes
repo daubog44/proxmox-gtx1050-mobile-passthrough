@@ -1,0 +1,8 @@
+*.pdf binary
+*.png binary
+*.rom binary
+*.aml binary
+*.asl text eol=lf
+*.py text eol=lf
+gpu-vm-switch text eol=lf
+*.md text eol=lf

@@ -1,0 +1,6 @@
+tmp/
+*.rom
+*.aml
+*.asl
+__pycache__/
+*.py[cod]

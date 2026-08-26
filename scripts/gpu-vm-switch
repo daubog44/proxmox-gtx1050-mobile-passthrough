@@ -1,0 +1,651 @@
+#!/usr/bin/env bash
+# Move one NVIDIA mobile GPU between Proxmox VMs and provide its VBIOS through ACPI.
+set -Eeuo pipefail
+
+GPU_SLOT='0000:02:00'
+ROM='/usr/share/kvm/gtx1050_hp_native.rom'
+readonly WORKDIR='/usr/share/kvm/optimus-gpu-switch'
+readonly LOCKDIR='/run/lock/optimus-gpu-switch.lock.d'
+readonly FWCFG_NAME='opt/com.lion328/nvidia-rom'
+
+TARGET_VM=''
+INSTALL_DRIVERS=1
+ASSUME_YES=0
+DRY_RUN=0
+SELF_TEST=0
+DISABLE_SECURE_BOOT=0
+GPU_PCI_ID=''
+RESTART_VMS=''
+EFI_RECOVERY_VM=''
+EFI_RECOVERY_DISK=''
+
+die() { echo "Errore: $*" >&2; exit 1; }
+note() { echo "==> $*"; }
+run() {
+    if (( DRY_RUN )); then
+        printf '+ '
+        printf '%q ' "$@"
+        printf '\n'
+    else
+        "$@"
+    fi
+}
+
+usage() {
+    cat <<'EOF'
+Uso:
+  gpu-vm-switch                         menu interattivo delle VM
+  gpu-vm-switch --vm VMID --yes         trasferimento non interattivo
+  gpu-vm-switch --vm VMID --dry-run     simulazione senza modifiche
+
+Opzioni:
+  --vm VMID           VM Proxmox che ricevera la GPU
+  --gpu 0000:BB:DD    GPU del nodo (default: 0000:02:00)
+  --rom /percorso.rom VBIOS OEM da esporre alla VM
+  --skip-drivers      non installa/aggiorna il driver nel guest
+  --disable-secure-boot
+                      disabilita Secure Boot in modo permanente per una VM OVMF
+                      creando nuove variabili EFI senza chiavi; conserva una copia
+                      ripristinabile delle vecchie variabili sul nodo Proxmox
+  --yes               non chiede conferma
+  --dry-run           non modifica nulla
+  --self-test         compila/disassembla una SSDT di prova
+  -h, --help          mostra questo aiuto
+
+Casi d'uso:
+  Ubuntu:                       gpu-vm-switch
+  Debian/Kali/Arch/Fedora/RHEL: gpu-vm-switch --vm 123 --yes
+  Driver gia gestito da te:     gpu-vm-switch --vm 123 --skip-drivers --yes
+  OVMF senza MOK/Secure Boot:   gpu-vm-switch --vm 123 --disable-secure-boot --yes
+  Altra NVIDIA mobile/Optimus:  gpu-vm-switch --gpu 0000:03:00 --rom /usr/share/kvm/oem.rom --vm 123 --yes
+
+La VM di destinazione deve usare Q35, SeaBIOS o OVMF, e avere il QEMU Guest Agent attivo.
+Il trasferimento e idempotente: se la GPU e gia pronta sulla VM scelta non
+riavvia o modifica nulla. Le VM sorgenti che erano accese vengono riaccese
+automaticamente senza la GPU alla fine, anche se lo switch incontra un errore.
+Quando una VM perde la GPU vengono rimossi hostpci, ROM, SSDT, fw_cfg e le
+opzioni CPU specifiche del passthrough; firmware e chipset restano invariati.
+Se Secure Boot e attivo, il menu interattivo propone di disattivarlo. In modalita
+--yes non viene mai disattivato senza l'opzione esplicita --disable-secure-boot.
+L'operazione Secure Boot e permanente: evita MOK, ma sostituisce solo le variabili
+EFI dopo avere creato un fallback di boot e una copia ripristinabile delle vecchie.
+EOF
+}
+
+while (( $# )); do
+    case "$1" in
+        --vm)
+            (( $# >= 2 )) || die '--vm richiede un VMID'
+            TARGET_VM=$2; shift 2 ;;
+        --gpu)
+            (( $# >= 2 )) || die '--gpu richiede 0000:BB:DD'
+            GPU_SLOT=$2; shift 2 ;;
+        --rom)
+            (( $# >= 2 )) || die '--rom richiede un file'
+            ROM=$2; shift 2 ;;
+        --skip-drivers) INSTALL_DRIVERS=0; shift ;;
+        --disable-secure-boot) DISABLE_SECURE_BOOT=1; shift ;;
+        --yes) ASSUME_YES=1; shift ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        --self-test) SELF_TEST=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "Opzione sconosciuta: $1" ;;
+    esac
+done
+
+(( EUID == 0 )) || die 'esegui come root sul nodo Proxmox'
+command -v qm >/dev/null || die 'qm non trovato: questo non sembra un nodo Proxmox'
+command -v iasl >/dev/null || die 'iasl non trovato: installa acpica-tools sul nodo'
+command -v lspci >/dev/null || die 'lspci non trovato: installa pciutils sul nodo'
+[[ $GPU_SLOT =~ ^[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]]$ ]] ||
+    die '--gpu deve essere nel formato 0000:BB:DD, senza .funzione'
+[[ -f $ROM ]] || die "VBIOS mancante: $ROM"
+GPU_PCI_ID=$(lspci -n -s "$GPU_SLOT" | awk 'NR == 1 { print $3 }')
+[[ $GPU_PCI_ID =~ ^[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]$ ]] ||
+    die "non trovo una funzione GPU al PCI host $GPU_SLOT"
+
+mkdir -p "$WORKDIR"
+mkdir "$LOCKDIR" 2>/dev/null || die 'un altro trasferimento GPU e gia in corso'
+
+vm_ids() { qm list | awk 'NR > 1 { print $1 }'; }
+vm_status() { qm status "$1" | awk '{ print $2 }'; }
+vm_args() { qm config "$1" | sed -n 's/^args: //p'; }
+gpu_keys() {
+    qm config "$1" | awk -v slot="$GPU_SLOT" -F: '
+        $1 ~ /^hostpci[0-9]+$/ && index($0, slot) { print $1 }
+    '
+}
+trim() { sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'; }
+
+strip_optimus_args() {
+    sed -E \
+        -e 's@(^|[[:space:]])-acpitable[[:space:]]+file=/usr/share/kvm/ssdt-[0-9]+-optimus\.aml@@g' \
+        -e 's@(^|[[:space:]])-acpitable[[:space:]]+file=/usr/share/kvm/optimus-gpu-switch/ssdt-[0-9]+\.aml@@g' \
+        -e 's@(^|[[:space:]])-fw_cfg[[:space:]]+name=opt/com\.lion328/nvidia-rom,file=[^[:space:]]+@@g' \
+        -e 's@(^|[[:space:]])-cpu[[:space:]]+host,\+kvm_pv_unhalt,\+kvm_pv_eoi,hv_vendor_id=1234567890ab,kvm=off@@g' |
+        trim
+}
+
+clean_gpu_cpu() {
+    local vm=$1 cpu
+    cpu=$(qm config "$vm" | sed -n 's/^cpu: //p')
+    [[ $cpu == host,hidden=1 ]] && run qm set "$vm" --cpu host
+}
+
+enable_gpu_cpu() {
+    local vm=$1 cpu
+    cpu=$(qm config "$vm" | sed -n 's/^cpu: //p')
+    [[ $cpu == host || $cpu == host,hidden=1 ]] && run qm set "$vm" --cpu host,hidden=1
+}
+
+has_optimus_args() {
+    local vm=$1 args
+    args=$(vm_args "$vm")
+    grep -Fq -- "-acpitable file=$WORKDIR/ssdt-$vm.aml" <<<"$args" &&
+        grep -Fq -- "-fw_cfg name=$FWCFG_NAME,file=$ROM" <<<"$args"
+}
+
+set_args() {
+    local vm=$1 args=$2
+    if [[ -n $args ]]; then
+        run qm set "$vm" --args "$args"
+    elif [[ -n $(vm_args "$vm") ]]; then
+        run qm set "$vm" --delete args
+    fi
+}
+
+remove_generated_ssdt() {
+    local vm=$1
+    run rm -f -- "$WORKDIR/ssdt-$vm.asl" "$WORKDIR/ssdt-$vm.aml"
+}
+
+stop_vm() {
+    local vm=$1 elapsed=0
+    [[ $(vm_status "$vm") == stopped ]] && return
+    note "arresto pulito della VM $vm"
+    run qm shutdown "$vm" --timeout 120
+    (( DRY_RUN )) && return
+    while [[ $(vm_status "$vm") != stopped ]]; do
+        (( elapsed += 2 ))
+        (( elapsed < 120 )) || die "la VM $vm non si e fermata: nessun arresto forzato eseguito"
+        sleep 2
+    done
+}
+
+start_vm() {
+    [[ $(vm_status "$1") == running ]] || run qm start "$1"
+}
+
+wait_for_agent() {
+    local vm=$1 elapsed=0
+    (( DRY_RUN )) && return
+    while ! qm agent "$vm" ping >/dev/null 2>&1; do
+        (( elapsed += 2 ))
+        (( elapsed < 180 )) || die "QEMU Guest Agent non raggiungibile nella VM $vm"
+        sleep 2
+    done
+}
+
+qga_result() {
+    local vm=$1 command=$2 result
+    result=$(qm guest exec "$vm" --timeout 900 -- /bin/sh -c "$command") ||
+        die "comando guest fallito nella VM $vm"
+    grep -q '"exitcode" : 0' <<<"$result" ||
+        die "comando guest non riuscito nella VM $vm: $result"
+    printf '%s\n' "$result"
+}
+
+qga_b64() {
+    local result encoded
+    result=$(qga_result "$1" "$2")
+    encoded=$(sed -nE 's/.*"out-data"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' <<<"$result")
+    [[ -n $encoded ]] || return 0
+    printf '%s' "$encoded" | base64 -d
+}
+
+guest_distro() {
+    qga_b64 "$1" '. /etc/os-release; printf "%s" "$ID" | base64 -w0'
+}
+
+check_vm_layout() {
+    local vm=$1 config bios
+    config=$(qm config "$vm")
+    bios=$(sed -n 's/^bios: //p' <<<"$config")
+    [[ -z $bios || $bios == ovmf || $bios == seabios ]] ||
+        die "VM $vm: firmware non supportato ($bios)"
+    grep -q '^machine: q35' <<<"$config" || die "VM $vm: serve macchina q35"
+    if ! grep -q '^agent: 1' <<<"$config"; then
+        note "abilito il canale QEMU Guest Agent per la VM $vm"
+        run qm set "$vm" --agent 1
+    fi
+}
+
+secure_boot_state() {
+    local state
+    state=$(qga_b64 "$1" '
+        state=unknown
+        if command -v mokutil >/dev/null 2>&1; then
+            case "$(mokutil --sb-state 2>/dev/null || true)" in
+                *enabled*) state=enabled ;;
+                *disabled*) state=disabled ;;
+            esac
+        fi
+        if [ "$state" = unknown ]; then
+            file=$(find /sys/firmware/efi/efivars -maxdepth 1 -name "SecureBoot-*" -print -quit 2>/dev/null || true)
+            if [ -n "$file" ] && [ -r "$file" ]; then
+                value=$(od -An -t u1 -j4 -N1 "$file" 2>/dev/null | tr -d "[:space:]" || true)
+                case "$value" in
+                    1) state=enabled ;;
+                    0) state=disabled ;;
+                esac
+            fi
+        fi
+        printf "%s" "$state" | base64 -w0
+    ')
+    case "$state" in
+        enabled|disabled) printf '%s' "$state" ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+ensure_uefi_fallback() {
+    local vm=$1
+    qga_result "$vm" '
+        set -eu
+        for esp in /boot/efi /boot; do
+            [ -d "$esp/EFI" ] || continue
+            mkdir -p "$esp/EFI/BOOT"
+            [ -f "$esp/EFI/BOOT/BOOTX64.EFI" ] && exit 0
+            for source in "$esp"/EFI/*/shimx64.efi "$esp"/EFI/*/grubx64.efi; do
+                [ -f "$source" ] || continue
+                cp "$source" "$esp/EFI/BOOT/BOOTX64.EFI"
+                exit 0
+            done
+        done
+        echo "Impossibile creare il fallback UEFI BOOTX64.EFI" >&2
+        exit 65
+    ' >/dev/null
+}
+
+disable_secure_boot() {
+    local vm=$1 efi volume storage efi_path backup backup_metadata stamp
+    [[ $(sed -n 's/^bios: //p' <<<"$(qm config "$vm")") == ovmf ]] ||
+        die "VM $vm: --disable-secure-boot richiede OVMF"
+    efi=$(sed -n 's/^efidisk0: //p' <<<"$(qm config "$vm")")
+    [[ -n $efi ]] || die "VM $vm: efidisk0 mancante"
+    [[ $efi == *efitype=4m* ]] || die "VM $vm: Secure Boot richiede efidisk0 con efitype=4m"
+    volume=${efi%%,*}
+    storage=${volume%%:*}
+    efi_path=$(pvesm path "$volume") || die "VM $vm: non trovo il volume EFI $volume"
+    [[ -r $efi_path ]] || die "VM $vm: volume EFI non leggibile: $efi_path"
+
+    stamp=$(date +%Y%m%d-%H%M%S)
+    backup="$WORKDIR/efi-backups/vm-$vm-efi-vars-$stamp.raw"
+    backup_metadata="${backup%.raw}.efidisk0.txt"
+    run mkdir -p "$WORKDIR/efi-backups"
+    run cp --reflink=auto -- "$efi_path" "$backup"
+    printf '%s\n' "$efi" > "$backup_metadata"
+    note "backup EFI creato: $backup"
+    note 'sostituisco solo le variabili EFI: Secure Boot restera disattivato e non verra richiesto MOK'
+
+    EFI_RECOVERY_VM=$vm
+    EFI_RECOVERY_DISK=$efi
+    run qm disk unlink "$vm" --idlist efidisk0
+    run qm set "$vm" --efidisk0 "$storage:1,efitype=4m,pre-enrolled-keys=0"
+    EFI_RECOVERY_VM=''
+    EFI_RECOVERY_DISK=''
+    note "le vecchie variabili EFI sono preservate come disco unused della VM $vm"
+}
+
+choose_vm() {
+    local choice=''
+    echo "Scegli la VM che deve ricevere $GPU_SLOT (GPU $GPU_PCI_ID):"
+    qm list
+    select choice in $(vm_ids); do
+        [[ -n $choice ]] || { echo 'Scelta non valida.'; continue; }
+        TARGET_VM=$choice
+        break
+    done
+}
+
+free_hostpci_key() {
+    local vm=$1 n config
+    config=$(qm config "$vm")
+    for n in {0..15}; do
+        grep -q "^hostpci$n:" <<<"$config" || { printf 'hostpci%s' "$n"; return; }
+    done
+    die "VM $vm: nessuno slot hostpci libero"
+}
+
+acpi_name() {
+    local slot=$1 function=$2 value
+    value=$((16#$slot * 8 + 16#$function))
+    printf 'S%02X' "$value"
+}
+
+pci_path_to_acpi() {
+    local pci_path=$1 names='' hop device slot function
+    for hop in $(printf '%s' "$pci_path" | tr / ' '); do
+        device=$(printf '%s' "$hop" | sed 's/.*://')
+        [[ $device =~ ^([[:xdigit:]][[:xdigit:]])\.([0-7])$ ]] ||
+            die "indirizzo PCI inatteso: $hop"
+        slot=${BASH_REMATCH[1]}
+        function=${BASH_REMATCH[2]}
+        [[ -z $names ]] || names+='.'
+        names+=$(acpi_name "$slot" "$function")
+    done
+    [[ $names == *.* ]] || die "topologia PCI inattesa: $pci_path"
+    printf '%s' "$names"
+}
+
+discover_acpi_path() {
+    local vm=$1 pci_path
+    pci_path=$(qga_b64 "$vm" "lspci -PP -n -d $GPU_PCI_ID | awk 'NR == 1 { print \$1; exit }' | base64 -w0")
+    [[ -n $pci_path ]] || die "GPU $GPU_PCI_ID non rilevata nella VM $vm"
+    pci_path_to_acpi "$pci_path"
+}
+
+build_ssdt() {
+    local vm=$1 acpi_path=$2 asl aml base
+    asl="$WORKDIR/ssdt-$vm.asl"
+    aml="$WORKDIR/ssdt-$vm.aml"
+    base=$(printf '%s' "$aml" | sed 's/\.aml$//')
+    tee "$asl" >/dev/null <<EOF
+DefinitionBlock ("", "SSDT", 1, "DOTLEG", "NVIDIAFU", 1)
+{
+    External (\\_SB.PCI0, DeviceObj)
+    External (\\_SB.PCI0.$acpi_path, DeviceObj)
+    Scope (\\_SB.PCI0.$acpi_path)
+    {
+        Name (FWIT, 0)
+        Name (FWBI, Buffer () { 0 })
+        OperationRegion (FWIO, SystemIO, 0x510, 2)
+        Field (FWIO, WordAcc, Lock) { FSEL, 16 }
+        Field (FWIO, ByteAcc, Lock) { Offset (1), FDAT, 8 }
+        Method (RWRD, 0, Serialized) { Local0 = FDAT << 8 Local0 |= FDAT Return (Local0) }
+        Method (RDWD, 0, Serialized) { Local0 = RWRD () << 16 Local0 |= RWRD () Return (Local0) }
+        Method (RBUF, 1, Serialized)
+        {
+            Local0 = Buffer (Arg0) {}
+            For (Local1 = 0, Local1 < Arg0, Local1++) { Local0[Local1] = FDAT }
+            Return (Local0)
+        }
+        Method (FISL, 3, Serialized)
+        {
+            FSEL = 0x19
+            Local0 = RDWD ()
+            For (Local1 = 0, Local1 < Local0, Local1++)
+            {
+                Local2 = RDWD ()
+                Local3 = RWRD ()
+                RWRD ()
+                Local4 = ToString (RBUF (56))
+                If (Arg0 == Local4) { Arg1 = Local3 Arg2 = Local2 Break }
+            }
+        }
+        Method (RINT, 0, Serialized)
+        {
+            If (!FWIT)
+            {
+                FWIT = 1
+                If (!CondRefOf (\\_SB.PCI0.FWCF)) { Return () }
+                FISL ("$FWCFG_NAME", RefOf (Local0), RefOf (Local1))
+                If (Local0) { FSEL = Local0 CopyObject (RBUF (Local1), FWBI) }
+            }
+        }
+        Method (_ROM, 2)
+        {
+            RINT ()
+            Local0 = Arg1
+            If (Arg1 > 0x1000) { Local0 = 0x1000 }
+            If (Arg0 < SizeOf (FWBI)) { Return (Mid (FWBI, Arg0, Local0)) }
+            Return (Buffer (Local0) {})
+        }
+    }
+    External (\\_SB.PCI0.SF8, DeviceObj)
+    Scope (\\_SB.PCI0.SF8)
+    {
+        Device (BAT0)
+        {
+            Name (_HID, EisaId ("PNP0C0A"))
+            Name (_UID, 1)
+            Method (_STA) { Return (0x0F) }
+        }
+    }
+}
+EOF
+    iasl -p "$base" "$asl" >/dev/null
+    [[ -s $aml ]] || die "compilazione SSDT fallita per la VM $vm"
+    printf '%s\n' "$aml"
+}
+
+guest_nvidia_ready() {
+    local result
+    result=$(qm guest exec "$1" --timeout 30 -- /bin/sh -c \
+        'nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null') || return 1
+    grep -q '"exitcode" : 0' <<<"$result"
+}
+
+stop_guest_benchmark() {
+    qm guest exec "$1" --timeout 30 -- /bin/sh -c \
+        'systemctl disable --now nvidia-benchmark-x.service >/dev/null 2>&1 || true' \
+        >/dev/null 2>&1 || true
+}
+
+start_guest_benchmark() {
+    qm guest exec "$1" --timeout 30 -- /bin/sh -c \
+        'test ! -f /etc/systemd/system/nvidia-benchmark-x.service || systemctl enable --now nvidia-benchmark-x.service' \
+        >/dev/null 2>&1 || true
+}
+
+install_linux_driver() {
+    local vm=$1 distro command
+    distro=$(guest_distro "$vm")
+    case "$distro" in
+        ubuntu)
+            command='export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y ubuntu-drivers-common; ubuntu-drivers install' ;;
+        debian)
+            command='set -eu; . /etc/os-release; codename=$VERSION_CODENAME; test -n "$codename" || { echo "VERSION_CODENAME mancante" >&2; exit 64; }; if ! grep -RqsE "^[[:space:]]*deb([[:space:]]+\[[^]]+\])?[[:space:]].*[[:space:]]contrib[[:space:]]+non-free[[:space:]]+non-free-firmware([[:space:]]|$)|^[[:space:]]*Components:.*contrib[[:space:]]+non-free[[:space:]]+non-free-firmware([[:space:]]|$)" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then printf "deb http://deb.debian.org/debian %s contrib non-free non-free-firmware\n" "$codename" > /etc/apt/sources.list.d/gpu-vm-switch-nvidia.list; fi; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y linux-headers-amd64 build-essential dkms nvidia-driver; dkms autoinstall' ;;
+        kali)
+            command='set -eu; if ! grep -Rqs "kali-rolling.*contrib.*non-free" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then printf "deb http://http.kali.org/kali kali-rolling contrib non-free non-free-firmware\n" > /etc/apt/sources.list.d/gpu-vm-switch-nvidia.list; fi; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y linux-headers-amd64 build-essential dkms nvidia-driver; dkms autoinstall' ;;
+        arch)
+            command='pacman -Syu --noconfirm --needed nvidia-dkms nvidia-utils linux-headers' ;;
+        fedora)
+            command='set -eu; arch=$(uname -m); ver=$(rpm -E %fedora); repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora$ver/$arch/cuda-fedora$ver.repo"; dnf -y install dnf-plugins-core kernel-devel-matched kernel-headers; dnf config-manager addrepo --from-repofile="$repo" || dnf config-manager --add-repo "$repo"; dnf clean expire-cache; dnf -y install cuda-drivers' ;;
+        rhel|rocky|almalinux)
+            command='set -eu; arch=$(uname -m); . /etc/os-release; major=$(printf "%s" "$VERSION_ID" | cut -d. -f1); repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel$major/$arch/cuda-rhel$major.repo"; dnf -y install dnf-plugins-core; dnf config-manager addrepo --from-repofile="$repo" || dnf config-manager --add-repo "$repo"; dnf clean expire-cache; if [ "$major" -lt 10 ]; then dnf -y module enable nvidia-driver:latest-dkms; fi; dnf -y install cuda-drivers' ;;
+        *) die "VM $vm: installazione automatica non supportata per $distro; usa --skip-drivers" ;;
+    esac
+    note "installo il driver NVIDIA proprietario per $distro nella VM $vm"
+    qga_result "$vm" "$command" >/dev/null
+}
+
+verify_gpu() {
+    local vm=$1 result
+    result=$(qga_b64 "$vm" \
+        'output=$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader) && printf "%s" "$output" | base64 -w0')
+    [[ -n $result ]] || die "nvidia-smi non ha restituito una GPU nella VM $vm"
+    echo "GPU pronta nella VM $vm: $result"
+}
+
+restart_detached_vms() {
+    local vm
+    (( DRY_RUN )) && return
+    for vm in $RESTART_VMS; do
+        if [[ $(vm_status "$vm") == stopped ]]; then
+            note "riaccendo la VM sorgente $vm senza la GPU"
+            qm start "$vm" || echo "Avviso: impossibile riaccendere la VM sorgente $vm" >&2
+        fi
+    done
+}
+
+restore_efi_if_needed() {
+    [[ -n $EFI_RECOVERY_VM ]] || return
+    echo "Avviso: ripristino efidisk0 originale per la VM $EFI_RECOVERY_VM" >&2
+    qm set "$EFI_RECOVERY_VM" --efidisk0 "$EFI_RECOVERY_DISK" >/dev/null 2>&1 ||
+        echo "Avviso critico: ripristina manualmente efidisk0: $EFI_RECOVERY_DISK" >&2
+}
+
+cleanup() {
+    local status=$?
+    trap - EXIT
+    set +e
+    restore_efi_if_needed
+    restart_detached_vms
+    rmdir "$LOCKDIR" 2>/dev/null
+    exit "$status"
+}
+trap cleanup EXIT
+
+if (( SELF_TEST )); then
+    [[ $(acpi_name 1c 0) == SE0 ]] || die 'self-test bridge ACPI non riuscito'
+    [[ $(pci_path_to_acpi '00:1c.0/01:00.0') == SE0.S00 ]] ||
+        die 'self-test percorso PCI->ACPI non riuscito'
+    test_aml=$(build_ssdt 999999 SE0.S00)
+    iasl -d -p /tmp/gpu-vm-switch-self-test "$test_aml" >/dev/null
+    rm -f "$WORKDIR/ssdt-999999.asl" "$test_aml" /tmp/gpu-vm-switch-self-test.dsl
+    echo 'self-test: ok'
+    exit 0
+fi
+
+[[ -n $TARGET_VM ]] || choose_vm
+qm status "$TARGET_VM" >/dev/null 2>&1 || die "VM inesistente: $TARGET_VM"
+
+if (( DRY_RUN )); then
+    note "dry-run: GPU $GPU_SLOT (ID $GPU_PCI_ID), destinazione $TARGET_VM"
+    note "proprietari attuali: $(for vm in $(vm_ids); do gpu_keys "$vm" | sed "s/^/$vm:/"; done | xargs || true)"
+    exit 0
+fi
+
+check_vm_layout "$TARGET_VM"
+target_initial_status=$(vm_status "$TARGET_VM")
+if [[ $target_initial_status == stopped ]]; then
+    note "avvio preliminare della VM $TARGET_VM per verificare il Guest Agent"
+    start_vm "$TARGET_VM"
+fi
+wait_for_agent "$TARGET_VM"
+secure_state=$(secure_boot_state "$TARGET_VM")
+if (( DISABLE_SECURE_BOOT )) && [[ $secure_state == unknown ]]; then
+    [[ $target_initial_status == stopped ]] && stop_vm "$TARGET_VM"
+    die "VM $TARGET_VM: non posso verificare Secure Boot dal guest"
+fi
+if (( ! ASSUME_YES )) && [[ $secure_state == enabled ]] && (( ! DISABLE_SECURE_BOOT )); then
+    printf 'Secure Boot e attivo. Disattivarlo permanentemente per evitare MOK? [s/N] '
+    read -r answer
+    if [[ $answer =~ ^[sS]$ ]]; then
+        DISABLE_SECURE_BOOT=1
+    fi
+fi
+owners=$(for vm in $(vm_ids); do gpu_keys "$vm" | sed "s/^/$vm:/"; done)
+owner_count=$(printf '%s\n' "$owners" | sed '/^$/d' | wc -l)
+first_owner=$(printf '%s\n' "$owners" | sed '/^$/d' | head -n1)
+GPU_ALREADY_READY=0
+
+if [[ -n $(gpu_keys "$TARGET_VM" | head -n1 || true) ]] &&
+    (( owner_count == 1 )) &&
+    [[ $first_owner == "$TARGET_VM":* ]] &&
+    has_optimus_args "$TARGET_VM" &&
+    guest_nvidia_ready "$TARGET_VM"; then
+    GPU_ALREADY_READY=1
+    if (( ! DISABLE_SECURE_BOOT )) || [[ $secure_state != enabled ]]; then
+        note "idempotente: la GPU e gia pronta nella VM $TARGET_VM; nessuna modifica o riavvio"
+        verify_gpu "$TARGET_VM"
+        exit 0
+    fi
+fi
+
+if (( INSTALL_DRIVERS )); then
+    case "$(guest_distro "$TARGET_VM")" in
+        ubuntu|debian|kali|arch|fedora|rhel|rocky|almalinux) ;;
+        *)
+            [[ $target_initial_status == stopped ]] && stop_vm "$TARGET_VM"
+            die 'guest non supportato per driver automatici: usa --skip-drivers' ;;
+    esac
+fi
+
+if (( ! ASSUME_YES )); then
+    if (( GPU_ALREADY_READY )); then
+        printf 'La GPU e gia pronta; Secure Boot verra disattivato permanentemente. Continuare? [s/N] '
+    else
+        printf 'La GPU %s verra spostata sulla VM %s; le VM coinvolte saranno arrestate e poi riaccese. Continuare? [s/N] ' "$GPU_SLOT" "$TARGET_VM"
+    fi
+    read -r answer
+    if [[ ! $answer =~ ^[sS]$ ]]; then
+        [[ $target_initial_status == stopped ]] && stop_vm "$TARGET_VM"
+        exit 0
+    fi
+fi
+
+if (( DISABLE_SECURE_BOOT )) && [[ $secure_state == enabled ]]; then
+    note 'preparo il fallback UEFI BOOTX64.EFI prima di sostituire le variabili EFI'
+    ensure_uefi_fallback "$TARGET_VM"
+fi
+
+if (( GPU_ALREADY_READY )); then
+    stop_vm "$TARGET_VM"
+    disable_secure_boot "$TARGET_VM"
+    start_vm "$TARGET_VM"
+    wait_for_agent "$TARGET_VM"
+    [[ $(secure_boot_state "$TARGET_VM") == disabled ]] ||
+        die "VM $TARGET_VM: Secure Boot risulta ancora attivo dopo la sostituzione EFI"
+    verify_gpu "$TARGET_VM"
+    start_guest_benchmark "$TARGET_VM"
+    exit 0
+fi
+
+while IFS= read -r owner_key; do
+    [[ -n $owner_key ]] || continue
+    owner=$(printf '%s' "$owner_key" | cut -d: -f1)
+    key=$(printf '%s' "$owner_key" | cut -d: -f2)
+    [[ $owner == "$TARGET_VM" ]] && continue
+    owner_was_running=0
+    [[ $(vm_status "$owner") == running ]] && owner_was_running=1
+    (( owner_was_running )) && RESTART_VMS+=" $owner"
+    stop_guest_benchmark "$owner"
+    stop_vm "$owner"
+    note "sgancio $key dalla VM precedente $owner"
+    run qm set "$owner" --delete "$key"
+    set_args "$owner" "$(vm_args "$owner" | strip_optimus_args)"
+    clean_gpu_cpu "$owner"
+    remove_generated_ssdt "$owner"
+done <<<"$owners"
+
+stop_vm "$TARGET_VM"
+if (( DISABLE_SECURE_BOOT )) && [[ $secure_state == enabled ]]; then
+    disable_secure_boot "$TARGET_VM"
+fi
+target_key=$(gpu_keys "$TARGET_VM" | head -n1 || true)
+[[ -n $target_key ]] || target_key=$(free_hostpci_key "$TARGET_VM")
+set_args "$TARGET_VM" "$(vm_args "$TARGET_VM" | strip_optimus_args)"
+enable_gpu_cpu "$TARGET_VM"
+note "collego $GPU_SLOT alla VM $TARGET_VM come $target_key"
+run qm set "$TARGET_VM" "--$target_key" "$GPU_SLOT,pcie=1,rombar=0,romfile=$(basename "$ROM")"
+
+note 'avvio temporaneo per scoprire il percorso ACPI reale della GPU'
+start_vm "$TARGET_VM"
+wait_for_agent "$TARGET_VM"
+acpi_path=$(discover_acpi_path "$TARGET_VM")
+note "percorso ACPI rilevato: \\_SB.PCI0.$acpi_path"
+stop_vm "$TARGET_VM"
+
+aml=$(build_ssdt "$TARGET_VM" "$acpi_path")
+args=$(vm_args "$TARGET_VM" | strip_optimus_args)
+args=$(printf '%s -acpitable file=%s -fw_cfg name=%s,file=%s' "$args" "$aml" "$FWCFG_NAME" "$ROM" | trim)
+set_args "$TARGET_VM" "$args"
+
+note 'avvio finale con SSDT e VBIOS ACPI'
+start_vm "$TARGET_VM"
+wait_for_agent "$TARGET_VM"
+if (( DISABLE_SECURE_BOOT )) && [[ $secure_state == enabled ]]; then
+    [[ $(secure_boot_state "$TARGET_VM") == disabled ]] ||
+        die "VM $TARGET_VM: Secure Boot risulta ancora attivo dopo la sostituzione EFI"
+fi
+if (( INSTALL_DRIVERS )) && ! guest_nvidia_ready "$TARGET_VM"; then
+    install_linux_driver "$TARGET_VM"
+    note 'riavvio della VM per caricare il driver appena installato'
+    stop_vm "$TARGET_VM"
+    start_vm "$TARGET_VM"
+    wait_for_agent "$TARGET_VM"
+fi
+verify_gpu "$TARGET_VM"
+start_guest_benchmark "$TARGET_VM"
