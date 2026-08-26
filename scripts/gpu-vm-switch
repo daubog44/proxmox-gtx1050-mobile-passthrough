@@ -69,6 +69,8 @@ Se Secure Boot e attivo, il menu interattivo propone di disattivarlo. In modalit
 --yes non viene mai disattivato senza l'opzione esplicita --disable-secure-boot.
 L'operazione Secure Boot e permanente: evita MOK, ma sostituisce solo le variabili
 EFI dopo avere creato un fallback di boot e una copia ripristinabile delle vecchie.
+Se il nuovo EFI non completa il primo boot fino al Guest Agent, lo script ripristina
+automaticamente efidisk0 originale; prima dell'uso e comunque consigliato uno snapshot.
 EOF
 }
 
@@ -290,10 +292,7 @@ disable_secure_boot() {
 
     EFI_RECOVERY_VM=$vm
     EFI_RECOVERY_DISK=$efi
-    run qm disk unlink "$vm" --idlist efidisk0
     run qm set "$vm" --efidisk0 "$storage:1,efitype=4m,pre-enrolled-keys=0"
-    EFI_RECOVERY_VM=''
-    EFI_RECOVERY_DISK=''
     note "le vecchie variabili EFI sono preservate come disco unused della VM $vm"
 }
 
@@ -480,10 +479,27 @@ restart_detached_vms() {
 }
 
 restore_efi_if_needed() {
-    [[ -n $EFI_RECOVERY_VM ]] || return
-    echo "Avviso: ripristino efidisk0 originale per la VM $EFI_RECOVERY_VM" >&2
+    local vm=$EFI_RECOVERY_VM elapsed=0
+    [[ -n $vm ]] || return
+    echo "Avviso: ripristino efidisk0 originale per la VM $vm" >&2
+    if [[ $(vm_status "$vm") != stopped ]]; then
+        qm shutdown "$vm" --timeout 120 >/dev/null 2>&1 || true
+        while [[ $(vm_status "$vm") != stopped && $elapsed -lt 120 ]]; do
+            sleep 2
+            (( elapsed += 2 ))
+        done
+    fi
+    if [[ $(vm_status "$vm") != stopped ]]; then
+        echo "Avviso critico: VM $vm ancora accesa; ripristina manualmente efidisk0: $EFI_RECOVERY_DISK" >&2
+        return
+    fi
     qm set "$EFI_RECOVERY_VM" --efidisk0 "$EFI_RECOVERY_DISK" >/dev/null 2>&1 ||
         echo "Avviso critico: ripristina manualmente efidisk0: $EFI_RECOVERY_DISK" >&2
+}
+
+commit_efi_change() {
+    EFI_RECOVERY_VM=''
+    EFI_RECOVERY_DISK=''
 }
 
 cleanup() {
@@ -588,6 +604,7 @@ if (( GPU_ALREADY_READY )); then
     wait_for_agent "$TARGET_VM"
     [[ $(secure_boot_state "$TARGET_VM") == disabled ]] ||
         die "VM $TARGET_VM: Secure Boot risulta ancora attivo dopo la sostituzione EFI"
+    commit_efi_change
     verify_gpu "$TARGET_VM"
     start_guest_benchmark "$TARGET_VM"
     exit 0
@@ -624,6 +641,11 @@ run qm set "$TARGET_VM" "--$target_key" "$GPU_SLOT,pcie=1,rombar=0,romfile=$(bas
 note 'avvio temporaneo per scoprire il percorso ACPI reale della GPU'
 start_vm "$TARGET_VM"
 wait_for_agent "$TARGET_VM"
+if (( DISABLE_SECURE_BOOT )) && [[ $secure_state == enabled ]]; then
+    [[ $(secure_boot_state "$TARGET_VM") == disabled ]] ||
+        die "VM $TARGET_VM: Secure Boot risulta ancora attivo dopo la sostituzione EFI"
+    commit_efi_change
+fi
 acpi_path=$(discover_acpi_path "$TARGET_VM")
 note "percorso ACPI rilevato: \\_SB.PCI0.$acpi_path"
 stop_vm "$TARGET_VM"

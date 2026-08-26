@@ -12,6 +12,12 @@ Repository riproducibile del recupero del passthrough PCIe della NVIDIA GTX 1050
 
 Il PDF completo e [output/pdf/relazione-passthrough-gtx1050.pdf](output/pdf/relazione-passthrough-gtx1050.pdf).
 
+## Obiettivo hardware: Pascal mobile e Optimus
+
+Questa soluzione nasce per la **NVIDIA GP107M GTX 1050 Mobile**, cioe una GPU laptop della famiglia **Pascal**, identificata dal PCI ID `10de:1c8d`. La variante GTX 1050 laptop ha 640 CUDA core e fino a 4 GB di GDDR5; in questa macchina sono verificati 4 GiB. In un portatile **Optimus** la GPU discreta esegue il rendering, mentre il pannello interno e normalmente collegato alla iGPU Intel: e una GPU render-only e non una scheda desktop che possiede direttamente il display.
+
+Lo script e pensato soprattutto per NVIDIA mobile/Optimus che richiedono VBIOS tramite ACPI `_ROM`. Puo adattarsi ad altre NVIDIA mobile perche scopre il percorso PCI/ACPI, ma non e universale: per ogni GPU servono IOMMU/VFIO, BDF corretto, VBIOS OEM del medesimo portatile, Q35, Guest Agent e una topologia ACPI compatibile. Non usare una ROM casuale di una GPU desktop o di un altro produttore.
+
 ## Contenuto
 
 ```text
@@ -60,7 +66,9 @@ Lo script trova chi possiede gia la GPU, spegne ordinatamente quella VM, rimuove
 
 ## Secure Boot e MOK
 
-MOK e una chiave che il firmware UEFI deve registrare in una schermata pre-avvio; non e controllabile via SSH o QEMU Guest Agent. Per evitare quella schermata, lo script offre due comportamenti sicuri:
+**MOK** significa *Machine Owner Key*. Il problema non e il driver NVIDIA in se: quando il pacchetto installa un modulo tramite **DKMS**, compila il modulo per il kernel del guest. Con Secure Boot attivo, il kernel accetta soltanto moduli firmati da una chiave fidata. DKMS puo creare una coppia di chiavi propria e firmare il modulo, ma UEFI deve prima fidarsi del suo certificato: per questo `mokutil` programma la registrazione e MOK Manager chiede conferma al riavvio, prima del kernel.
+
+Quindi l'installazione driver provoca MOK solo nella combinazione “modulo DKMS locale + Secure Boot attivo + chiave non ancora fidata”. Un modulo gia firmato dalla distribuzione puo non richiederlo. MOK non e controllabile via SSH o QEMU Guest Agent, perche la schermata e pre-avvio. Per gestire la scelta, lo script offre due comportamenti:
 
 - in modalita interattiva, se il guest rileva Secure Boot attivo, chiede se disabilitarlo;
 - in modalita non interattiva non cambia mai Secure Boot senza `--disable-secure-boot`.
@@ -69,7 +77,11 @@ MOK e una chiave che il firmware UEFI deve registrare in una schermata pre-avvio
 gpu-vm-switch --vm 123 --disable-secure-boot --yes
 ```
 
-Questa opzione e **permanente**, non temporanea. Funziona solo con OVMF e `efidisk0` di tipo `4m`: crea il fallback UEFI `EFI/BOOT/BOOTX64.EFI`, fa una copia raw delle variabili EFI in `/usr/share/kvm/optimus-gpu-switch/efi-backups/`, conserva il precedente disco EFI come `unused` della VM e crea nuove variabili senza chiavi pre-registrate. Cio evita la richiesta MOK per moduli DKMS non firmati, ma riduce la catena di fiducia del boot. Per mantenere Secure Boot, rispondere `n` e completare manualmente MOK nella console della VM.
+Questa opzione e **permanente**, non temporanea. Funziona solo con OVMF e `efidisk0` di tipo `4m`: Proxmox sostituisce il disco delle variabili EFI usando il template senza chiavi pre-registrate. Lo script crea prima `EFI/BOOT/BOOTX64.EFI`, salva una copia raw e i metadati in `/usr/share/kvm/optimus-gpu-switch/efi-backups/` e Proxmox conserva il volume precedente come `unused` della VM. Con Secure Boot effettivamente disattivato il kernel non richiede piu una chiave MOK per caricare il modulo DKMS.
+
+Il cambio **non e stato eseguito sulla Ubuntu principale**: sono stati verificati il rilevamento reale (`mokutil` ha riportato Secure Boot attivo), il prompt interattivo rifiutato, l'idempotenza e la sintassi/SSDT. Prima del primo uso reale fare uno snapshot o backup e avere la console noVNC disponibile. Lo script mantiene il rollback attivo fino a quando il nuovo EFI completa il primo boot e il Guest Agent risponde; se fallisce prima, spegne la VM e ripristina `efidisk0` originale. Dopo il boot riuscito conserva il backup invece di riattivare automaticamente Secure Boot.
+
+Per mantenere Secure Boot, rispondere `n` e completare manualmente MOK nella console della VM. Non alternare automaticamente “off/on”: riattivandolo, il modulo DKMS richiederebbe di nuovo una chiave fidata.
 
 ## Benchmark e monitoraggio
 
@@ -85,7 +97,9 @@ nvtop                 # uso GPU, memoria, processi e grafico
 
 ## Estrazione VBIOS
 
-Il codice in `scripts/extract_gtx1050_rom.py` e la versione corretta e formattata dello script di recupero fornito nei tentativi precedenti. Cerca signature PCI option ROM (`55 aa`), legge `PCIR`, verifica vendor NVIDIA e device ID `1c8d`, e controlla anche stream LZMA nel payload HP.
+Il codice in `scripts/extract_gtx1050_rom.py` e la versione corretta e formattata dello script di recupero fornito nei tentativi precedenti. Il punto di partenza e il **pacchetto driver/firmware originale HP**, scaricato dal sito del produttore per il modello del portatile e poi estratto localmente fino al payload, ad esempio `084C0.bin`. Lo script Python non scarica nulla e non inventa una ROM: analizza quel payload OEM.
+
+Cerca signature PCI option ROM (`55 aa`), legge `PCIR`, verifica vendor NVIDIA e device ID `1c8d`, ricostruisce tutte le immagini legacy/GOP della ROM e controlla anche stream LZMA incorporati. Solo se il device ID coincide scrive `/usr/share/kvm/gtx1050_hp_native.rom`.
 
 ```bash
 python3 scripts/extract_gtx1050_rom.py /tmp/084C0.bin \
@@ -101,5 +115,6 @@ Usare `--force` soltanto dopo avere confrontato BDF, PCI ID e provenienza del pa
 - [Specifiche ACPI UEFI](https://uefi.org/acpi/specs)
 - [Documentazione Proxmox su EFI/OVMF](https://pve.proxmox.com/pve-docs/pve-admin-guide.html)
 - [Guida NVIDIA ai moduli driver](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/kernel-modules.html)
+- [NVIDIA GTX 10 Series Laptop / Pascal](https://www.nvidia.com/en-us/geforce/news/nvidia-geforce-gtx-1050-laptops/)
 
 E stato fornito anche un link a una chat Gemini. Dal contesto di lavoro non era leggibile; le informazioni verificabili usate qui sono quelle osservate sul nodo/guest e il codice di estrazione incluso nella richiesta.

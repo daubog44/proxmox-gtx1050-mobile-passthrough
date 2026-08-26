@@ -126,7 +126,7 @@ def build():
     overview = [
         ["Componente", "Esito"],
         ["Host", "Proxmox VE 9.1.5, kernel 6.17.9, IOMMU e VFIO attivi"],
-        ["GPU", "NVIDIA GP107M GTX 1050 Mobile, PCI ID 10de:1c8d"],
+        ["GPU", "NVIDIA GP107M GTX 1050 Mobile (Pascal), PCI ID 10de:1c8d"],
         ["Firmware", "VBIOS OEM HP, 169472 byte, 86.07.5F.00.2C"],
         ["Ubuntu", "Driver NVIDIA 580.173.02, 4096 MiB, nvidia-smi valido"],
         ["Kali", "Driver NVIDIA installabile, SeaBIOS/Q35 mantenuto"],
@@ -158,6 +158,9 @@ def build():
             "Una GPU mobile Optimus non e una GPU desktop isolata: il display fisico resta normalmente collegato alla iGPU e il driver NVIDIA puo richiedere la propria VBIOS attraverso ACPI. Il passthrough standard con hostpci e una ROM PCI non era sufficiente.",
         ),
         p(
+            "La GTX 1050 Mobile di questo caso usa GP107M, una GPU Pascal laptop con 640 CUDA core nella configurazione GTX 1050 e 4 GiB verificati nel guest. In Optimus la NVIDIA e render-only: puo accelerare CUDA/OpenGL/Vulkan, ma non ha necessariamente un CRTC o un connettore display assegnabile. La procedura e quindi mirata a NVIDIA mobile/Optimus e richiede una VBIOS OEM coerente; non e una soluzione universale per ogni GPU laptop.",
+        ),
+        p(
             "Il criterio di successo non e solo vedere una riga in lspci. La GPU deve essere assegnabile a una VM, il driver proprietario deve caricare, nvidia-smi deve riportare nome, driver e memoria, e un processo grafico deve usare realmente la GPU.",
         ),
         h("2. Termini fondamentali"),
@@ -170,9 +173,13 @@ def build():
         ["ASL / AML / SSDT", "ASL e testo, AML e bytecode compilato, SSDT e tabella ACPI aggiuntiva."],
         ["_ROM", "Metodo ACPI che fornisce una porzione della ROM al driver, dati offset e dimensione."],
         ["fw_cfg", "Canale QEMU per fornire piccoli blob al guest; qui trasporta la VBIOS."],
-        ["MOK", "Chiave da registrare in una schermata UEFI pre-avvio per fidare moduli DKMS con Secure Boot."],
+        ["MOK", "Machine Owner Key: certificato da registrare prima del kernel per fidare moduli DKMS con Secure Boot."],
     ]
-    term_table = Table(terms, colWidths=[3.0 * cm, 12.4 * cm])
+    term_rows = [
+        [Paragraph(f"<b>{name}</b>", styles["Small"]), Paragraph(description, styles["Small"])]
+        for name, description in terms
+    ]
+    term_table = Table(term_rows, colWidths=[3.0 * cm, 12.4 * cm])
     term_table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D1D5DB")), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#E9F8F1")), ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("FONTSIZE", (0, 0), (-1, -1), 8.8), ("LEADING", (0, 0), (-1, -1), 11), ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6), ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5)]))
     story += [term_table, PageBreak()]
 
@@ -226,12 +233,12 @@ def build():
     story += [h("6. Secure Boot senza automazione fittizia")]
     story += [
         p(
-            "La schermata MOK e fuori dall'OS: SSH e QEMU Guest Agent non possono premere tasti prima dell'avvio. Un finto disable temporaneo non risolve il problema: riattivando Secure Boot, un modulo DKMS non firmato verrebbe nuovamente rifiutato.",
+            "MOK non e causato dal nome NVIDIA: compare quando DKMS compila il modulo localmente e Secure Boot richiede una firma di una chiave fidata. DKMS puo firmare con una propria chiave, ma questa deve essere registrata come Machine Owner Key. La schermata MOK e fuori dall'OS: SSH e QEMU Guest Agent non possono premere tasti prima dell'avvio.",
             styles["Callout"],
         ),
         p("Lo script rileva lo stato reale nel guest, con mokutil oppure con la variabile EFI SecureBoot. In modo interattivo propone di disabilitarlo; con --yes serve sempre il consenso esplicito seguente:"),
         Preformatted("gpu-vm-switch --vm 123 --disable-secure-boot --yes", code),
-        p("L'operazione e permanente e solo OVMF/efidisk0 4m. Prima crea EFI/BOOT/BOOTX64.EFI, copia le vecchie variabili EFI in /usr/share/kvm/optimus-gpu-switch/efi-backups/, conserva il vecchio volume come unused disk e crea nuove variabili senza chiavi. Questo evita MOK ma abbassa la protezione della catena di boot."),
+        p("L'operazione e permanente e solo OVMF/efidisk0 4m. Prima crea EFI/BOOT/BOOTX64.EFI, copia le vecchie variabili EFI e metadata in /usr/share/kvm/optimus-gpu-switch/efi-backups/, poi sostituisce efidisk0 con il template senza chiavi. Proxmox conserva il volume precedente come unused disk. Il rollback resta attivo fino al primo boot con Guest Agent; il cambio non e stato eseguito sulla Ubuntu principale, quindi prima dell'uso fare snapshot e tenere noVNC disponibile. Questo evita MOK ma abbassa la protezione della catena di boot."),
         PageBreak(),
     ]
 
@@ -254,7 +261,7 @@ def build():
         story += [Spacer(1, 0.25 * cm), KeepTogether([image, Spacer(1, 0.12 * cm), p("Figura 1 - nvtop: glxgears usa il 99% della GPU; Xorg gira su :2.", styles["Small"])])]
     story += [PageBreak(), h("8. Estrazione della VBIOS OEM")]
     story += [
-        p("Lo script Python incluso cerca la signature PCI option ROM 55 aa, verifica PCIR, vendor NVIDIA e device 1c8d. Scansiona il payload RAW e stream LZMA, quindi estrae tutte le immagini della ROM fino al flag finale. E la versione ordinata e validata dello script di recupero fornito nei tentativi."),
+        p("Il punto di partenza e il pacchetto driver/firmware ufficiale HP per il portatile, estratto localmente fino al payload, per esempio 084C0.bin. Lo script Python non scarica nulla: cerca la signature PCI option ROM 55 aa, verifica PCIR, vendor NVIDIA e device 1c8d. Scansiona il payload RAW e stream LZMA, quindi estrae tutte le immagini della ROM fino al flag finale."),
         Preformatted(
             "python3 scripts/extract_gtx1050_rom.py /tmp/084C0.bin \\\n+  --device-id 1c8d \\\n+  --output /usr/share/kvm/gtx1050_hp_native.rom",
             code,
@@ -298,6 +305,7 @@ def build():
         p("ACPI: https://uefi.org/acpi/specs", styles["Small"]),
         p("Proxmox VE Administration Guide: https://pve.proxmox.com/pve-docs/pve-admin-guide.html", styles["Small"]),
         p("NVIDIA driver kernel modules: https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/kernel-modules.html", styles["Small"]),
+        p("NVIDIA GTX 1050 laptop / Pascal: https://www.nvidia.com/en-us/geforce/news/nvidia-geforce-gtx-1050-laptops/", styles["Small"]),
     ]
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     print(OUT)

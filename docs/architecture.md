@@ -11,6 +11,12 @@
 - **`_ROM`**: metodo ACPI standard che un driver puo invocare con offset e lunghezza per ottenere firmware di un dispositivo.
 - **`fw_cfg`**: canale QEMU per esporre piccoli blob al firmware/guest. Qui trasporta la VBIOS; non la interpreta.
 
+## Microarchitettura e perche Optimus cambia il problema
+
+La GPU di questo caso e una **GP107M**, variante laptop della microarchitettura NVIDIA **Pascal**, con PCI ID `10de:1c8d`, 640 CUDA core nella configurazione GTX 1050 e 4 GiB disponibili nel guest verificato. Il suffisso `M` indica la variante mobile. Non e pero il numero dei core a rendere complesso il passthrough: e la piattaforma Optimus.
+
+In Optimus la iGPU Intel controlla normalmente pannello interno e connettori video; la NVIDIA e un acceleratore PCIe render-only, acceso quando serve. Per questo una VM puo usare CUDA/OpenGL/Vulkan sulla GTX 1050 senza ottenere necessariamente un display DRM fisico. Inoltre il driver puo richiedere firmware e metodi ACPI che, su una GPU desktop, non sarebbero necessari. Questa soluzione e quindi mirata a NVIDIA mobile/Optimus e non promette compatibilita automatica con ogni GPU laptop.
+
 ## Perche `romfile` non bastava
 
 `romfile=...` rende una ROM disponibile nella configurazione PCI virtuale. Per molte GPU desktop e sufficiente. In un portatile Optimus, invece, il driver NVIDIA puo cercare la VBIOS attraverso il metodo ACPI `_ROM` del device e non attraverso quella finestra PCI. Per questo provare ROM scaricate, `rombar=1` o il solo `romfile` non ha risolto il problema.
@@ -53,4 +59,8 @@ Il cleanup e mirato alle chiavi e agli argomenti generati dallo script. Non camb
 
 `pre-enrolled-keys=0` nella configurazione Proxmox non e prova sufficiente dello stato attuale: e un marker del template EFI. Lo stato reale va letto dal guest, con `mokutil --sb-state` oppure dalla variabile EFI `SecureBoot-*`. Sul guest Ubuntu verificato, Secure Boot era attivo nonostante quel marker.
 
-Per disabilitarlo senza una interazione MOK, l'unico metodo automatizzabile e partire con nuove variabili OVMF senza chiavi pre-caricate. Lo script conserva quelle vecchie, prepara un fallback EFI bootabile e crea il nuovo `efidisk0`. Non modifica questa impostazione se l'utente non lo chiede esplicitamente in non-interattivo.
+Quando l'installatore driver usa DKMS, compila `nvidia.ko` localmente per il kernel del guest. Secure Boot blocca i moduli la cui firma non risale a una chiave fidata. DKMS puo generare una propria chiave e firmare il modulo, ma quel certificato deve essere importato nel database MOK: `mokutil` pianifica l'import e MOK Manager lo chiede al boot. SSH non puo automatizzare questo passaggio perche avviene prima dell'OS.
+
+Per disabilitarlo senza MOK, l'unico metodo automatizzabile e partire con nuove variabili OVMF senza chiavi pre-caricate. Lo script prepara un fallback EFI bootabile, fa backup raw e metadata dell'EFI disk e lascia che Proxmox registri il vecchio volume come `unused`, quindi crea il nuovo `efidisk0`. Mantiene il rollback fino a quando il nuovo EFI effettua un boot riuscito e il Guest Agent risponde; se non accade, tenta di spegnere la VM e riattacca l'EFI disk originario. Non modifica questa impostazione in non-interattivo senza `--disable-secure-boot`.
+
+Il meccanismo e stato verificato staticamente sul nodo Proxmox e con il prompt reale sul guest, ma la sostituzione effettiva dell'EFI disk non e stata lanciata sulla VM Ubuntu principale. Prima dell'uso reale creare quindi uno snapshot/backup e usare la console noVNC per la prima prova.
