@@ -23,6 +23,7 @@ def main() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     glossary = (ROOT / "docs" / "glossary.md").read_text(encoding="utf-8")
     walkthrough = (ROOT / "docs" / "acpi-line-by-line.md").read_text(encoding="utf-8")
+    runbook = (ROOT / "docs" / "reproducible-runbook.md").read_text(encoding="utf-8")
 
     require(
         glossary,
@@ -52,6 +53,7 @@ def main() -> None:
             "metodo ACPI _ROM(offset, length)",
             "0000:02:00.0",
             "docs/acpi-line-by-line.md",
+            "docs/reproducible-runbook.md",
             "scripts/validate_documentation.py",
         ),
         "README",
@@ -67,6 +69,21 @@ def main() -> None:
         ),
         "walkthrough",
     )
+    require(
+        runbook,
+        (
+            "## 1. Inventario non distruttivo del nodo",
+            "--prepare-host",
+            "--dry-run",
+            "gpu-vm-switch --self-test",
+            "qm guest exec",
+            "nvidia-smi --query-gpu=name,driver_version,memory.total",
+            "--mok-manual",
+            "nvidia-glxgears",
+            "Quando fermarsi",
+        ),
+        "runbook riproducibile",
+    )
 
     for local_path in (
         ROOT / "evidence" / "nvtop-glxgears-proof.png",
@@ -74,6 +91,7 @@ def main() -> None:
         ROOT / "docs" / "attempts-and-outcomes.md",
         ROOT / "docs" / "glossary.md",
         ROOT / "docs" / "acpi-line-by-line.md",
+        ROOT / "docs" / "reproducible-runbook.md",
     ):
         if not local_path.is_file():
             raise AssertionError(f"file locale mancante: {local_path.relative_to(ROOT)}")

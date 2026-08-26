@@ -61,6 +61,8 @@ gpu-vm-switch --prepare-host \
 
 Il comando è **idempotente**: una seconda esecuzione non riscrive la ROM identica, non duplica flag, moduli o ID PCI e non aggiorna l'initramfs se non è cambiato nulla. Il binding `vfio-pci.ids=10de:1c8d` opera per ID PCI: su una macchina con più GPU identiche va verificato con attenzione.
 
+La sequenza completa, con comandi di inventario, `--dry-run`, applicazione, reboot, verifica nodo/guest, MOK e rendering, è nel [runbook riproducibile](docs/reproducible-runbook.md). Seguilo nell'ordine: evita di modificare manualmente `hostpci` o `args` tra preflight e switch.
+
 Controlli dopo il reboot:
 
 ```bash
@@ -176,6 +178,19 @@ La difficoltà è lo **scope**. L'indirizzo PCI host `0000:02:00.0` non diventa 
 
 Per una spiegazione riga per riga delle opzioni Proxmox, dei blocchi ASL e dei passaggi dello script, leggi anche [walkthrough ACPI](docs/acpi-line-by-line.md). Il glossario è controllato da [`scripts/validate_documentation.py`](scripts/validate_documentation.py): verifica presenza dei termini obbligatori, diagrammi, riferimenti e hash della ROM; non sostituisce però la lettura tecnica delle fonti.
 
+## Riproducibilita: cosa prova ogni comando
+
+Non basta lanciare lo switch e leggere un messaggio di successo. La procedura riproducibile usa questa catena, ciascuna con un risultato verificabile:
+
+1. `sha256sum` della ROM e `lspci` confermano che firmware e dispositivo sono quelli attesi.
+2. `--prepare-host --dry-run` anticipa le modifiche; `--prepare-host` le applica in modo idempotente.
+3. Dopo il reboot, `/proc/cmdline`, `iommu_groups`, `vfio-pci` e `--self-test` provano i prerequisiti host.
+4. `--vm VMID --dry-run` elenca il proprietario; il comando senza `--dry-run` fa il trasferimento e cleanup.
+5. `qm config`, la SSDT `.aml`, QEMU Guest Agent e `nvidia-smi` provano rispettivamente configurazione, interfaccia ACPI e driver.
+6. `nvidia-glxgears` con `nvtop` prova il rendering sulla GPU, non soltanto la sua enumerazione.
+
+I comandi esatti, output attesi, varianti per un'altra GPU e condizioni in cui fermarsi sono nel [runbook](docs/reproducible-runbook.md). Il runbook distingue esplicitamente verifiche statiche/documentali da prova reale sul nodo/guest.
+
 ## Secure Boot e MOK: due percorsi, nessuna promessa falsa
 
 **MOK** significa *Machine Owner Key*. Il driver NVIDIA non “causa MOK” da solo: il caso tipico è `nvidia-dkms`, che compila il modulo kernel localmente. Con Secure Boot attivo il kernel carica solo moduli firmati da chiavi fidate. DKMS può firmare il modulo con una chiave propria, ma il suo certificato deve essere approvato dal firmware tramite MOK Manager, una schermata pre-boot.
@@ -219,6 +234,7 @@ scripts/gpu-vm-switch             setup host + switch idempotente + Secure Boot/
 scripts/extract_gtx1050_rom.py    estrazione VBIOS dal payload HP
 docs/architecture.md              lezione tecnica del workaround ACPI
 docs/acpi-line-by-line.md         spiegazione guidata riga per riga
+docs/reproducible-runbook.md      procedura completa e verificabile, senza passaggi impliciti
 docs/glossary.md                  glossario esteso di tutti i termini
 docs/attempts-and-outcomes.md     tentativi falliti, causa e correzione
 evidence/                         prova nvtop + glxgears

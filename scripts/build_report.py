@@ -260,6 +260,21 @@ def build():
         code,
     )]
     story += [p("Driver automatici: Ubuntu, Debian, Kali, Arch, Fedora, RHEL, Rocky e AlmaLinux. Per Debian la sorgente contrib non-free non-free-firmware e aggiunta solo se non e gia presente; la logica gestisce anche il formato Deb822. Il BIOS del laptop resta l'unico prerequisito non automatizzabile: VT-d/AMD-Vi deve essere attivo prima del boot Proxmox.")]
+    story += [h("5b. Procedura riproducibile e criteri di prova"), Preformatted(
+        "# nodo: prima di applicare\n"
+        "sha256sum firmware/gtx1050_hp_native.rom\n"
+        "lspci -nnk -s 0000:02:00.0\n"
+        "gpu-vm-switch --prepare-host --rom-source ./firmware/gtx1050_hp_native.rom --dry-run --yes\n"
+        "\n# nodo: applicazione e controllo dopo reboot\n"
+        "gpu-vm-switch --prepare-host --rom-source ./firmware/gtx1050_hp_native.rom --yes\n"
+        "cat /proc/cmdline; lspci -nnk -s 0000:02:00.0; gpu-vm-switch --self-test\n"
+        "\n# switch: simulazione, applicazione, prova driver\n"
+        "gpu-vm-switch --vm 1001 --dry-run --yes\n"
+        "gpu-vm-switch --vm 1001 --yes\n"
+        "qm guest exec 1001 -- /usr/bin/nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader",
+        code,
+    )]
+    story += [p("La sequenza e deliberatamente divisa in inventario, dry-run, applicazione e osservazione. Il risultato positivo richiede: hash ROM atteso, IOMMU e vfio-pci dopo reboot, self-test AML riuscito, hostpci con args SSDT/fw_cfg e nvidia-smi con exitcode 0. nvidia-glxgears e nvtop provano poi il rendering. Il runbook del repository aggiunge comandi esatti per QEMU Guest Agent, Secure Boot/MOK, prova Ubuntu -> Kali -> Ubuntu e condizioni in cui fermarsi; il validatore documentale non viene spacciato per prova hardware."), PageBreak()]
     story += [h("6. Secure Boot senza automazione fittizia")]
     story += [
         p(
