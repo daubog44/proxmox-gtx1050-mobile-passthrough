@@ -1,5 +1,7 @@
 tmp/
 *.rom
+!firmware/
+!firmware/*.rom
 *.aml
 *.asl
 __pycache__/

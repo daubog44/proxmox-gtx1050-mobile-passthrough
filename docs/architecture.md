@@ -1,66 +1,121 @@
-# Architettura della soluzione
+# Architettura: perché questa SSDT fa funzionare Optimus
 
-## Vocabolario essenziale
+## La differenza fra una GPU desktop e questa GPU laptop
 
-- **BDF**: indirizzo di un dispositivo PCI, formato `dominio:bus:device.funzione`. Per esempio `0000:02:00.0` identifica la funzione grafica della GTX 1050 sul nodo. La funzione `.1` e spesso l'audio HDMI/DP della stessa scheda.
-- **VBIOS**: firmware della GPU. Nei file si trova spesso con estensione `.rom`; in questo lavoro, ROM e VBIOS indicano lo stesso blob di firmware, ma “ROM” puo anche significare la finestra ROM hardware PCI.
-- **IOMMU/VFIO**: IOMMU isola la DMA; VFIO assegna un dispositivo PCI reale a QEMU senza che il driver host lo usi.
-- **ACPI**: tabelle firmware che descrivono hardware e metodi al sistema operativo.
-- **ASL / AML**: ASL e il linguaggio testuale ACPI; AML e il bytecode compilato caricato dal firmware. `iasl` compila `.asl` in `.aml`.
-- **SSDT**: una tabella ACPI aggiuntiva. Non sostituisce le tabelle del firmware: aggiunge o estende oggetti.
-- **`_ROM`**: metodo ACPI standard che un driver puo invocare con offset e lunghezza per ottenere firmware di un dispositivo.
-- **`fw_cfg`**: canale QEMU per esporre piccoli blob al firmware/guest. Qui trasporta la VBIOS; non la interpreta.
+Una GPU desktop collegata a uno slot PCIe autonomo espone normalmente la sua Option ROM sul bus. In molte VM basta assegnarla con `hostpci` e, se serve, indicare `romfile`. La GTX 1050 di questo caso è diversa: è una **GP107M mobile** in un HP Pavilion Laptop 15-cs1xxx. In un sistema Optimus muxless, il pannello interno è gestito dalla iGPU e la NVIDIA è coordinata da firmware/ACPI per alimentazione e rendering.
 
-## Microarchitettura e perche Optimus cambia il problema
-
-La GPU di questo caso e una **GP107M**, variante laptop della microarchitettura NVIDIA **Pascal**, con PCI ID `10de:1c8d`, 640 CUDA core nella configurazione GTX 1050 e 4 GiB disponibili nel guest verificato. Il suffisso `M` indica la variante mobile. Non e pero il numero dei core a rendere complesso il passthrough: e la piattaforma Optimus.
-
-In Optimus la iGPU Intel controlla normalmente pannello interno e connettori video; la NVIDIA e un acceleratore PCIe render-only, acceso quando serve. Per questo una VM puo usare CUDA/OpenGL/Vulkan sulla GTX 1050 senza ottenere necessariamente un display DRM fisico. Inoltre il driver puo richiedere firmware e metodi ACPI che, su una GPU desktop, non sarebbero necessari. Questa soluzione e quindi mirata a NVIDIA mobile/Optimus e non promette compatibilita automatica con ogni GPU laptop.
-
-## Perche `romfile` non bastava
-
-`romfile=...` rende una ROM disponibile nella configurazione PCI virtuale. Per molte GPU desktop e sufficiente. In un portatile Optimus, invece, il driver NVIDIA puo cercare la VBIOS attraverso il metodo ACPI `_ROM` del device e non attraverso quella finestra PCI. Per questo provare ROM scaricate, `rombar=1` o il solo `romfile` non ha risolto il problema.
-
-La soluzione finale trasporta **lo stesso file VBIOS OEM** nel canale QEMU `fw_cfg` e usa una SSDT che implementa `_ROM`: al primo accesso legge il blob da `fw_cfg`, lo mantiene in buffer e restituisce la porzione richiesta dal driver. `rombar=0` e voluto: il percorso affidabile e ACPI + `fw_cfg`.
-
-## Conversione PCI -> ACPI dinamica
-
-Il guest comunica la topologia PCI con `lspci -PP`. Un esempio e:
+Non significa che *tutte* le GPU Optimus richiedano questo workaround, né che le GPU desktop non possano avere casi particolari. Significa che qui il driver NVIDIA ha tentato di ottenere la VBIOS dal metodo ACPI `_ROM` del suo device. La semplice ROM BAR PCI non gli ha fornito il percorso atteso.
 
 ```text
-00:1c.0/01:00.0
+Passthrough desktop tipico
+  GPU PCI reale -> hostpci -> ROM PCI / romfile -> driver
+
+Questo caso Optimus
+  GPU PCI reale -> hostpci -> device ACPI -> _ROM(offset, length) -> driver
+                                     ^
+                                     SSDT aggiuntiva -> fw_cfg -> VBIOS OEM
 ```
 
-QEMU/ACPI usa nomi `Sxx` costruiti con `(slot * 8) + funzione` in esadecimale:
+La correzione non cambia il firmware della GPU. Trasporta la stessa VBIOS OEM attraverso un canale diverso e aggiunge l'interfaccia `_ROM` che il driver si aspetta.
+
+## I quattro pezzi della soluzione
+
+1. **VFIO e `hostpci`**: il nodo lascia la GPU a `vfio-pci`; Proxmox la espone a una sola VM per volta. La configurazione usa `pcie=1`, `rombar=0` e il nome della ROM OEM.
+2. **QEMU `fw_cfg`**: nelle `args` della VM il blob binario è reso disponibile come `opt/com.lion328/nvidia-rom`. QEMU non esegue né valida la VBIOS: la conserva e la espone come bytes.
+3. **SSDT AML**: QEMU carica il file compilato `.aml` con `-acpitable`. La SSDT vive accanto alla DSDT standard e aggiunge il metodo `_ROM` al device GPU già esistente.
+4. **Driver NVIDIA**: chiama `_ROM` con offset e lunghezza. La SSDT carica una sola volta il blob da `fw_cfg` nel buffer `FWBI` e restituisce la parte richiesta.
+
+Questo è il motivo per cui “passare il file ROM nel canale `fw_cfg`” e “aggiungere la SSDT” non sono alternative: il primo porta i dati, la seconda rende quei dati raggiungibili dal driver nel protocollo ACPI corretto. Senza SSDT il file rimane invisibile al driver; senza `fw_cfg` la SSDT non ha la VBIOS corretta da restituire.
+
+## ASL e AML, riga per riga concettuale
+
+Lo script genera una `.asl`, la compila con `iasl` e passa il risultato `.aml` a QEMU. La forma ridotta è:
+
+```asl
+DefinitionBlock ("", "SSDT", 1, "DOTLEG", "NVIDIAFU", 1)
+{
+    External (\_SB.PCI0, DeviceObj)
+    External (\_SB.PCI0.SE0.S00, DeviceObj)
+
+    Scope (\_SB.PCI0.SE0.S00)
+    {
+        Name (FWIT, 0)
+        Name (FWBI, Buffer () { 0 })
+        // OperationRegion + Field + RWRD/RDWD/RBUF leggono fw_cfg
+
+        Method (RINT, 0, Serialized)
+        {
+            // trova opt/com.lion328/nvidia-rom e copia i bytes in FWBI una volta
+        }
+
+        Method (_ROM, 2)
+        {
+            RINT ()
+            Return (Mid (FWBI, Arg0, Arg1))
+        }
+    }
+}
+```
+
+- `DefinitionBlock` identifica questa tabella come SSDT e assegna vendor/table ID; non modifica la DSDT.
+- `External` evita di ridefinire `PCI0` o la GPU. Dice al compilatore AML: “questo oggetto è già presente in un'altra tabella”.
+- `Scope` è essenziale: `_ROM` deve essere figlio del device che il driver associa alla GPU. Uno scope corretto ma riferito a un altro bridge è comunque un errore.
+- `FWIT` è un flag di inizializzazione; impedisce di ricopiare tutta la ROM a ogni chiamata.
+- `FWBI` è il buffer AML della VBIOS.
+- `OperationRegion` e `Field` descrivono registri I/O. In questa SSDT servono a percorrere la directory QEMU `fw_cfg`; `RWRD`, `RDWD` e `RBUF` sono routine di lettura word/dword/buffer.
+- `FISL` cerca nella directory il nome `opt/com.lion328/nvidia-rom`, ricavandone selettore e dimensione.
+- `RINT` seleziona quell'entry, legge il blob e lo copia in `FWBI`.
+- `_ROM` riceve `Arg0=offset` e `Arg1=length`, limita la lettura a 4096 byte per chiamata e restituisce `Mid(FWBI, Arg0, Local0)`. Se l'offset supera il buffer, restituisce un buffer vuoto della dimensione richiesta.
+
+Il file completo generato dal nodo è `/usr/share/kvm/optimus-gpu-switch/ssdt-<VMID>.asl`; il relativo `.aml` è il file realmente caricato. Può essere letto con `iasl -d file.aml`.
+
+## Perché il percorso PCI non è fissato nel codice
+
+Il BDF host `0000:02:00.0` descrive il laptop fisico, non il nome che QEMU assegna nella DSDT della VM. Dopo il primo avvio con `hostpci`, lo script chiede al guest:
+
+```bash
+lspci -PP -n -d 10de:1c8d
+# esempio: 00:1c.0/01:00.0
+```
+
+Ogni hop è tradotto nel nome che la DSDT Q35 usa per gli slot PCI: `slot * 8 + function`, in esadecimale, con prefisso `S`.
+
+| Hop PCI | Calcolo | Nome ACPI |
+| --- | --- | --- |
+| `1c.0` | `0x1c * 8 + 0 = 0xe0` | `SE0` |
+| `00.0` | `0x00 * 8 + 0 = 0x00` | `S00` |
+
+Lo scope diventa `\_SB.PCI0.SE0.S00`. Questo discovery dinamico è ciò che rende lo script riutilizzabile per alcune altre NVIDIA mobile: non risolve però una DSDT radicalmente differente, gruppi IOMMU sbagliati o una VBIOS OEM incompatibile.
+
+## Lifecycle e cleanup
 
 ```text
-1c.0 -> 0x1c * 8 + 0 = 0xe0 -> SE0
-00.0 -> 0x00 * 8 + 0 = 0x00 -> S00
+preparazione host idempotente
+  installa strumenti se mancanti
+  -> configura IOMMU/VFIO se necessario
+  -> installa ROM se differente
+  -> riavvio esplicito del nodo
+
+switch idempotente
+  individua proprietario GPU
+  -> stop VM sorgente, cleanup solo delle opzioni gestite
+  -> restart sorgente senza GPU se prima running
+  -> assegna hostpci alla destinazione
+  -> boot temporaneo + lspci -PP
+  -> ASL -> AML
+  -> boot finale con -acpitable e -fw_cfg
+  -> driver, nvidia-smi, benchmark
 ```
 
-Quindi lo scope target diventa `\_SB.PCI0.SE0.S00`. Lo script non lo fissa nel codice: assegna temporaneamente la GPU, legge la topologia reale, calcola il percorso e genera una SSDT per quella VM. Questo e il motivo per cui puo adattarsi anche ad altre NVIDIA mobile, pur restando necessario fornire BDF e VBIOS OEM corretti.
+Il cleanup non usa un “ripristino della VM” generico. Rimuove soltanto la chiave `hostpciN` che punta alla GPU selezionata, gli argomenti `-acpitable`/`-fw_cfg` generati, l'SSDT generata e `cpu=host,hidden=1` se è precisamente la scelta dello script. Non cambia firmware OVMF/SeaBIOS, chipset Q35, dischi o video virtuale.
 
-## Flusso di switch
+## Secure Boot e il confine dell'automazione
 
-```text
-GPU VFIO host
-  -> rimuovi configurazione Optimus dalla VM sorgente
-  -> riaccendi la sorgente senza GPU
-  -> collega hostpci alla destinazione
-  -> avvio temporaneo e discovery PCI/ACPI
-  -> genera SSDT AML
-  -> avvio finale con SSDT + fw_cfg(VBIOS)
-  -> driver NVIDIA, nvidia-smi, benchmark Xorg opzionale
-```
+La parte guest può installare driver, riavviare e leggere `mokutil`, ma MOK Manager è prima del kernel. Per questo ci sono due procedure volutamente separate:
 
-Il cleanup e mirato alle chiavi e agli argomenti generati dallo script. Non cambia automaticamente `machine`, `bios`, `vga` o altri componenti della VM: Kali puo rimanere SeaBIOS e Ubuntu OVMF.
+- `--mok-manual` conserva Secure Boot. Se DKMS crea un modulo firmato con chiave non fidata, lo script lascia l'assegnazione GPU intatta, segnala MOK e fornisce i certificati che riesce a trovare. L'utente completa l'import e l'enrollment nella console noVNC.
+- `--disable-secure-boot` sostituisce le variabili OVMF con un template senza chiavi, creando prima fallback, backup raw e rollback. È più automatizzabile ma è un cambio permanente della politica di boot e riduce una protezione di sicurezza.
 
-## Secure Boot
+L'host Ubuntu rilevato aveva Secure Boot attivo con `mokutil` anche quando la stringa Proxmox riportava `pre-enrolled-keys=0`: quel parametro non ricostruisce il contenuto delle vecchie variabili EFI già salvate. Il ramo “Secure Boot off” non è stato eseguito sulla Ubuntu principale, quindi non va considerato una prova runtime finché non viene testato con snapshot e console disponibile.
 
-`pre-enrolled-keys=0` nella configurazione Proxmox non e prova sufficiente dello stato attuale: e un marker del template EFI. Lo stato reale va letto dal guest, con `mokutil --sb-state` oppure dalla variabile EFI `SecureBoot-*`. Sul guest Ubuntu verificato, Secure Boot era attivo nonostante quel marker.
-
-Quando l'installatore driver usa DKMS, compila `nvidia.ko` localmente per il kernel del guest. Secure Boot blocca i moduli la cui firma non risale a una chiave fidata. DKMS puo generare una propria chiave e firmare il modulo, ma quel certificato deve essere importato nel database MOK: `mokutil` pianifica l'import e MOK Manager lo chiede al boot. SSH non puo automatizzare questo passaggio perche avviene prima dell'OS.
-
-Per disabilitarlo senza MOK, l'unico metodo automatizzabile e partire con nuove variabili OVMF senza chiavi pre-caricate. Lo script prepara un fallback EFI bootabile, fa backup raw e metadata dell'EFI disk e lascia che Proxmox registri il vecchio volume come `unused`, quindi crea il nuovo `efidisk0`. Mantiene il rollback fino a quando il nuovo EFI effettua un boot riuscito e il Guest Agent risponde; se non accade, tenta di spegnere la VM e riattacca l'EFI disk originario. Non modifica questa impostazione in non-interattivo senza `--disable-secure-boot`.
-
-Il meccanismo e stato verificato staticamente sul nodo Proxmox e con il prompt reale sul guest, ma la sostituzione effettiva dell'EFI disk non e stata lanciata sulla VM Ubuntu principale. Prima dell'uso reale creare quindi uno snapshot/backup e usare la console noVNC per la prima prova.
+Per definizioni più brevi, vedi [glossary.md](glossary.md). Per i tentativi falliti e le prove, vedi [attempts-and-outcomes.md](attempts-and-outcomes.md).

@@ -1,21 +1,33 @@
 # Tentativi, diagnosi e risultato
 
-| Tentativo | Risultato | Correzione / lezione |
+| Tentativo | Perché non bastava | Correzione o lezione |
 | --- | --- | --- |
-| ROM generiche o solo `romfile` / `rombar` | Il driver Optimus non otteneva la VBIOS nel percorso ACPI previsto. | Estrarre la VBIOS OEM HP e servirla tramite `_ROM`. |
-| Estrarre VBIOS da payload HP | Riuscito: payload con signature PCI ROM e device `10de:1c8d`. | Conservare una sola ROM OEM valida; non includerla nel repository. |
-| SSDT con percorso ACPI scritto a mano | Fragile quando bridge o funzione PCI cambiano. | Discovery con `lspci -PP` e conversione dinamica a `Sxx`. |
-| `glmark2` su SSH | `Could not initialize canvas`: una sessione SSH non ha un canvas X11. | Xorg NVIDIA headless sul display `:2`; `nvidia-glxgears` per FPS. |
-| `glmark2-es2-drm` | Il DRM virtuale/QXL usava llvmpipe; la NVIDIA render-only non offriva CRTC DRM. | Non e un test NVIDIA utile in questo layout muxless. |
-| Prima installazione driver Kali | Driver presente ma moduli non pronti senza headers/DKMS. | Installare headers, build tools, DKMS e riavviare prima di validare `nvidia-smi`. |
-| Repository Debian sempre riscritta | Non idempotente. | Cerca prima `contrib non-free non-free-firmware`, incluse sorgenti Deb822, e aggiunge solo se assenti. |
-| Secure Boot e DKMS | Il modulo NVIDIA compilato localmente non aveva ancora una firma fidata dal kernel. MOK appare prima del kernel e non e automatizzabile via SSH. | Prompt interattivo o flag esplicito per creare nuove variabili OVMF senza chiavi; rollback fino al primo boot verificato. |
-| `pre-enrolled-keys=0` | Il marker della config non descriveva lo stato UEFI gia salvato; `mokutil` indicava comunque Secure Boot attivo. | Leggere sempre lo stato dal guest e non dedurlo dal solo file di configurazione Proxmox. |
+| ROM generiche da Internet | Una VBIOS diversa può non contenere i dettagli OEM di alimentazione/piattaforma del laptop. | Usare la VBIOS HP originale estratta dal payload relativo al Pavilion 15-cs1xxx; è inclusa come riferimento privato in `firmware/`. |
+| Solo `romfile` e `rombar=1` | Espongono la ROM sul bus PCI virtuale, ma il driver Optimus in questo caso cercava ACPI `_ROM`. | Stessa VBIOS tramite `fw_cfg` più SSDT AML che implementa `_ROM`; `rombar=0` intenzionale. |
+| SSDT con percorso ACPI manuale | Un bridge PCI o una funzione diversa cambia lo scope e rende `_ROM` invisibile al device corretto. | Prima accensione, `lspci -PP`, conversione `slot * 8 + funzione` e SSDT per VM. |
+| `glmark2` da SSH | `Could not initialize canvas`: non esiste un display X11 nella shell SSH. | Xorg NVIDIA headless sul display `:2`, quindi `nvidia-glxgears` per la prova FPS. |
+| `glmark2-es2-drm` | Il DRM virtuale/QXL può usare llvmpipe; una GPU muxless render-only non fornisce un CRTC adatto. | Non usarlo come prova NVIDIA in questa topologia; usare `nvidia-smi`, `nvtop` e GLX sul display NVIDIA. |
+| Prima installazione driver Kali | Headers/build tools/DKMS non erano pronti per il kernel. | Installare headers, build tools, DKMS, driver e riavviare prima di leggere `nvidia-smi`. |
+| Repository Debian/Kali riscritta ogni volta | Non era idempotente e poteva duplicare sorgenti APT. | Cerca prima `contrib non-free non-free-firmware`, anche in formato Deb822; aggiunge la source soltanto se assente. |
+| Setup host manuale disperso | Facile dimenticare `iasl`, `pciutils`, kernel cmdline, initramfs o binding VFIO. | `gpu-vm-switch --prepare-host` installa/configura soltanto ciò che manca e richiede reboot esplicito. |
+| Secure Boot con DKMS | Modulo locale firmato da una chiave non ancora fidata; la conferma MOK è pre-boot. | `--mok-manual` conserva Secure Boot e guida il passaggio noVNC; alternativa `--disable-secure-boot` solo OVMF/4m. |
+| Deducere Secure Boot da `pre-enrolled-keys=0` | Il marker config non descrive per forza le variabili EFI già salvate. | Leggere il guest con `mokutil --sb-state` o variabile `SecureBoot-*`. |
 
 ## Prova finale
 
-Lo screenshot `evidence/nvtop-glxgears-proof.png` mostra il processo `/usr/bin/glxgears` al 99% GPU, il display Xorg NVIDIA `:2`, 4 GiB di VRAM disponibili e temperatura di 73 C. E una prova di rendering sulla GPU reale, non solo di enumerazione da `nvidia-smi`.
+![nvtop e glxgears sulla GPU reale](../evidence/nvtop-glxgears-proof.png)
 
-## Limite della verifica Secure Boot
+Lo screenshot mostra `/usr/bin/glxgears` al 99% GPU, Xorg NVIDIA sul display `:2`, circa 4 GiB di VRAM visibili e temperatura 73 °C. I campioni di output erano:
 
-Sono stati verificati lo stato reale, il prompt, il rollback nel codice e il self-test SSDT. La sostituzione dell'EFI disk non e stata eseguita sulla VM Ubuntu principale: la prima esecuzione reale va trattata come un cambio firmware, con snapshot/backup e console noVNC pronta.
+```text
+120907 frames in 5.0 seconds = 24181.367 FPS
+125006 frames in 5.0 seconds = 25001.096 FPS
+```
+
+È una prova di rendering della GPU reale, non soltanto di enumerazione da `nvidia-smi`.
+
+## Limite rimasto: Secure Boot off
+
+Sono stati verificati: stato Secure Boot reale sul guest, prompt interattivo, sintassi, self-test SSDT, codice di backup e tentativo di rollback prima del primo Guest Agent. La sostituzione dell'EFI disk per `--disable-secure-boot` **non è stata eseguita sulla VM Ubuntu principale**. La prima esecuzione va trattata come modifica firmware: backup/snapshot, console noVNC disponibile e nessun dato non salvato nella VM.
+
+MOK non è “un bug da automatizzare”: per disegno è una conferma davanti al firmware, prima che rete, SSH e QEMU Guest Agent esistano. Il supporto corretto è rendere visibile il certificato e i passaggi, lasciare la GPU già configurata in modo idempotente e far completare all'utente l'enrollment in console.

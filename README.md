@@ -1,105 +1,68 @@
 # GTX 1050 Mobile Optimus passthrough su Proxmox
 
-Repository riproducibile del recupero del passthrough PCIe della NVIDIA GTX 1050 Mobile in un portatile HP, con Proxmox come host e VM Linux come guest.
+Repository didattico e operativo per assegnare la GPU NVIDIA discreta di un portatile HP a una VM Linux Proxmox. Il caso recuperato qui non è un normale passthrough desktop: è una GPU **NVIDIA Optimus/mobile** a cui il driver richiede la VBIOS attraverso ACPI.
 
-## Esito verificato
+> Stato onesto: Ubuntu ha usato la GTX 1050 con driver `580.173.02`, `nvidia-smi` e `glxgears` sulla GPU reale. Il passaggio Ubuntu -> Kali -> Ubuntu è stato verificato. Il ramo che sostituisce l'EFI disk per disabilitare Secure Boot è stato controllato nel codice e con il prompt reale, ma **non è stato eseguito sulla VM Ubuntu principale**: prima prova con snapshot e noVNC aperto.
 
-- GPU host: NVIDIA GP107M / GTX 1050 Mobile, PCI ID `10de:1c8d`, BDF host `0000:02:00.0`.
-- VBIOS OEM valida: 169472 byte, versione `86.07.5F.00.2C`, conservata sul nodo come `/usr/share/kvm/gtx1050_hp_native.rom`.
-- Ubuntu riceve la GPU, usa il driver NVIDIA proprietario `580.173.02` e vede 4096 MiB con `nvidia-smi`.
-- Il benchmark `nvidia-glxgears` ha renderizzato sul display X NVIDIA headless con circa 24-25 mila FPS. Lo screenshot [nvtop-glxgears-proof.png](evidence/nvtop-glxgears-proof.png) mostra `glxgears` al 99% GPU e il processo Xorg sul display `:2`.
-- Lo switch Ubuntu -> Kali -> Ubuntu e stato verificato. Kali usa SeaBIOS; Ubuntu usa OVMF/Q35. Lo script non converte automaticamente firmware o chipset.
+![Prova finale: nvtop mostra glxgears al 99% della GTX 1050 e Xorg NVIDIA sul display :2](evidence/nvtop-glxgears-proof.png)
 
-Il PDF completo e [output/pdf/relazione-passthrough-gtx1050.pdf](output/pdf/relazione-passthrough-gtx1050.pdf).
+## Macchina verificata e perimetro
 
-## Obiettivo hardware: Pascal mobile e Optimus
+| Voce | Valore osservato |
+| --- | --- |
+| Portatile | HP Pavilion Laptop **15-cs1xxx** |
+| Scheda madre | HP `856A` |
+| GPU | NVIDIA GP107M GeForce GTX 1050 Mobile (Pascal) |
+| PCI host | BDF `0000:02:00.0`, ID `10de:1c8d`, driver host `vfio-pci` |
+| VBIOS OEM | `86.07.5F.00.2C`, 169472 byte, SHA-256 `33abd3bc3f658b0536da0617a76076b56e5af124701271211d6d127cda22c322` |
+| Host | Proxmox VE 9.1.5, kernel `6.17.9-1-pve` |
+| Guest validati | Ubuntu OVMF/Q35 e Kali SeaBIOS/Q35 |
 
-Questa soluzione nasce per la **NVIDIA GP107M GTX 1050 Mobile**, cioe una GPU laptop della famiglia **Pascal**, identificata dal PCI ID `10de:1c8d`. La variante GTX 1050 laptop ha 640 CUDA core e fino a 4 GB di GDDR5; in questa macchina sono verificati 4 GiB. In un portatile **Optimus** la GPU discreta esegue il rendering, mentre il pannello interno e normalmente collegato alla iGPU Intel: e una GPU render-only e non una scheda desktop che possiede direttamente il display.
+La GTX 1050 laptop usa la microarchitettura **Pascal** e ha 640 CUDA core; in questa VM sono stati visti 4 GiB di VRAM. Il dettaglio decisivo non è il numero dei core ma l'architettura **Optimus muxless**: il pannello interno resta collegato alla iGPU Intel, mentre la NVIDIA è un acceleratore PCIe render-only. Perciò può elaborare CUDA/OpenGL/Vulkan senza possedere un display fisico o un CRTC DRM assegnabile.
 
-Lo script e pensato soprattutto per NVIDIA mobile/Optimus che richiedono VBIOS tramite ACPI `_ROM`. Puo adattarsi ad altre NVIDIA mobile perche scopre il percorso PCI/ACPI, ma non e universale: per ogni GPU servono IOMMU/VFIO, BDF corretto, VBIOS OEM del medesimo portatile, Q35, Guest Agent e una topologia ACPI compatibile. Non usare una ROM casuale di una GPU desktop o di un altro produttore.
+Questa procedura è progettata soprattutto per NVIDIA mobile/Optimus con richiesta ACPI `_ROM`. Può essere adattata ad altre GPU mobile, ma non è perfetta né universale: occorrono topologia compatibile, IOMMU, BDF, VBIOS OEM della stessa macchina e test reale. Se un altro portatile dà errori, va analizzato e il generatore SSDT potrebbe dover essere modificato; non usare una ROM casuale desktop o di un altro produttore.
 
-## Contenuto
+## Prima di iniziare: cosa serve davvero
 
-```text
-scripts/gpu-vm-switch          switch idempotente per Proxmox
-scripts/extract_gtx1050_rom.py estrattore della VBIOS dal payload HP
-docs/architecture.md           spiegazione ACPI, SSDT, fw_cfg e _ROM
-docs/attempts-and-outcomes.md  tentativi, fallimenti e correzioni
-evidence/                      prova visiva nvtop + glxgears
-output/pdf/                    relazione PDF verificata visivamente
-```
+### 1. Firmware del portatile: operazione manuale
 
-La VBIOS OEM non e nel repository: e firmware proprietario HP/NVIDIA. Si genera sul proprio nodo con lo script di estrazione e non va sostituita con una ROM generica presa da Internet.
+Nel BIOS/UEFI del portatile devono essere abilitati virtualizzazione CPU e IOMMU: su Intel di solito **Intel VT-d**, su AMD **AMD-Vi/IOMMU**. Uno script Linux non può cambiare il BIOS del portatile in modo affidabile: questo è l'unico prerequisito host che va verificato manualmente. Dopo il boot Proxmox deve esistere `/sys/kernel/iommu_groups`.
 
-## Installazione dello switch
+### 2. Preparazione idempotente del nodo Proxmox
 
-Sul nodo Proxmox, dopo aver copiato la VBIOS nel percorso previsto:
+Dal clone di questo repository, sul nodo Proxmox:
 
 ```bash
 install -m 0750 scripts/gpu-vm-switch /usr/local/sbin/gpu-vm-switch
-gpu-vm-switch --self-test
-gpu-vm-switch --help
+
+# Installa solo acpica-tools/pciutils mancanti, copia la ROM se differente,
+# aggiunge IOMMU e vfio-pci solo se necessari, aggiorna initramfs e segnala il reboot.
+gpu-vm-switch --prepare-host \
+  --rom-source ./firmware/gtx1050_hp_native.rom --yes
+
+# Solo se il comando segnala un riavvio richiesto; questo riavvia davvero il nodo.
+gpu-vm-switch --prepare-host \
+  --rom-source ./firmware/gtx1050_hp_native.rom --reboot --yes
 ```
 
-Prerequisiti: IOMMU/VFIO gia attivo sull'host, `acpica-tools`, `pciutils`, Q35 nella VM, QEMU Guest Agent funzionante e una VBIOS OEM coerente con la GPU. Lo script supporta automaticamente Ubuntu, Debian, Kali, Arch, Fedora, RHEL, Rocky e AlmaLinux; per distribuzioni diverse usare `--skip-drivers`.
+`--prepare-host` rileva Intel/AMD, aggiorna `/etc/kernel/cmdline` con `intel_iommu=on` o `amd_iommu=on` più `iommu=pt` quando il nodo usa `proxmox-boot-tool`; altrimenti aggiorna la riga GRUB. Crea o aggiorna soltanto il proprio file `/etc/modprobe.d/gpu-vm-switch-vfio.conf`, conservando gli ID già gestiti, aggiunge i tre moduli VFIO a `/etc/modules` solo se assenti e rigenera l'initramfs solo se occorre. Non scollega a caldo la GPU e non riavvia senza `--reboot`.
 
-## Uso
+Il comando è **idempotente**: una seconda esecuzione non riscrive la ROM identica, non duplica flag, moduli o ID PCI e non aggiorna l'initramfs se non è cambiato nulla. Il binding `vfio-pci.ids=10de:1c8d` opera per ID PCI: su una macchina con più GPU identiche va verificato con attenzione.
+
+Controlli dopo il reboot:
 
 ```bash
-# Menu numerato delle VM; la modalita interattiva chiede prima Secure Boot se attivo.
-gpu-vm-switch
-
-# Passaggio automatico alla VM 1001.
-gpu-vm-switch --vm 1001 --yes
-
-# Vedere cosa farebbe, senza modificare nulla.
-gpu-vm-switch --vm 1001 --dry-run --yes
-
-# Usare un'altra NVIDIA mobile e la sua VBIOS OEM.
-gpu-vm-switch --gpu 0000:03:00 --rom /usr/share/kvm/altra-oem.rom --vm 123 --yes
-
-# Driver gia predisposto manualmente nel guest.
-gpu-vm-switch --vm 123 --skip-drivers --yes
+cat /proc/cmdline                 # deve contenere intel_iommu=on oppure amd_iommu=on e iommu=pt
+test -d /sys/kernel/iommu_groups && echo IOMMU-ok
+lspci -nnk -s 02:00.0            # deve indicare Kernel driver in use: vfio-pci
+gpu-vm-switch --self-test        # compila e disassembla una SSDT di test
 ```
 
-Lo script trova chi possiede gia la GPU, spegne ordinatamente quella VM, rimuove `hostpci`, `romfile`, `rombar`, SSDT, `fw_cfg` e le opzioni CPU generate da lui, poi riaccende la sorgente senza GPU. La VM di destinazione viene avviata una prima volta per trovare dinamicamente il percorso ACPI, quindi riavviata con SSDT e VBIOS. Se la GPU e gia configurata e `nvidia-smi` funziona, non modifica ne riavvia nulla.
+### 3. ROM/VBIOS OEM
 
-## Secure Boot e MOK
+La ROM impiegata in questo caso è inclusa come [`firmware/gtx1050_hp_native.rom`](firmware/gtx1050_hp_native.rom): è il blob estratto dal payload originale HP per questo Pavilion e coincide byte per byte con quello provato sul nodo. Va trattata come firmware OEM, non come una ROM generica riutilizzabile: tieni il repository privato, verifica la licenza del pacchetto HP e sostituiscila con una ROM della **tua** GPU per qualsiasi altra macchina.
 
-**MOK** significa *Machine Owner Key*. Il problema non e il driver NVIDIA in se: quando il pacchetto installa un modulo tramite **DKMS**, compila il modulo per il kernel del guest. Con Secure Boot attivo, il kernel accetta soltanto moduli firmati da una chiave fidata. DKMS puo creare una coppia di chiavi propria e firmare il modulo, ma UEFI deve prima fidarsi del suo certificato: per questo `mokutil` programma la registrazione e MOK Manager chiede conferma al riavvio, prima del kernel.
-
-Quindi l'installazione driver provoca MOK solo nella combinazione “modulo DKMS locale + Secure Boot attivo + chiave non ancora fidata”. Un modulo gia firmato dalla distribuzione puo non richiederlo. MOK non e controllabile via SSH o QEMU Guest Agent, perche la schermata e pre-avvio. Per gestire la scelta, lo script offre due comportamenti:
-
-- in modalita interattiva, se il guest rileva Secure Boot attivo, chiede se disabilitarlo;
-- in modalita non interattiva non cambia mai Secure Boot senza `--disable-secure-boot`.
-
-```bash
-gpu-vm-switch --vm 123 --disable-secure-boot --yes
-```
-
-Questa opzione e **permanente**, non temporanea. Funziona solo con OVMF e `efidisk0` di tipo `4m`: Proxmox sostituisce il disco delle variabili EFI usando il template senza chiavi pre-registrate. Lo script crea prima `EFI/BOOT/BOOTX64.EFI`, salva una copia raw e i metadati in `/usr/share/kvm/optimus-gpu-switch/efi-backups/` e Proxmox conserva il volume precedente come `unused` della VM. Con Secure Boot effettivamente disattivato il kernel non richiede piu una chiave MOK per caricare il modulo DKMS.
-
-Il cambio **non e stato eseguito sulla Ubuntu principale**: sono stati verificati il rilevamento reale (`mokutil` ha riportato Secure Boot attivo), il prompt interattivo rifiutato, l'idempotenza e la sintassi/SSDT. Prima del primo uso reale fare uno snapshot o backup e avere la console noVNC disponibile. Lo script mantiene il rollback attivo fino a quando il nuovo EFI completa il primo boot e il Guest Agent risponde; se fallisce prima, spegne la VM e ripristina `efidisk0` originale. Dopo il boot riuscito conserva il backup invece di riattivare automaticamente Secure Boot.
-
-Per mantenere Secure Boot, rispondere `n` e completare manualmente MOK nella console della VM. Non alternare automaticamente “off/on”: riattivandolo, il modulo DKMS richiederebbe di nuovo una chiave fidata.
-
-## Benchmark e monitoraggio
-
-`glmark2` via SSH falliva correttamente: richiede un canvas X11 e una sessione SSH non ha `DISPLAY`. Nel guest Ubuntu e stato creato un Xorg NVIDIA isolato sul display `:2` e installato il wrapper:
-
-```bash
-nvidia-glxgears       # tre ingranaggi rotanti; stampa FPS ogni cinque secondi
-watch -n 1 nvidia-smi # monitor sintetico
-nvtop                 # uso GPU, memoria, processi e grafico
-```
-
-`htop` legge CPU e RAM del sistema operativo, non i contatori NVIDIA: per questo non mostra il carico della GPU.
-
-## Estrazione VBIOS
-
-Il codice in `scripts/extract_gtx1050_rom.py` e la versione corretta e formattata dello script di recupero fornito nei tentativi precedenti. Il punto di partenza e il **pacchetto driver/firmware originale HP**, scaricato dal sito del produttore per il modello del portatile e poi estratto localmente fino al payload, ad esempio `084C0.bin`. Lo script Python non scarica nulla e non inventa una ROM: analizza quel payload OEM.
-
-Cerca signature PCI option ROM (`55 aa`), legge `PCIR`, verifica vendor NVIDIA e device ID `1c8d`, ricostruisce tutte le immagini legacy/GOP della ROM e controlla anche stream LZMA incorporati. Solo se il device ID coincide scrive `/usr/share/kvm/gtx1050_hp_native.rom`.
+Il comando `--prepare-host --rom-source ...` la installa, senza sovrascrivere se l'hash è già identico, in `/usr/share/kvm/gtx1050_hp_native.rom`. Se la ROM va estratta di nuovo dal pacchetto HP, usa:
 
 ```bash
 python3 scripts/extract_gtx1050_rom.py /tmp/084C0.bin \
@@ -107,14 +70,122 @@ python3 scripts/extract_gtx1050_rom.py /tmp/084C0.bin \
   --output /usr/share/kvm/gtx1050_hp_native.rom
 ```
 
-Usare `--force` soltanto dopo avere confrontato BDF, PCI ID e provenienza del payload. Se il file non contiene il device, provare l'altro payload HP indicato dal pacchetto firmware.
+Lo script Python non scarica né inventa firmware: cerca `55 aa`, l'header `PCIR`, vendor NVIDIA e device `1c8d` nel payload RAW e negli stream LZMA, poi ricostruisce le immagini Legacy/GOP fino al flag finale. Il payload di partenza era stato estratto localmente dal pacchetto driver/firmware ufficiale HP relativo al portatile.
 
-## Fonti e limiti
+### 4. VM e guest
 
-- [QEMU fw_cfg](https://qemu-project.gitlab.io/qemu/specs/fw_cfg.html)
-- [Specifiche ACPI UEFI](https://uefi.org/acpi/specs)
-- [Documentazione Proxmox su EFI/OVMF](https://pve.proxmox.com/pve-docs/pve-admin-guide.html)
-- [Guida NVIDIA ai moduli driver](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/kernel-modules.html)
-- [NVIDIA GTX 10 Series Laptop / Pascal](https://www.nvidia.com/en-us/geforce/news/nvidia-geforce-gtx-1050-laptops/)
+La VM di destinazione deve usare **Q35** e il **QEMU Guest Agent**. Può mantenere il proprio firmware: Ubuntu qui usa OVMF, Kali SeaBIOS; lo script non cambia `bios`, `machine`, `vga`, memoria o dischi. Lo switch gestisce driver per Ubuntu, Debian, Kali, Arch, Fedora, RHEL, Rocky e AlmaLinux. Per altre distribuzioni si usa `--skip-drivers` e si installa il driver secondo la documentazione della distro.
 
-E stato fornito anche un link a una chat Gemini. Dal contesto di lavoro non era leggibile; le informazioni verificabili usate qui sono quelle osservate sul nodo/guest e il codice di estrazione incluso nella richiesta.
+## Uso quotidiano dello switch
+
+```bash
+# Menu numerato delle VM e domanda Secure Boot quando utile.
+gpu-vm-switch
+
+# Sposta la GPU alla VM 1001. Se la GPU è già pronta, non cambia nulla.
+gpu-vm-switch --vm 1001 --yes
+
+# Simula proprietario attuale e destinazione: nessuna modifica.
+gpu-vm-switch --vm 1001 --dry-run --yes
+
+# Altra NVIDIA mobile: BDF senza .funzione e VBIOS OEM corrispondente.
+gpu-vm-switch --gpu 0000:03:00 --rom /usr/share/kvm/altra-oem.rom --vm 123 --yes
+
+# Driver già preparato manualmente.
+gpu-vm-switch --vm 123 --skip-drivers --yes
+```
+
+Il flusso è:
+
+1. Cerca in tutte le VM chi ha `hostpci` per quella GPU.
+2. Arresta con `qm shutdown` le sole VM coinvolte.
+3. Rimuove dalla sorgente soltanto `hostpci`, `romfile`, `rombar`, `-acpitable`, `-fw_cfg` e `cpu=host,hidden=1` generati da questo strumento; riaccende la sorgente, se era accesa, senza GPU.
+4. Collega la GPU alla destinazione con `rombar=0`, avvia una volta, scopre il percorso PCI/ACPI e genera la SSDT `.aml` specifica.
+5. Riavvia la destinazione con SSDT e VBIOS, installa/verifica il driver e riattiva il benchmark opzionale.
+
+È idempotente in due sensi: una GPU già pronta (`hostpci` + SSDT + `fw_cfg` + `nvidia-smi`) non provoca né scritture né riavvii; se la configurazione esiste ma il driver è bloccato da MOK, lascia la configurazione invariata e verifica solo driver/MOK, senza ripetere un trasferimento distruttivo.
+
+Il comando completo è disponibile con `gpu-vm-switch --help`.
+
+## Perché il solo passthrough PCI non basta in Optimus
+
+Con una scheda desktop, `hostpci` e talvolta `romfile=...` esponendo la finestra ROM PCI possono bastare. Qui no. Su un portatile Optimus il driver NVIDIA può chiedere la VBIOS al firmware della scheda madre tramite il metodo ACPI standard **`_ROM(offset, length)`** associato al device ACPI della GPU. Questo riflette la progettazione laptop: alimentazione, muxless graphics e firmware sono coordinati dalla piattaforma ACPI, non solo dal bus PCIe.
+
+`rombar=1` rende una ROM nella configurazione PCI virtuale, ma non crea quel metodo ACPI. Per questo i tentativi con sole ROM/`romfile`/`rombar` non hanno inizializzato il driver. Il workaround consegna **lo stesso blob VBIOS OEM** a QEMU tramite `fw_cfg`, poi aggiunge una SSDT compilata che implementa `_ROM` sul device GPU corretto:
+
+```text
+file .rom OEM -> QEMU fw_cfg -> SSDT AML -> _ROM(offset, length) -> driver NVIDIA
+```
+
+`fw_cfg` è solo un canale QEMU per byte; non capisce NVIDIA. La SSDT legge il blob una volta, lo tiene in un buffer AML e restituisce al driver la fetta richiesta. Quindi VBIOS e file `.rom` qui sono lo stesso firmware, mentre `rombar` è un'altra cosa: la finestra ROM PCI emulata.
+
+### Mini lezione ACPI, SSDT, ASL e AML
+
+ACPI è il linguaggio con cui firmware e sistema operativo descrivono hardware e metodi. La **DSDT** è la tabella principale del firmware; una **SSDT** è una tabella aggiuntiva che aggiunge o estende oggetti. Non si modifica la DSDT originale: QEMU carica una SSDT extra con `-acpitable`.
+
+- **ASL** (`.asl`) è il sorgente leggibile, simile a un piccolo linguaggio ad albero.
+- **AML** (`.aml`) è il bytecode compilato da `iasl`, quello che firmware/OS eseguono.
+- `External (\_SB.PCI0..., DeviceObj)` dichiara che il device esiste già nella DSDT.
+- `Scope (...)` apre quel device; `Method (_ROM, 2)` definisce la funzione che il driver cerca con due argomenti, offset e lunghezza.
+- `OperationRegion`, `Field`, `RWRD`, `RDWD`, `RBUF` sono il piccolo lettore AML del catalogo QEMU `fw_cfg`; `RINT` trova il blob `opt/com.lion328/nvidia-rom` e lo mette in `FWBI`.
+- `Mid(FWBI, Arg0, Local0)` restituisce i byte da `Arg0` per `Local0` byte: questa è la risposta `_ROM`.
+
+La difficoltà è lo **scope**. L'indirizzo PCI host `0000:02:00.0` non diventa automaticamente un percorso ACPI del guest. Nel guest `lspci -PP` può mostrare `00:1c.0/01:00.0`; ogni hop diventa `Sxx` con `slot * 8 + funzione`: `1c.0 -> 0xe0 -> SE0`, `00.0 -> S00`, quindi `\_SB.PCI0.SE0.S00`. Lo script fa discovery in una prima accensione e compila la SSDT per la topologia reale della VM, invece di fissare un valore a mano. Dettaglio completo: [architettura](docs/architecture.md) e [glossario](docs/glossary.md).
+
+## Secure Boot e MOK: due percorsi, nessuna promessa falsa
+
+**MOK** significa *Machine Owner Key*. Il driver NVIDIA non “causa MOK” da solo: il caso tipico è `nvidia-dkms`, che compila il modulo kernel localmente. Con Secure Boot attivo il kernel carica solo moduli firmati da chiavi fidate. DKMS può firmare il modulo con una chiave propria, ma il suo certificato deve essere approvato dal firmware tramite MOK Manager, una schermata pre-boot.
+
+`mokutil` può programmare l'import, ma SSH e QEMU Guest Agent non possono premere la schermata pre-boot. Lo script offre quindi due scelte esplicite:
+
+```bash
+# A. Conserva Secure Boot. Il tool non tenta di automatizzare ciò che è pre-boot:
+# se necessario indica i certificati trovati e i passaggi da completare in noVNC.
+gpu-vm-switch --vm 1001 --mok-manual
+
+# B. Solo OVMF + efidisk0 4m: disabilita Secure Boot in modo permanente,
+# fa backup EFI e rollback fino al primo boot riuscito. Non è un toggle temporaneo.
+gpu-vm-switch --vm 1001 --disable-secure-boot --yes
+```
+
+Per il percorso A, dopo che lo script indica che il modulo non è pronto, apri la console **noVNC** della VM: nel guest importa il certificato DKMS indicato (ad esempio `sudo mokutil --import /percorso/al/certificato.der`), scegli una password temporanea, riavvia e in MOK Manager seleziona **Enroll MOK -> Continue -> Yes**, inserendo quella password. Al boot successivo ripeti `gpu-vm-switch --vm 1001 --mok-manual`; se il driver era già firmato dalla distribuzione, MOK potrebbe non essere necessario.
+
+Il percorso B prepara `EFI/BOOT/BOOTX64.EFI`, salva copia raw e metadata in `/usr/share/kvm/optimus-gpu-switch/efi-backups/` e sostituisce solo le variabili OVMF con un template senza chiavi pre-caricate. Il vecchio EFI disk resta `unused` e lo script tenta il rollback prima del primo boot con Guest Agent se il nuovo avvio fallisce. Riduce la protezione della catena di boot e, soprattutto, **non è stato ancora testato eseguendolo sulla Ubuntu principale**. Fare snapshot/backup e tenere noVNC aperto prima di usarlo.
+
+## Driver, benchmark e monitoraggio
+
+`glmark2` via SSH restituisce `Could not initialize canvas` perché una shell SSH non ha un display X11 (`DISPLAY`). In questo caso è stato creato Xorg NVIDIA headless su `:2`, quindi il test richiesto con gli ingranaggi e FPS è:
+
+```bash
+nvidia-glxgears
+# 120907 frames in 5.0 seconds = 24181.367 FPS
+# 125006 frames in 5.0 seconds = 25001.096 FPS
+
+watch -n 1 nvidia-smi
+nvtop
+```
+
+`htop` vede processi, CPU e RAM del sistema operativo, non i contatori proprietari NVIDIA; per GPU, VRAM e processi usare `nvidia-smi` o `nvtop`. `glmark2-es2-drm` non è un buon test in questa topologia muxless: può finire sul DRM virtuale/QXL e `llvmpipe`, non sulla NVIDIA.
+
+## Contenuto e studio
+
+```text
+firmware/gtx1050_hp_native.rom    VBIOS OEM verificata per questo HP
+scripts/gpu-vm-switch             setup host + switch idempotente + Secure Boot/MOK
+scripts/extract_gtx1050_rom.py    estrazione VBIOS dal payload HP
+docs/architecture.md              lezione tecnica del workaround ACPI
+docs/glossary.md                  glossario esteso di tutti i termini
+docs/attempts-and-outcomes.md     tentativi falliti, causa e correzione
+evidence/                         prova nvtop + glxgears
+output/pdf/                       relazione tecnica con fonti
+```
+
+Risorse consigliate, dall'ordine più pratico al più profondo:
+
+1. [Guida amministrativa Proxmox VE](https://pve.proxmox.com/pve-docs/pve-admin-guide.html) e documentazione PCI passthrough/VFIO di Proxmox.
+2. [Documentazione Linux kernel VFIO](https://docs.kernel.org/driver-api/vfio.html) per IOMMU, gruppi e DMA.
+3. [Specifiche QEMU fw_cfg](https://qemu-project.gitlab.io/qemu/specs/fw_cfg.html) per il canale usato qui.
+4. [Specifiche ACPI UEFI](https://uefi.org/acpi/specs) e [ACPICA/iasl](https://acpica.org/) per leggere e compilare ASL/AML.
+5. [NVIDIA: moduli kernel driver](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/kernel-modules.html) e [GTX 10 Laptop/Pascal](https://www.nvidia.com/en-us/geforce/news/nvidia-geforce-gtx-1050-laptops/).
+
+Il PDF [relazione-passthrough-gtx1050.pdf](output/pdf/relazione-passthrough-gtx1050.pdf) raccoglie il percorso tecnico, il glossario sintetico, i prerequisiti, le verifiche e le fonti.

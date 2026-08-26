@@ -14,10 +14,16 @@ ASSUME_YES=0
 DRY_RUN=0
 SELF_TEST=0
 DISABLE_SECURE_BOOT=0
+MOK_MANUAL=0
+HOST_PREP=0
+REBOOT_HOST=0
+ROM_SOURCE=''
 GPU_PCI_ID=''
 RESTART_VMS=''
 EFI_RECOVERY_VM=''
 EFI_RECOVERY_DISK=''
+HOST_REBOOT_REQUIRED=0
+VFIO_CHANGED=0
 
 die() { echo "Errore: $*" >&2; exit 1; }
 note() { echo "==> $*"; }
@@ -37,16 +43,21 @@ Uso:
   gpu-vm-switch                         menu interattivo delle VM
   gpu-vm-switch --vm VMID --yes         trasferimento non interattivo
   gpu-vm-switch --vm VMID --dry-run     simulazione senza modifiche
+  gpu-vm-switch --prepare-host           prepara i prerequisiti del nodo Proxmox
 
 Opzioni:
   --vm VMID           VM Proxmox che ricevera la GPU
   --gpu 0000:BB:DD    GPU del nodo (default: 0000:02:00)
   --rom /percorso.rom VBIOS OEM da esporre alla VM
   --skip-drivers      non installa/aggiorna il driver nel guest
+  --mok-manual        conserva Secure Boot e guida il passaggio MOK manuale
   --disable-secure-boot
                       disabilita Secure Boot in modo permanente per una VM OVMF
                       creando nuove variabili EFI senza chiavi; conserva una copia
                       ripristinabile delle vecchie variabili sul nodo Proxmox
+  --prepare-host      installa gli strumenti host, configura IOMMU/VFIO e la ROM
+  --rom-source FILE   file VBIOS OEM sorgente da installare sul nodo con --prepare-host
+  --reboot            riavvia il nodo soltanto dopo --prepare-host e conferma esplicita
   --yes               non chiede conferma
   --dry-run           non modifica nulla
   --self-test         compila/disassembla una SSDT di prova
@@ -57,6 +68,9 @@ Casi d'uso:
   Debian/Kali/Arch/Fedora/RHEL: gpu-vm-switch --vm 123 --yes
   Driver gia gestito da te:     gpu-vm-switch --vm 123 --skip-drivers --yes
   OVMF senza MOK/Secure Boot:   gpu-vm-switch --vm 123 --disable-secure-boot --yes
+  OVMF con Secure Boot/MOK:     gpu-vm-switch --vm 123 --mok-manual
+  Prepara host dal repository:  gpu-vm-switch --prepare-host --rom-source ./firmware/gtx1050_hp_native.rom --yes
+  Prepara host e riavvia:       gpu-vm-switch --prepare-host --rom-source ./firmware/gtx1050_hp_native.rom --reboot --yes
   Altra NVIDIA mobile/Optimus:  gpu-vm-switch --gpu 0000:03:00 --rom /usr/share/kvm/oem.rom --vm 123 --yes
 
 La VM di destinazione deve usare Q35, SeaBIOS o OVMF, e avere il QEMU Guest Agent attivo.
@@ -67,6 +81,8 @@ Quando una VM perde la GPU vengono rimossi hostpci, ROM, SSDT, fw_cfg e le
 opzioni CPU specifiche del passthrough; firmware e chipset restano invariati.
 Se Secure Boot e attivo, il menu interattivo propone di disattivarlo. In modalita
 --yes non viene mai disattivato senza l'opzione esplicita --disable-secure-boot.
+--mok-manual non prova a premere MOK Manager: conserva Secure Boot, verifica se
+il driver parte e stampa il passaggio da completare dalla console noVNC quando serve.
 L'operazione Secure Boot e permanente: evita MOK, ma sostituisce solo le variabili
 EFI dopo avere creato un fallback di boot e una copia ripristinabile delle vecchie.
 Se il nuovo EFI non completa il primo boot fino al Guest Agent, lo script ripristina
@@ -86,7 +102,13 @@ while (( $# )); do
             (( $# >= 2 )) || die '--rom richiede un file'
             ROM=$2; shift 2 ;;
         --skip-drivers) INSTALL_DRIVERS=0; shift ;;
+        --mok-manual) MOK_MANUAL=1; shift ;;
         --disable-secure-boot) DISABLE_SECURE_BOOT=1; shift ;;
+        --prepare-host) HOST_PREP=1; shift ;;
+        --rom-source)
+            (( $# >= 2 )) || die '--rom-source richiede un file'
+            ROM_SOURCE=$2; shift 2 ;;
+        --reboot) REBOOT_HOST=1; shift ;;
         --yes) ASSUME_YES=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --self-test) SELF_TEST=1; shift ;;
@@ -97,17 +119,25 @@ done
 
 (( EUID == 0 )) || die 'esegui come root sul nodo Proxmox'
 command -v qm >/dev/null || die 'qm non trovato: questo non sembra un nodo Proxmox'
-command -v iasl >/dev/null || die 'iasl non trovato: installa acpica-tools sul nodo'
-command -v lspci >/dev/null || die 'lspci non trovato: installa pciutils sul nodo'
+(( ! (MOK_MANUAL && DISABLE_SECURE_BOOT) )) || die '--mok-manual e --disable-secure-boot sono alternativi'
+(( ! REBOOT_HOST || HOST_PREP )) || die '--reboot e valido soltanto con --prepare-host'
+(( ! (SELF_TEST && DRY_RUN) )) || die '--self-test e --dry-run sono alternativi'
+if (( HOST_PREP )); then
+    [[ -z $TARGET_VM ]] || die '--prepare-host non accetta --vm'
+    (( ! SELF_TEST )) || die '--prepare-host e --self-test sono alternativi'
+    (( ! MOK_MANUAL && ! DISABLE_SECURE_BOOT && INSTALL_DRIVERS )) ||
+        die '--prepare-host non accetta opzioni guest'
+    [[ -z $ROM_SOURCE || -f $ROM_SOURCE ]] || die "ROM sorgente mancante: $ROM_SOURCE"
+elif [[ -n $ROM_SOURCE ]]; then
+    die '--rom-source e valido soltanto con --prepare-host'
+fi
 [[ $GPU_SLOT =~ ^[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]]$ ]] ||
     die '--gpu deve essere nel formato 0000:BB:DD, senza .funzione'
-[[ -f $ROM ]] || die "VBIOS mancante: $ROM"
-GPU_PCI_ID=$(lspci -n -s "$GPU_SLOT" | awk 'NR == 1 { print $3 }')
-[[ $GPU_PCI_ID =~ ^[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]$ ]] ||
-    die "non trovo una funzione GPU al PCI host $GPU_SLOT"
 
-mkdir -p "$WORKDIR"
-mkdir "$LOCKDIR" 2>/dev/null || die 'un altro trasferimento GPU e gia in corso'
+if (( ! DRY_RUN )); then
+    mkdir -p "$WORKDIR"
+    mkdir "$LOCKDIR" 2>/dev/null || die 'un altro trasferimento GPU e gia in corso'
+fi
 
 vm_ids() { qm list | awk 'NR > 1 { print $1 }'; }
 vm_status() { qm status "$1" | awk '{ print $2 }'; }
@@ -118,6 +148,187 @@ gpu_keys() {
     '
 }
 trim() { sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'; }
+
+detect_host_gpu() {
+    local vendor device
+    if command -v lspci >/dev/null 2>&1; then
+        GPU_PCI_ID=$(lspci -n -s "$GPU_SLOT.0" | awk 'NR == 1 { print $3 }')
+    else
+        vendor=$(<"/sys/bus/pci/devices/$GPU_SLOT.0/vendor")
+        device=$(<"/sys/bus/pci/devices/$GPU_SLOT.0/device")
+        GPU_PCI_ID="${vendor#0x}:${device#0x}"
+    fi
+    [[ $GPU_PCI_ID =~ ^[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]$ ]] ||
+        die "non trovo una funzione GPU al PCI host $GPU_SLOT"
+}
+
+write_host_file_if_changed() {
+    local file=$1 content=$2
+    if [[ -f $file && $(<"$file") == "$content" ]]; then
+        note "gia aggiornato: $file"
+        return
+    fi
+    note "aggiorno $file"
+    if (( DRY_RUN )); then
+        printf '+ write %q\n' "$file"
+    else
+        printf '%s\n' "$content" > "$file"
+    fi
+    HOST_REBOOT_REQUIRED=1
+}
+
+append_host_line_if_missing() {
+    local file=$1 line=$2
+    if [[ -f $file ]] && grep -Fxq -- "$line" "$file"; then
+        return
+    fi
+    note "aggiungo $line a $file"
+    if (( DRY_RUN )); then
+        printf '+ append %q to %q\n' "$line" "$file"
+    else
+        printf '%s\n' "$line" >> "$file"
+    fi
+    VFIO_CHANGED=1
+    HOST_REBOOT_REQUIRED=1
+}
+
+append_kernel_flag() {
+    local current=$1 flag=$2
+    if [[ " $current " == *" $flag "* ]]; then
+        printf '%s' "$current"
+    else
+        printf '%s %s' "$current" "$flag" | trim
+    fi
+}
+
+prepare_kernel_cmdline() {
+    local flag current updated escaped changed=0
+    if grep -qi 'AuthenticAMD' /proc/cpuinfo; then
+        flag='amd_iommu=on'
+    else
+        flag='intel_iommu=on'
+    fi
+
+    if [[ -f /etc/kernel/cmdline ]] && command -v proxmox-boot-tool >/dev/null 2>&1; then
+        current=$(tr '\n' ' ' < /etc/kernel/cmdline | trim)
+        updated=$(append_kernel_flag "$current" "$flag")
+        updated=$(append_kernel_flag "$updated" 'iommu=pt')
+        if [[ $updated != "$current" ]]; then
+            write_host_file_if_changed /etc/kernel/cmdline "$updated"
+            changed=1
+        fi
+        if (( changed )); then
+            run proxmox-boot-tool refresh
+        fi
+        return
+    fi
+
+    [[ -f /etc/default/grub ]] || die 'non trovo /etc/kernel/cmdline o /etc/default/grub per configurare IOMMU'
+    current=$(sed -nE 's/^GRUB_CMDLINE_LINUX_DEFAULT="(.*)"$/\1/p' /etc/default/grub | head -n1)
+    [[ -n $current ]] || die 'GRUB_CMDLINE_LINUX_DEFAULT non trovato in /etc/default/grub'
+    updated=$(append_kernel_flag "$current" "$flag")
+    updated=$(append_kernel_flag "$updated" 'iommu=pt')
+    if [[ $updated != "$current" ]]; then
+        note 'aggiorno GRUB_CMDLINE_LINUX_DEFAULT con IOMMU'
+        if (( DRY_RUN )); then
+            printf '+ update %q\n' /etc/default/grub
+        else
+            escaped=${updated//\\/\\\\}
+            escaped=${escaped//&/\\&}
+            escaped=${escaped//|/\\|}
+            sed -i -E "s|^GRUB_CMDLINE_LINUX_DEFAULT=\".*\"$|GRUB_CMDLINE_LINUX_DEFAULT=\"$escaped\"|" /etc/default/grub
+        fi
+        HOST_REBOOT_REQUIRED=1
+        run update-grub
+    fi
+}
+
+prepare_vfio() {
+    local conf='/etc/modprobe.d/gpu-vm-switch-vfio.conf' old_ids new_ids id content
+    if [[ -f $conf ]]; then
+        old_ids=$(sed -nE 's/^options[[:space:]]+vfio-pci[[:space:]]+ids=([^[:space:]]+).*$/\1/p' "$conf" | head -n1)
+    else
+        old_ids=''
+    fi
+    new_ids=$old_ids
+    case ",$old_ids," in
+        *",$GPU_PCI_ID,"*) ;;
+        *) new_ids=${new_ids:+$new_ids,}$GPU_PCI_ID ;;
+    esac
+    content=$'# Managed by gpu-vm-switch --prepare-host. One PCI ID may match several identical devices.\n'
+    content+="options vfio-pci ids=$new_ids"
+    if [[ ! -f $conf || $(<"$conf") != "$content" ]]; then
+        write_host_file_if_changed "$conf" "$content"
+        VFIO_CHANGED=1
+    fi
+    for id in vfio vfio_iommu_type1 vfio_pci; do
+        append_host_line_if_missing /etc/modules "$id"
+    done
+}
+
+install_host_rom() {
+    local source=${ROM_SOURCE:-$ROM}
+    [[ -s $source ]] || die "VBIOS mancante: $source"
+    if [[ $source == "$ROM" ]]; then
+        note "VBIOS presente: $ROM"
+        return
+    fi
+    if [[ -f $ROM ]] && cmp -s -- "$source" "$ROM"; then
+        note "VBIOS gia installata e identica: $ROM"
+        return
+    fi
+    note "installa la VBIOS OEM in $ROM"
+    run install -D -m 0644 -- "$source" "$ROM"
+}
+
+host_gpu_driver() {
+    if command -v lspci >/dev/null 2>&1; then
+        lspci -nnk -s "$GPU_SLOT.0" | sed -n 's/^[[:space:]]*Kernel driver in use: //p'
+    elif [[ -L /sys/bus/pci/devices/$GPU_SLOT.0/driver ]]; then
+        basename "$(readlink -f "/sys/bus/pci/devices/$GPU_SLOT.0/driver")"
+    fi
+}
+
+prepare_host() {
+    local missing=() package driver
+    for package in acpica-tools pciutils; do
+        dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -q '^ii ' || missing+=("$package")
+    done
+    if (( ${#missing[@]} )); then
+        note "installo strumenti host mancanti: ${missing[*]}"
+        run apt-get update
+        run apt-get install -y "${missing[@]}"
+    else
+        note 'strumenti host gia presenti: acpica-tools, pciutils'
+    fi
+
+    detect_host_gpu
+    install_host_rom
+    prepare_kernel_cmdline
+    prepare_vfio
+    if (( VFIO_CHANGED )); then
+        note 'aggiorno initramfs per caricare vfio-pci prima dei driver host'
+        run update-initramfs -u -k all
+    fi
+
+    driver=$(host_gpu_driver || true)
+    note "GPU host $GPU_SLOT ($GPU_PCI_ID), driver attuale: ${driver:-nessuno}"
+    [[ -d /sys/kernel/iommu_groups ]] || note 'attenzione: gruppi IOMMU assenti ora; controlla BIOS/UEFI dopo il riavvio'
+    [[ $driver == vfio-pci ]] || HOST_REBOOT_REQUIRED=1
+    if (( REBOOT_HOST )); then
+        if (( ASSUME_YES )); then
+            run systemctl reboot
+        else
+            printf 'Il nodo Proxmox verra riavviato. Continuare? [s/N] '
+            read -r answer
+            [[ $answer =~ ^[sS]$ ]] && run systemctl reboot
+        fi
+    elif (( HOST_REBOOT_REQUIRED )); then
+        note 'prerequisiti aggiornati: esegui un riavvio del nodo, oppure ripeti con --reboot --yes'
+    else
+        note 'prerequisiti host gia attivi: nessun riavvio richiesto'
+    fi
+}
 
 strip_optimus_args() {
     sed -E \
@@ -425,6 +636,44 @@ guest_nvidia_ready() {
     grep -q '"exitcode" : 0' <<<"$result"
 }
 
+same_optimus_attachment() {
+    local vm=$1 owners owner_count first_owner
+    owners=$(for vm in $(vm_ids); do gpu_keys "$vm" | sed "s/^/$vm:/"; done)
+    owner_count=$(printf '%s\n' "$owners" | sed '/^$/d' | wc -l)
+    first_owner=$(printf '%s\n' "$owners" | sed '/^$/d' | head -n1)
+    [[ -n $(gpu_keys "$1" | head -n1 || true) ]] &&
+        (( owner_count == 1 )) &&
+        [[ $first_owner == "$1":* ]] &&
+        has_optimus_args "$1"
+}
+
+manual_mok_instructions() {
+    local vm=$1 details
+    details=$(qga_b64 "$vm" '{
+        if command -v mokutil >/dev/null 2>&1; then
+            mokutil --sb-state 2>&1 || true
+            echo "--- chiavi MOK in attesa ---"
+            mokutil --list-new 2>&1 || true
+            echo "--- possibili certificati DKMS ---"
+            find /var/lib/dkms /var/lib/shim-signed -maxdepth 3 -type f \
+                \( -name mok.pub -o -name MOK.der -o -name MOK.priv \) -print 2>/dev/null || true
+        else
+            echo "mokutil non installato nel guest"
+        fi
+    } | base64 -w0
+    ' || true)
+    cat >&2 <<EOF
+Secure Boot e ancora attivo e il driver NVIDIA non e utilizzabile.
+Completa MOK dalla console noVNC della VM (non e automatizzabile via SSH/QGA):
+  1. Installa mokutil se manca e individua il certificato DKMS mostrato sotto.
+  2. Dalla console del guest: sudo mokutil --import /percorso/al/certificato.der
+  3. Scegli una password temporanea, riavvia, poi in MOK Manager: Enroll MOK -> Continue -> Yes.
+  4. Inserisci la stessa password, riavvia e ripeti gpu-vm-switch --vm $vm --mok-manual.
+Dettagli rilevati nel guest:
+$details
+EOF
+}
+
 stop_guest_benchmark() {
     qm guest exec "$1" --timeout 30 -- /bin/sh -c \
         'systemctl disable --now nvidia-benchmark-x.service >/dev/null 2>&1 || true' \
@@ -513,6 +762,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if (( HOST_PREP )); then
+    prepare_host
+    exit 0
+fi
+
+command -v iasl >/dev/null || die 'iasl non trovato: esegui gpu-vm-switch --prepare-host'
+command -v lspci >/dev/null || die 'lspci non trovato: esegui gpu-vm-switch --prepare-host'
+[[ -s $ROM ]] || die "VBIOS mancante: $ROM (usa --prepare-host --rom-source FILE)"
+detect_host_gpu
+
 if (( SELF_TEST )); then
     [[ $(acpi_name 1c 0) == SE0 ]] || die 'self-test bridge ACPI non riuscito'
     [[ $(pci_path_to_acpi '00:1c.0/01:00.0') == SE0.S00 ]] ||
@@ -592,6 +851,24 @@ if (( ! ASSUME_YES )); then
     fi
 fi
 
+if (( ! DISABLE_SECURE_BOOT )) && same_optimus_attachment "$TARGET_VM"; then
+    note 'idempotente: configurazione GPU/SSDT/fw_cfg gia presente; verifico solo driver e MOK'
+    if (( INSTALL_DRIVERS )) && ! guest_nvidia_ready "$TARGET_VM"; then
+        install_linux_driver "$TARGET_VM"
+        note 'riavvio della VM per caricare o rivalidare il driver NVIDIA'
+        stop_vm "$TARGET_VM"
+        start_vm "$TARGET_VM"
+        wait_for_agent "$TARGET_VM"
+    fi
+    if ! guest_nvidia_ready "$TARGET_VM"; then
+        [[ $secure_state == enabled ]] && manual_mok_instructions "$TARGET_VM"
+        die "VM $TARGET_VM: driver NVIDIA non pronto; la configurazione passthrough e stata lasciata invariata"
+    fi
+    verify_gpu "$TARGET_VM"
+    start_guest_benchmark "$TARGET_VM"
+    exit 0
+fi
+
 if (( DISABLE_SECURE_BOOT )) && [[ $secure_state == enabled ]]; then
     note 'preparo il fallback UEFI BOOTX64.EFI prima di sostituire le variabili EFI'
     ensure_uefi_fallback "$TARGET_VM"
@@ -668,6 +945,10 @@ if (( INSTALL_DRIVERS )) && ! guest_nvidia_ready "$TARGET_VM"; then
     stop_vm "$TARGET_VM"
     start_vm "$TARGET_VM"
     wait_for_agent "$TARGET_VM"
+fi
+if ! guest_nvidia_ready "$TARGET_VM"; then
+    [[ $secure_state == enabled ]] && manual_mok_instructions "$TARGET_VM"
+    die "VM $TARGET_VM: driver NVIDIA non pronto; completa MOK o usa --disable-secure-boot"
 fi
 verify_gpu "$TARGET_VM"
 start_guest_benchmark "$TARGET_VM"

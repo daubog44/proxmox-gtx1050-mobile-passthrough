@@ -125,9 +125,10 @@ def build():
     ]
     overview = [
         ["Componente", "Esito"],
+        ["Portatile", "HP Pavilion Laptop 15-cs1xxx, scheda madre HP 856A"],
         ["Host", "Proxmox VE 9.1.5, kernel 6.17.9, IOMMU e VFIO attivi"],
         ["GPU", "NVIDIA GP107M GTX 1050 Mobile (Pascal), PCI ID 10de:1c8d"],
-        ["Firmware", "VBIOS OEM HP, 169472 byte, 86.07.5F.00.2C"],
+        ["Firmware", "VBIOS OEM HP inclusa nel repository privato, 169472 byte, 86.07.5F.00.2C"],
         ["Ubuntu", "Driver NVIDIA 580.173.02, 4096 MiB, nvidia-smi valido"],
         ["Kali", "Driver NVIDIA installabile, SeaBIOS/Q35 mantenuto"],
         ["Prova rendering", "glxgears sul display NVIDIA :2, circa 24-25 mila FPS"],
@@ -155,7 +156,7 @@ def build():
     story += [h("1. Problema e criterio di successo")]
     story += [
         p(
-            "Una GPU mobile Optimus non e una GPU desktop isolata: il display fisico resta normalmente collegato alla iGPU e il driver NVIDIA puo richiedere la propria VBIOS attraverso ACPI. Il passthrough standard con hostpci e una ROM PCI non era sufficiente.",
+            "Una GPU mobile Optimus non e una GPU desktop isolata: nel Pavilion 15-cs1xxx il display fisico resta normalmente collegato alla iGPU e il driver NVIDIA puo richiedere la propria VBIOS attraverso ACPI. Il passthrough standard con hostpci e una ROM PCI non era sufficiente.",
         ),
         p(
             "La GTX 1050 Mobile di questo caso usa GP107M, una GPU Pascal laptop con 640 CUDA core nella configurazione GTX 1050 e 4 GiB verificati nel guest. In Optimus la NVIDIA e render-only: puo accelerare CUDA/OpenGL/Vulkan, ma non ha necessariamente un CRTC o un connettore display assegnabile. La procedura e quindi mirata a NVIDIA mobile/Optimus e richiede una VBIOS OEM coerente; non e una soluzione universale per ogni GPU laptop.",
@@ -169,11 +170,13 @@ def build():
         ["BDF", "Indirizzo PCI dominio:bus:device.funzione. La GPU host e 0000:02:00.0."],
         ["VBIOS / ROM", "Firmware della GPU; in questo caso il file .rom contiene la VBIOS OEM."],
         ["IOMMU e VFIO", "Isolano DMA e assegnano il dispositivo reale a QEMU invece che al driver host."],
+        ["Optimus muxless", "La iGPU guida il pannello; NVIDIA e render-only e puo dipendere dai metodi ACPI della piattaforma."],
         ["ACPI", "Descrizione firmware dell'hardware e dei metodi richiamati dal sistema operativo."],
         ["ASL / AML / SSDT", "ASL e testo, AML e bytecode compilato, SSDT e tabella ACPI aggiuntiva."],
         ["_ROM", "Metodo ACPI che fornisce una porzione della ROM al driver, dati offset e dimensione."],
         ["fw_cfg", "Canale QEMU per fornire piccoli blob al guest; qui trasporta la VBIOS."],
         ["MOK", "Machine Owner Key: certificato da registrare prima del kernel per fidare moduli DKMS con Secure Boot."],
+        ["OVMF / Q35 / QGA", "UEFI QEMU, chipset PCIe virtuale e Guest Agent usato per discovery e verifica nel guest."],
     ]
     term_rows = [
         [Paragraph(f"<b>{name}</b>", styles["Small"]), Paragraph(description, styles["Small"])]
@@ -186,7 +189,7 @@ def build():
     story += [h("3. Perche la soluzione ACPI era necessaria")]
     story += [
         p(
-            "Il solo romfile espone una ROM nella configurazione PCI virtuale. Il driver della GTX 1050 Mobile, nel percorso Optimus, cerca invece _ROM nel device ACPI. Per questo rombar=1 mostrava byte ROM ma non risolveva l'inizializzazione del driver.",
+            "Il solo romfile espone una ROM nella configurazione PCI virtuale. Il driver della GTX 1050 Mobile, nel percorso Optimus, cerca invece _ROM nel device ACPI. Per questo rombar=1 mostrava byte ROM ma non risolveva l'inizializzazione del driver. VBIOS e file .rom sono qui lo stesso firmware; rombar e invece una finestra PCI virtuale, non il metodo ACPI.",
         ),
         p(
             "La soluzione passa lo stesso file VBIOS OEM mediante fw_cfg. Una SSDT in AML si aggancia al device della GPU, legge il file una volta, lo mantiene in un buffer e implementa _ROM restituendo il segmento richiesto. rombar=0 resta intenzionale.",
@@ -205,23 +208,26 @@ def build():
             "Scope finale: \\_SB.PCI0.SE0.S00",
             code,
         ),
-        p("Lo script avvia brevemente la VM, scopre questa topologia reale e genera la SSDT specifica della VM. Cosi il metodo puo adattarsi a un'altra NVIDIA mobile, se vengono indicati BDF host e VBIOS OEM corretti."),
+        p("ASL e il testo generato; iasl lo compila in AML, il bytecode che QEMU carica. External dichiara il device gia presente nella DSDT, Scope lo apre, RINT legge fw_cfg nel buffer FWBI e _ROM restituisce Mid(FWBI, offset, length). Lo script avvia brevemente la VM, scopre questa topologia reale e genera la SSDT specifica della VM. Cosi il metodo puo adattarsi a un'altra NVIDIA mobile, se vengono indicati BDF host e VBIOS OEM corretti."),
         PageBreak(),
     ]
 
     story += [h("5. Switch GPU idempotente")]
     story += bullets(
         [
+            "Prima del primo switch: --prepare-host installa acpica-tools/pciutils, installa la ROM OEM se diversa, aggiunge solo flag IOMMU/VFIO mancanti e aggiorna initramfs; il reboot e sempre esplicito.",
             "Menu numerato delle VM oppure --vm VMID per automazione.",
             "Ricerca proprietario corrente della GPU e arresto pulito della sola VM coinvolta.",
             "Cleanup mirato: hostpci, romfile, rombar, argomenti SSDT/fw_cfg e CPU hidden generati dallo script.",
             "Riavvio automatico della VM sorgente che prima era accesa.",
             "Discovery ACPI, generazione AML, avvio finale e verifica nvidia-smi.",
             "Nessuna conversione forzata di BIOS, OVMF, SeaBIOS, Q35 o vga: questi restano proprieta della VM.",
-            "Se hostpci, SSDT/fw_cfg e nvidia-smi sono gia corretti nella VM richiesta, non opera ne riavvia.",
+            "Se hostpci, SSDT/fw_cfg e nvidia-smi sono gia corretti nella VM richiesta, non opera ne riavvia; se resta solo MOK, non ricostruisce lo switch.",
         ]
     )
     story += [h("Comandi principali"), Preformatted(
+        "gpu-vm-switch --prepare-host --rom-source ./firmware/gtx1050_hp_native.rom --yes\n"
+        "gpu-vm-switch --prepare-host --rom-source ./firmware/gtx1050_hp_native.rom --reboot --yes\n"
         "gpu-vm-switch\n"
         "gpu-vm-switch --vm 1001 --yes\n"
         "gpu-vm-switch --vm 1001 --dry-run --yes\n"
@@ -229,16 +235,17 @@ def build():
         "gpu-vm-switch --vm 123 --skip-drivers --yes",
         code,
     )]
-    story += [p("Driver automatici: Ubuntu, Debian, Kali, Arch, Fedora, RHEL, Rocky e AlmaLinux. Per Debian la sorgente contrib non-free non-free-firmware e aggiunta solo se non e gia presente; la logica gestisce anche il formato Deb822.")]
+    story += [p("Driver automatici: Ubuntu, Debian, Kali, Arch, Fedora, RHEL, Rocky e AlmaLinux. Per Debian la sorgente contrib non-free non-free-firmware e aggiunta solo se non e gia presente; la logica gestisce anche il formato Deb822. Il BIOS del laptop resta l'unico prerequisito non automatizzabile: VT-d/AMD-Vi deve essere attivo prima del boot Proxmox.")]
     story += [h("6. Secure Boot senza automazione fittizia")]
     story += [
         p(
             "MOK non e causato dal nome NVIDIA: compare quando DKMS compila il modulo localmente e Secure Boot richiede una firma di una chiave fidata. DKMS puo firmare con una propria chiave, ma questa deve essere registrata come Machine Owner Key. La schermata MOK e fuori dall'OS: SSH e QEMU Guest Agent non possono premere tasti prima dell'avvio.",
             styles["Callout"],
         ),
-        p("Lo script rileva lo stato reale nel guest, con mokutil oppure con la variabile EFI SecureBoot. In modo interattivo propone di disabilitarlo; con --yes serve sempre il consenso esplicito seguente:"),
-        Preformatted("gpu-vm-switch --vm 123 --disable-secure-boot --yes", code),
-        p("L'operazione e permanente e solo OVMF/efidisk0 4m. Prima crea EFI/BOOT/BOOTX64.EFI, copia le vecchie variabili EFI e metadata in /usr/share/kvm/optimus-gpu-switch/efi-backups/, poi sostituisce efidisk0 con il template senza chiavi. Proxmox conserva il volume precedente come unused disk. Il rollback resta attivo fino al primo boot con Guest Agent; il cambio non e stato eseguito sulla Ubuntu principale, quindi prima dell'uso fare snapshot e tenere noVNC disponibile. Questo evita MOK ma abbassa la protezione della catena di boot."),
+        p("Lo script rileva lo stato reale nel guest, con mokutil oppure con la variabile EFI SecureBoot. Per mantenere Secure Boot esiste --mok-manual: non finge di premere il firmware, conserva la GPU gia configurata e stampa certificati/passaggi per noVNC. Dopo sudo mokutil --import certificato.der, al riavvio l'utente sceglie Enroll MOK, Continue, Yes e inserisce la password temporanea."),
+        Preformatted("gpu-vm-switch --vm 123 --mok-manual\n"
+                     "gpu-vm-switch --vm 123 --disable-secure-boot --yes", code),
+        p("L'alternativa Secure Boot off e permanente e solo OVMF/efidisk0 4m. Prima crea EFI/BOOT/BOOTX64.EFI, copia le vecchie variabili EFI e metadata in /usr/share/kvm/optimus-gpu-switch/efi-backups/, poi sostituisce efidisk0 con il template senza chiavi. Proxmox conserva il volume precedente come unused disk. Il rollback resta attivo fino al primo boot con Guest Agent; il cambio non e stato eseguito sulla Ubuntu principale, quindi prima dell'uso fare snapshot e tenere noVNC disponibile. Questo evita MOK ma abbassa la protezione della catena di boot."),
         PageBreak(),
     ]
 
@@ -261,12 +268,12 @@ def build():
         story += [Spacer(1, 0.25 * cm), KeepTogether([image, Spacer(1, 0.12 * cm), p("Figura 1 - nvtop: glxgears usa il 99% della GPU; Xorg gira su :2.", styles["Small"])])]
     story += [PageBreak(), h("8. Estrazione della VBIOS OEM")]
     story += [
-        p("Il punto di partenza e il pacchetto driver/firmware ufficiale HP per il portatile, estratto localmente fino al payload, per esempio 084C0.bin. Lo script Python non scarica nulla: cerca la signature PCI option ROM 55 aa, verifica PCIR, vendor NVIDIA e device 1c8d. Scansiona il payload RAW e stream LZMA, quindi estrae tutte le immagini della ROM fino al flag finale."),
+        p("Il punto di partenza e il pacchetto driver/firmware ufficiale HP per il Pavilion 15-cs1xxx, estratto localmente fino al payload, per esempio 084C0.bin. Lo script Python non scarica nulla: cerca la signature PCI option ROM 55 aa, verifica PCIR, vendor NVIDIA e device 1c8d. Scansiona il payload RAW e stream LZMA, quindi estrae tutte le immagini della ROM fino al flag finale."),
         Preformatted(
-            "python3 scripts/extract_gtx1050_rom.py /tmp/084C0.bin \\\n+  --device-id 1c8d \\\n+  --output /usr/share/kvm/gtx1050_hp_native.rom",
+            "python3 scripts/extract_gtx1050_rom.py /tmp/084C0.bin \\\n  --device-id 1c8d \\\n  --output /usr/share/kvm/gtx1050_hp_native.rom",
             code,
         ),
-        p("Non distribuire la ROM nel repository: e firmware OEM. Conservare il file sul nodo, usare --force solo con verifica di vendor, device ID e origine del payload, e provare l'altro payload HP se non si trova il device."),
+        p("Per rendere riproducibile questo laboratorio privato, la ROM estratta e inclusa come firmware/gtx1050_hp_native.rom: 169472 byte, VBIOS 86.07.5F.00.2C, SHA-256 33abd3bc3f658b0536da0617a76076b56e5af124701271211d6d127cda22c322. E firmware OEM, non universale: verificare licenza e usare --force solo dopo confronto di vendor, device ID e origine del payload."),
         h("9. Tentativi che non hanno risolto il problema"),
     ]
     failed = [
@@ -306,6 +313,8 @@ def build():
         p("Proxmox VE Administration Guide: https://pve.proxmox.com/pve-docs/pve-admin-guide.html", styles["Small"]),
         p("NVIDIA driver kernel modules: https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/kernel-modules.html", styles["Small"]),
         p("NVIDIA GTX 1050 laptop / Pascal: https://www.nvidia.com/en-us/geforce/news/nvidia-geforce-gtx-1050-laptops/", styles["Small"]),
+        p("Linux kernel VFIO: https://docs.kernel.org/driver-api/vfio.html", styles["Small"]),
+        p("ACPICA / iasl: https://acpica.org/", styles["Small"]),
     ]
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     print(OUT)
