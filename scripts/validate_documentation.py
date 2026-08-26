@@ -47,6 +47,15 @@ def main() -> None:
     require(
         readme,
         (
+            "## Prima dei comandi: dove sei e cosa stai guardando",
+            "## Dizionario essenziale: nessun gergo sottinteso",
+            "### I comandi e le opzioni usati nei test",
+            "## Cosa e stato testato davvero: comando, macchina, risultato e limite",
+            "**[NODO]**",
+            "**[VM]**",
+            "Kernel driver in use: vfio-pci",
+            "NVIDIA GeForce GTX 1050, 580.173.02, 4096 MiB",
+            "Nessuna prova runtime dichiarata.",
             "Ubuntu -> Kali -> Ubuntu",
             "file gtx1050_hp_native.rom sul nodo Proxmox",
             "QEMU fw_cfg",

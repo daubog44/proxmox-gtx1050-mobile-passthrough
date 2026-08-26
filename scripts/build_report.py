@@ -165,9 +165,14 @@ def build():
         p(
             "Il criterio di successo non e solo vedere una riga in lspci. La GPU deve essere assegnabile a una VM, il driver proprietario deve caricare, nvidia-smi deve riportare nome, driver e memoria, e un processo grafico deve usare realmente la GPU.",
         ),
+        p(
+            "Questa relazione distingue sempre [NODO] e [VM]. Il nodo Proxmox e il laptop fisico: possiede GPU, IOMMU e comandi qm/lspci/gpu-vm-switch. Ubuntu e Kali sono VM: qui vivono driver NVIDIA, nvidia-smi e MOK. noVNC e la console grafica Proxmox necessaria per schermate prima del kernel, come MOK Manager.",
+            styles["Callout"],
+        ),
         h("2. Termini fondamentali"),
     ]
     terms = [
+        ["Host / guest / VMID", "Host: computer fisico Proxmox. Guest: computer virtuale. VMID: numero Proxmox della VM, qui Ubuntu 1001 e Kali 1000."],
         ["BDF", "Indirizzo PCI dominio:bus:device.funzione. La GPU host e 0000:02:00.0."],
         ["VBIOS / ROM", "Firmware della GPU; in questo caso il file .rom contiene la VBIOS OEM."],
         ["IOMMU e VFIO", "Isolano DMA e assegnano il dispositivo reale a QEMU invece che al driver host."],
@@ -178,6 +183,8 @@ def build():
         ["fw_cfg", "Canale QEMU per fornire piccoli blob al guest; qui trasporta la VBIOS."],
         ["MOK", "Machine Owner Key: certificato da registrare prima del kernel per fidare moduli DKMS con Secure Boot."],
         ["OVMF / Q35 / QGA", "UEFI QEMU, chipset PCIe virtuale e Guest Agent usato per discovery e verifica nel guest."],
+        ["nvidia-smi / nvtop / glxgears", "Stato driver/VRAM, monitor GPU e rendering OpenGL con FPS. Usati insieme, non sono la stessa prova."],
+        ["dry-run / self-test", "Simulazione senza modifiche e compilazione/disassemblaggio AML di prova. Non sono benchmark del driver guest."],
     ]
     term_rows = [
         [Paragraph(f"<b>{name}</b>", styles["Small"]), Paragraph(description, styles["Small"])]
@@ -187,6 +194,30 @@ def build():
     term_table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D1D5DB")), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#E9F8F1")), ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("FONTSIZE", (0, 0), (-1, -1), 8.8), ("LEADING", (0, 0), (-1, -1), 11), ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6), ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5)]))
     story += [term_table, PageBreak()]
 
+    story += [h("2b. Prove reali: strumenti, risultati e limiti")]
+    story += [
+        p("Ogni prova e riportata con il suo strumento, per non presentare una semplice verifica di configurazione come benchmark o compatibilita universale."),
+        Preformatted(
+            "# [NODO] prerequisiti osservati\n"
+            "cat /proc/cmdline\n"
+            "test -d /sys/kernel/iommu_groups\n"
+            "lspci -nnk -s 02:00.0\n"
+            "gpu-vm-switch --self-test\n"
+            "\n# [VM Ubuntu] driver osservato\n"
+            "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader",
+            code,
+        ),
+    ]
+    story += bullets(
+        [
+            "Nodo: flag IOMMU e gruppi presenti; lspci ha mostrato Kernel driver in use: vfio-pci.",
+            "Generatore ACPI: gpu-vm-switch --self-test ha concluso self-test: ok. Prova AML, non il driver guest.",
+            "Trasferimento reale: Ubuntu 1001 OVMF/Q35 -> Kali 1000 SeaBIOS/Q35 -> Ubuntu 1001; cleanup, discovery e SSDT sono riusciti in entrambe le direzioni.",
+            "Ubuntu: nvidia-smi ha restituito NVIDIA GeForce GTX 1050, driver 580.173.02, 4096 MiB.",
+            "Rendering: nvidia-glxgears ha prodotto circa 24-25 mila FPS e nvtop ha mostrato il processo al 99% GPU. E prova OpenGL sulla GPU, non benchmark di gioco.",
+            "Secure Boot off: il codice/prompt sono stati esaminati ma la sostituzione EFI non e stata eseguita sulla Ubuntu principale; nessuna prova runtime viene rivendicata.",
+        ]
+    )
     story += [h("3. Perche la soluzione ACPI era necessaria")]
     story += [
         p(
@@ -220,6 +251,7 @@ def build():
             code,
         ),
         p("ASL e il testo generato; iasl lo compila in AML, il bytecode che QEMU carica. External dichiara il device gia presente nella DSDT, Scope lo apre, RINT legge fw_cfg nel buffer FWBI e _ROM restituisce Mid(FWBI, offset, length). Lo script avvia brevemente la VM, scopre questa topologia reale e genera la SSDT specifica della VM. Cosi il metodo puo adattarsi a un'altra NVIDIA mobile, se vengono indicati BDF host e VBIOS OEM corretti."),
+        PageBreak(),
         h("4b. SSDT: lettura guidata"),
         Preformatted(
             "External (\\_SB.PCI0.SE0.S00, DeviceObj)  # device esistente\n"
@@ -232,7 +264,6 @@ def build():
             code,
         ),
         p("RWRD, RDWD e RBUF sono lettori rispettivamente a 16 bit, 32 bit e buffer; Serialized evita letture concorrenti. Il walkthrough del repository spiega ogni blocco e anche il limite a 4 KiB per richiesta _ROM."),
-        PageBreak(),
     ]
 
     story += [h("5. Switch GPU idempotente")]
@@ -260,7 +291,7 @@ def build():
         code,
     )]
     story += [p("Driver automatici: Ubuntu, Debian, Kali, Arch, Fedora, RHEL, Rocky e AlmaLinux. Per Debian la sorgente contrib non-free non-free-firmware e aggiunta solo se non e gia presente; la logica gestisce anche il formato Deb822. Il BIOS del laptop resta l'unico prerequisito non automatizzabile: VT-d/AMD-Vi deve essere attivo prima del boot Proxmox.")]
-    story += [h("5b. Procedura riproducibile e criteri di prova"), Preformatted(
+    story += [PageBreak(), h("5b. Procedura riproducibile e criteri di prova"), Preformatted(
         "# nodo: prima di applicare\n"
         "sha256sum firmware/gtx1050_hp_native.rom\n"
         "lspci -nnk -s 0000:02:00.0\n"
@@ -274,7 +305,7 @@ def build():
         "qm guest exec 1001 -- /usr/bin/nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader",
         code,
     )]
-    story += [p("La sequenza e deliberatamente divisa in inventario, dry-run, applicazione e osservazione. Il risultato positivo richiede: hash ROM atteso, IOMMU e vfio-pci dopo reboot, self-test AML riuscito, hostpci con args SSDT/fw_cfg e nvidia-smi con exitcode 0. nvidia-glxgears e nvtop provano poi il rendering. Il runbook del repository aggiunge comandi esatti per QEMU Guest Agent, Secure Boot/MOK, prova Ubuntu -> Kali -> Ubuntu e condizioni in cui fermarsi; il validatore documentale non viene spacciato per prova hardware."), PageBreak()]
+    story += [p("La sequenza e deliberatamente divisa in inventario, dry-run, applicazione e osservazione. Il risultato positivo richiede: hash ROM atteso, IOMMU e vfio-pci dopo reboot, self-test AML riuscito, hostpci con args SSDT/fw_cfg e nvidia-smi con exitcode 0. nvidia-glxgears e nvtop provano poi il rendering. Il runbook del repository aggiunge comandi esatti per QEMU Guest Agent, Secure Boot/MOK, prova Ubuntu -> Kali -> Ubuntu e condizioni in cui fermarsi; il validatore documentale non viene spacciato per prova hardware.")]
     story += [h("6. Secure Boot senza automazione fittizia")]
     story += [
         p(

@@ -6,6 +6,75 @@ Repository didattico e operativo per assegnare la GPU NVIDIA discreta di un port
 
 ![Prova finale: nvtop mostra glxgears al 99% della GTX 1050 e Xorg NVIDIA sul display :2](evidence/nvtop-glxgears-proof.png)
 
+## Prima dei comandi: dove sei e cosa stai guardando
+
+Questa guida usa sempre tre contesti. Leggerli evita l'errore piu comune: lanciare un comando della VM sul nodo Proxmox, o viceversa.
+
+| Etichetta | Che cos'e | Esempi di comandi che vanno eseguiti qui |
+| --- | --- | --- |
+| **[NODO]** | Il computer fisico che esegue Proxmox. In questo progetto e il laptop HP. Ha la GPU fisica e i comandi `qm`, `lspci` e `gpu-vm-switch`. | `lspci -nnk -s 0000:02:00.0`, `qm config 1001` |
+| **[VM]** | Il computer virtuale dentro Proxmox. Qui sono Ubuntu `1001` e Kali `1000`. Il driver NVIDIA viene installato qui, non sul nodo. | `nvidia-smi`, `mokutil --sb-state` |
+| **[PC DI AMMINISTRAZIONE]** | Il PC dal quale apri SSH/noVNC e modifichi il repository. Non e parte del passthrough. | `git status`, lettura del PDF |
+
+Un blocco che inizia con `# [NODO]` va eseguito come `root` sul server Proxmox. Uno che inizia con `# [VM]` va eseguito dentro la VM indicata, tramite console noVNC o SSH alla VM. `noVNC` e la console grafica nel pannello Proxmox: serve quando devi vedere schermate prima dell'avvio di Linux, come MOK Manager.
+
+## Dizionario essenziale: nessun gergo sottinteso
+
+| Termine | Significato semplice | Perche compare qui |
+| --- | --- | --- |
+| **Host / nodo Proxmox** | Il computer fisico che ospita le VM. | E l'unico che possiede davvero la GTX 1050. |
+| **Guest / VM** | Un computer virtuale in esecuzione nel nodo. | Ubuntu e Kali sono guest; una sola alla volta puo ricevere la GPU. |
+| **VMID** | Il numero che identifica una VM per Proxmox. | `1001` identifica Ubuntu; `1000` identifica Kali. |
+| **GPU** | Processore grafico, qui la NVIDIA GTX 1050 Mobile. | E il dispositivo da assegnare alla VM. |
+| **PCIe** | Il bus hardware attraverso cui il nodo vede la GPU. | Il passthrough comincia assegnando questo dispositivo fisico alla VM. |
+| **BDF** | Indirizzo PCI nel formato `dominio:bus:dispositivo.funzione`. | `0000:02:00.0` significa dominio `0000`, bus `02`, dispositivo `00`, funzione grafica `0`. |
+| **PCI ID** | Codice `vendor:device` del modello PCI. | `10de:1c8d` significa NVIDIA (`10de`) GTX 1050 Mobile (`1c8d`). |
+| **IOMMU** | Funzione CPU/chipset che isola il DMA e rende possibile assegnare un dispositivo PCI a una VM. Intel la chiama VT-d, AMD AMD-Vi. | Senza IOMMU non esiste passthrough PCI sicuro. |
+| **VFIO / `vfio-pci`** | Driver Linux che prende possesso della GPU per consegnarla a QEMU, invece di usarla nel nodo. | `lspci -nnk` deve mostrare `Kernel driver in use: vfio-pci`. |
+| **QEMU / Q35** | QEMU esegue la VM; Q35 e il chipset PCIe virtuale moderno che QEMU emula. | Lo script richiede Q35 per ottenere una topologia PCI guest gestibile. |
+| **OVMF / SeaBIOS** | Firmware della VM: OVMF equivale a UEFI, SeaBIOS al BIOS tradizionale. | Ubuntu usa OVMF; Kali SeaBIOS. Il test ha coperto entrambi. |
+| **QEMU Guest Agent (QGA)** | Piccolo servizio nella VM che permette al nodo di eseguire controlli al suo interno. | Lo script scopre la distro, il percorso PCI guest e il driver senza indovinare. |
+| **VBIOS / file `.rom`** | Firmware interno della GPU. Qui il file `.rom` e una copia della VBIOS OEM HP. | Il driver NVIDIA Mobile chiede questi byte per inizializzarsi. |
+| **ACPI** | Tabelle/metodi con cui firmware e sistema operativo descrivono dispositivi hardware. | Sui laptop Optimus il driver usa ACPI per chiedere la VBIOS. |
+| **DSDT / SSDT** | DSDT: tabella ACPI principale. SSDT: tabella aggiuntiva. | Lo script aggiunge una SSDT; non modifica la DSDT originale. |
+| **ASL / AML** | ASL e il testo leggibile della SSDT; AML e il bytecode compilato che QEMU carica. | `iasl` trasforma ASL in AML; il self-test controlla questa compilazione. |
+| **`fw_cfg`** | Canale QEMU che consegna un file binario al guest. | Trasporta la VBIOS OEM dal nodo alla SSDT. Da solo non basta. |
+| **`_ROM(offset, length)`** | Metodo ACPI: il driver chiede una fetta di firmware indicando inizio e lunghezza. | La SSDT restituisce al driver i byte VBIOS ricevuti da `fw_cfg`. |
+| **Secure Boot / MOK / DKMS** | Secure Boot accetta moduli firmati; DKMS li compila; MOK e la chiave che l'utente autorizza prima del boot. | Spiega perche un driver installato puo non caricarsi. |
+| **`nvidia-smi` / `nvtop` / `nvidia-glxgears`** | Strumenti NVIDIA: stato driver/VRAM, uso GPU e ingranaggi OpenGL con FPS. | Insieme distinguono “driver visto” da “rendering sulla GPU”. |
+
+Il [glossario esteso](docs/glossary.md) approfondisce ogni voce; questa tabella e qui per rendere comprensibile il README senza dover conoscere gia il gergo.
+
+### I comandi e le opzioni usati nei test
+
+| Comando/opzione | Cosa fa, senza abbreviazioni |
+| --- | --- |
+| `cat /proc/cmdline` | Stampa i parametri con cui Linux e stato avviato. Qui cerca le opzioni che attivano IOMMU. Non modifica niente. |
+| `test -d percorso` | Controlla se un percorso esiste ed e una directory. Qui verifica l'esistenza dei gruppi IOMMU. Non modifica niente. |
+| `lspci -nnk -s BDF` | Elenca il dispositivo PCI all'indirizzo BDF, il PCI ID numerico e il driver Linux che lo sta usando. Non modifica niente. |
+| `qm` | Comando amministrativo di Proxmox per leggere o gestire VM: `qm config` legge la configurazione, `qm status` legge lo stato, `qm guest exec` esegue un comando attraverso il Guest Agent. |
+| `iasl` | Compilatore/disassemblatore ACPI. Trasforma ASL in AML e puo rileggere AML per controllarlo. |
+| `sha256sum` | Calcola un'impronta lunga del file. Due file con hash SHA-256 uguale sono, in pratica, lo stesso contenuto byte per byte. |
+| `--dry-run` | Modalita di simulazione dello script: mostra proprietario/azioni previste senza scrivere file, fermare VM o riavviare. |
+| `--yes` | Salta la domanda di conferma. Non disabilita Secure Boot da solo: per quello serve anche `--disable-secure-boot`. |
+| `--self-test` | Genera una SSDT fittizia, la compila con `iasl` e la disassembla. E un test del generatore ACPI, non del driver NVIDIA. |
+
+## Cosa e stato testato davvero: comando, macchina, risultato e limite
+
+La tabella non mescola prova reale, controllo del codice e funzionalita non ancora provata. Un successo dimostra solo cio che il comando osserva.
+
+| Test | Dove e con che cosa | Comando o evidenza | Risultato osservato | Cosa dimostra / non dimostra |
+| --- | --- | --- | --- | --- |
+| IOMMU attivo | [NODO], kernel Proxmox | `cat /proc/cmdline` e `test -d /sys/kernel/iommu_groups` | Flag IOMMU attivi e gruppi presenti. | Il nodo puo isolare PCI; non prova che ogni gruppo sia sicuro. |
+| GPU presa da VFIO | [NODO], `lspci` | `lspci -nnk -s 02:00.0` | `Kernel driver in use: vfio-pci`. | La GPU non e usata dal driver grafico del nodo e puo essere data a QEMU. |
+| SSDT generabile | [NODO], `iasl` | `gpu-vm-switch --self-test` | `self-test: ok`. | L'ASL di prova compila/disassembla in AML; non prova ancora il driver guest. |
+| Preparazione idempotente | [NODO], script in simulazione | `gpu-vm-switch --prepare-host --rom-source /usr/share/kvm/gtx1050_hp_native.rom --dry-run --yes` | Nessuna scrittura e nessun reboot. | Il preflight e ripetibile senza toccare il nodo. |
+| Ubuntu -> Kali -> Ubuntu | [NODO], `gpu-vm-switch` | `gpu-vm-switch --vm 1000 --yes`, poi `gpu-vm-switch --vm 1001 --yes` | Cleanup, discovery PCI/ACPI e SSDT riusciti in entrambe le direzioni. | Il trasferimento OVMF/Q35 <-> SeaBIOS/Q35 e reale; non certifica altri laptop. |
+| Driver su Ubuntu | [VM Ubuntu], `nvidia-smi` | `nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader` | `NVIDIA GeForce GTX 1050, 580.173.02, 4096 MiB`. | Driver e VRAM sono visibili; non e un benchmark. |
+| Rendering OpenGL | [VM Ubuntu], Xorg NVIDIA headless `:2` e `nvidia-glxgears` | `nvidia-glxgears` e screenshot [nvtop](evidence/nvtop-glxgears-proof.png) | Circa 24-25 mila FPS; `nvtop` mostra `nvidia-glxgears` al 99% GPU. | Il rendering e sulla GTX 1050; non equivale a un benchmark di gioco. |
+| Idempotenza switch | [NODO], script | `gpu-vm-switch --vm 1001 --mok-manual --yes` con Ubuntu gia pronta | Messaggio idempotente, nessuna riscrittura o riavvio. | Ripetere il comando non riconfigura una GPU gia collegata. |
+| Disabilitazione Secure Boot | Non eseguita su Ubuntu principale | Revisione del codice e del prompt soltanto. | **Nessuna prova runtime dichiarata.** | Richiede snapshot e noVNC; non e dichiarata risolta/testata. |
+
 ## Prova dello switch: Ubuntu -> Kali -> Ubuntu
 
 Questo non è solo un progetto teorico. Lo switch reale è stato eseguito tra le due VM presenti sul nodo:
@@ -36,6 +105,8 @@ Questa procedura è progettata soprattutto per NVIDIA mobile/Optimus con richies
 
 ## Prima di iniziare: cosa serve davvero
 
+Salvo indicazione contraria, i blocchi delle sezioni 1-4 qui sotto sono comandi [NODO]: eseguili come root nel terminale del nodo Proxmox, non dentro Ubuntu o Kali.
+
 ### 1. Firmware del portatile: operazione manuale
 
 Nel BIOS/UEFI del portatile devono essere abilitati virtualizzazione CPU e IOMMU: su Intel di solito **Intel VT-d**, su AMD **AMD-Vi/IOMMU**. Uno script Linux non può cambiare il BIOS del portatile in modo affidabile: questo è l'unico prerequisito host che va verificato manualmente. Dopo il boot Proxmox deve esistere `/sys/kernel/iommu_groups`.
@@ -45,6 +116,7 @@ Nel BIOS/UEFI del portatile devono essere abilitati virtualizzazione CPU e IOMMU
 Dal clone di questo repository, sul nodo Proxmox:
 
 ```bash
+# [NODO] come root
 install -m 0750 scripts/gpu-vm-switch /usr/local/sbin/gpu-vm-switch
 
 # Installa solo acpica-tools/pciutils mancanti, copia la ROM se differente,
@@ -66,6 +138,7 @@ La sequenza completa, con comandi di inventario, `--dry-run`, applicazione, rebo
 Controlli dopo il reboot:
 
 ```bash
+# [NODO] come root, dopo esserti ricollegato al nodo
 cat /proc/cmdline                 # deve contenere intel_iommu=on oppure amd_iommu=on e iommu=pt
 test -d /sys/kernel/iommu_groups && echo IOMMU-ok
 lspci -nnk -s 02:00.0            # deve indicare Kernel driver in use: vfio-pci
@@ -79,6 +152,7 @@ La ROM impiegata in questo caso è inclusa come [`firmware/gtx1050_hp_native.rom
 Il comando `--prepare-host --rom-source ...` la installa, senza sovrascrivere se l'hash è già identico, in `/usr/share/kvm/gtx1050_hp_native.rom`. Se la ROM va estratta di nuovo dal pacchetto HP, usa:
 
 ```bash
+# [NODO] come root; /tmp/084C0.bin e il payload gia estratto dal pacchetto HP
 python3 scripts/extract_gtx1050_rom.py /tmp/084C0.bin \
   --device-id 1c8d \
   --output /usr/share/kvm/gtx1050_hp_native.rom
@@ -93,6 +167,7 @@ La VM di destinazione deve usare **Q35** e il **QEMU Guest Agent**. Può mantene
 ## Uso quotidiano dello switch
 
 ```bash
+# [NODO] come root. Non lanciare questi comandi dentro la VM.
 # Menu numerato delle VM e domanda Secure Boot quando utile.
 gpu-vm-switch
 
@@ -198,6 +273,7 @@ I comandi esatti, output attesi, varianti per un'altra GPU e condizioni in cui f
 `mokutil` può programmare l'import, ma SSH e QEMU Guest Agent non possono premere la schermata pre-boot. Lo script offre quindi due scelte esplicite:
 
 ```bash
+# [NODO] come root: conserva Secure Boot e stampa istruzioni se serve MOK.
 # A. Conserva Secure Boot. Il tool non tenta di automatizzare ciò che è pre-boot:
 # se necessario indica i certificati trovati e i passaggi da completare in noVNC.
 gpu-vm-switch --vm 1001 --mok-manual
@@ -216,6 +292,7 @@ Il percorso B prepara `EFI/BOOT/BOOTX64.EFI`, salva copia raw e metadata in `/us
 `glmark2` via SSH restituisce `Could not initialize canvas` perché una shell SSH non ha un display X11 (`DISPLAY`). In questo caso è stato creato Xorg NVIDIA headless su `:2`, quindi il test richiesto con gli ingranaggi e FPS è:
 
 ```bash
+# [VM Ubuntu] nella console noVNC/SSH della VM, non sul nodo Proxmox
 nvidia-glxgears
 # 120907 frames in 5.0 seconds = 24181.367 FPS
 # 125006 frames in 5.0 seconds = 25001.096 FPS
