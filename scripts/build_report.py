@@ -75,6 +75,15 @@ def build():
     )
     styles.add(
         ParagraphStyle(
+            name="Reference",
+            parent=styles["BodyText"],
+            fontSize=7.4,
+            leading=8.7,
+            spaceAfter=0,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
             name="Callout",
             parent=styles["BodyText"],
             backColor=colors.HexColor("#E9F8F1"),
@@ -218,6 +227,18 @@ def build():
             "Secure Boot off: il codice/prompt sono stati esaminati ma la sostituzione EFI non e stata eseguita sulla Ubuntu principale; nessuna prova runtime viene rivendicata.",
         ]
     )
+    story += [h("2c. Claim laptop: cosa si applica davvero")]
+    story += bullets(
+        [
+            "Optimus muxless: coerente con il caso. La dGPU puo rendere senza guidare il pannello; non e stato mappato il cablaggio di ogni porta fisica del Pavilion.",
+            "VBIOS: il file HP e integro (55 aa, PCIR, 10de:1c8d, 169472 byte). Qui non e stato tagliato alcun header UEFI: ROM BAR sola falliva, fw_cfg + SSDT _ROM funziona.",
+            "FLR/reset: non e stato provato che manchi. Il test Ubuntu -> Kali -> Ubuntu senza reboot host dimostra che il reboot Proxmox non e obbligatorio in questo flusso; reset_method resta un controllo sysfs da eseguire senza scrivere reset.",
+            "D3cold/_DSM: sono rischi laptop possibili ma la SSDT risolve _ROM, non emula metodi energetici proprietari. Non sono stati attribuiti come causa del guasto.",
+            "IOMMU/ACS: VFIO richiede valutare il gruppo; lo script non usa ACS override. Code 43 e Windows-specifico e non e stato testato dai guest Linux.",
+            "GVT-g, SR-IOV, Looking Glass e Sunshine/Moonlight sono alternative o trasporto display: non sostituiscono VFIO/VBIOS/ACPI e non sono stati installati qui.",
+        ]
+    )
+
     story += [h("3. Perche la soluzione ACPI era necessaria")]
     story += [
         p(
@@ -363,7 +384,7 @@ def build():
         Paragraph("<b>Correzione</b>", styles["Small"]),
     ]
     failed_table = Table([failed_header] + failed_rows, colWidths=[4.0 * cm, 5.7 * cm, 5.7 * cm])
-    failed_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#087F5B")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D1D5DB")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("FONTSIZE", (0, 0), (-1, -1), 8), ("LEADING", (0, 0), (-1, -1), 10), ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5), ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5)]))
+    failed_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#087F5B")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D1D5DB")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("FONTSIZE", (0, 0), (-1, -1), 7.4), ("LEADING", (0, 0), (-1, -1), 8.7), ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4), ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
     story += [failed_table, Spacer(1, 0.45 * cm)]
     story += [h("10. Ripetere il procedimento")]
     story += bullets(
@@ -378,13 +399,17 @@ def build():
     )
     story += [h("Riferimenti")]
     story += [
-        p("QEMU fw_cfg: https://qemu-project.gitlab.io/qemu/specs/fw_cfg.html", styles["Small"]),
-        p("ACPI: https://uefi.org/acpi/specs", styles["Small"]),
-        p("Proxmox VE Administration Guide: https://pve.proxmox.com/pve-docs/pve-admin-guide.html", styles["Small"]),
-        p("NVIDIA driver kernel modules: https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/kernel-modules.html", styles["Small"]),
-        p("NVIDIA GTX 1050 laptop / Pascal: https://www.nvidia.com/en-us/geforce/news/nvidia-geforce-gtx-1050-laptops/", styles["Small"]),
-        p("Linux kernel VFIO: https://docs.kernel.org/driver-api/vfio.html", styles["Small"]),
-        p("ACPICA / iasl: https://acpica.org/", styles["Small"]),
+        p("QEMU fw_cfg: https://qemu-project.gitlab.io/qemu/specs/fw_cfg.html", styles["Reference"]),
+        p("ACPI: https://uefi.org/acpi/specs", styles["Reference"]),
+        p("Proxmox VE Administration Guide: https://pve.proxmox.com/pve-docs/pve-admin-guide.html", styles["Reference"]),
+        p("NVIDIA driver kernel modules: https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/kernel-modules.html", styles["Reference"]),
+        p("NVIDIA GTX 1050 laptop / Pascal: https://www.nvidia.com/en-us/geforce/news/nvidia-geforce-gtx-1050-laptops/", styles["Reference"]),
+        p("Linux kernel VFIO: https://docs.kernel.org/driver-api/vfio.html", styles["Reference"]),
+        p("Linux PCI reset sysfs ABI: https://docs.kernel.org/6.10/admin-guide/abi-testing.html", styles["Reference"]),
+        p("NVIDIA Optimus Linux: https://download.nvidia.com/XFree86/Linux-x86_64/455.28/README/optimus.html", styles["Reference"]),
+        p("NVIDIA PRIME Render Offload: https://download.nvidia.com/XFree86/Linux-x86_64/575.64/README/primerenderoffload.html", styles["Reference"]),
+        p("Intel i915 / GVT-g: https://docs.kernel.org/next/gpu/i915.html", styles["Reference"]),
+        p("ACPICA / iasl: https://acpica.org/", styles["Reference"]),
     ]
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     print(OUT)

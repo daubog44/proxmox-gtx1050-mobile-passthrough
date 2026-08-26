@@ -27,6 +27,9 @@ def main() -> None:
     glossary = (ROOT / "docs" / "glossary.md").read_text(encoding="utf-8")
     walkthrough = (ROOT / "docs" / "acpi-line-by-line.md").read_text(encoding="utf-8")
     runbook = (ROOT / "docs" / "reproducible-runbook.md").read_text(encoding="utf-8")
+    claims = (ROOT / "docs" / "laptop-passthrough-claim-matrix.md").read_text(
+        encoding="utf-8"
+    )
 
     require(
         glossary,
@@ -59,6 +62,8 @@ def main() -> None:
             "Kernel driver in use: vfio-pci",
             "NVIDIA GeForce GTX 1050, 580.173.02, 4096 MiB",
             "Nessuna prova runtime dichiarata.",
+            "## Perche funziona in questo HP, in sette passaggi",
+            "docs/laptop-passthrough-claim-matrix.md",
             "Ubuntu -> Kali -> Ubuntu",
             "file gtx1050_hp_native.rom sul nodo Proxmox",
             "QEMU fw_cfg",
@@ -97,6 +102,23 @@ def main() -> None:
         ),
         "runbook riproducibile",
     )
+    require(
+        claims,
+        (
+            "## Risposta breve: perché questa GTX 1050 funziona nella VM",
+            "## 1. NVIDIA Optimus MUXless",
+            "## 2. VBIOS, ROM PCI e presunto header da rimuovere",
+            "Non rimuove alcun header UEFI",
+            "## 3. FLR, reset PCIe e reboot dell'host",
+            "non e stato necessario riavviare Proxmox",
+            "## 4. Alimentazione ACPI: D3cold e _DSM",
+            "## 5. IOMMU group e ACS override",
+            "## 6. Windows Code 43",
+            "## Alternative: cosa risolvono e cosa non risolvono",
+            "## Cosa non si deve concludere",
+        ),
+        "matrice claim laptop",
+    )
 
     for local_path in (
         ROOT / "evidence" / "nvtop-glxgears-proof.png",
@@ -105,6 +127,7 @@ def main() -> None:
         ROOT / "docs" / "glossary.md",
         ROOT / "docs" / "acpi-line-by-line.md",
         ROOT / "docs" / "reproducible-runbook.md",
+        ROOT / "docs" / "laptop-passthrough-claim-matrix.md",
     ):
         if not local_path.is_file():
             raise AssertionError(f"file locale mancante: {local_path.relative_to(ROOT)}")

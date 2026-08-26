@@ -53,6 +53,29 @@ Interpretazione minima:
 - `qm agent VMID ping` deve rispondere: il tool usa il QEMU Guest Agent per capire la distro, osservare il PCI guest e verificare `nvidia-smi`.
 - Il gruppo IOMMU non deve contenere un dispositivo indispensabile all'host. Questo script trasferisce la funzione grafica selezionata, non rende sicuro un gruppo IOMMU non isolato.
 
+### Diagnostica laptop aggiuntiva: reset, energia e ACS (sola lettura)
+
+Questi comandi rispondono a dubbi comuni su FLR/reset, D3cold e ACS senza forzare un reset o cambiare configurazione. Non concludere che una funzione sia “assente” soltanto perche un file sysfs non esiste: annota output, kernel e BDF.
+
+~~~bash
+# [NODO] root - non scrive nel dispositivo
+dev=/sys/bus/pci/devices/0000:02:00.0
+printf 'reset_method='; test -r "$dev/reset_method" && cat "$dev/reset_method" || echo 'non esposto'
+test -e "$dev/reset" && echo 'reset sysfs disponibile (non eseguito)' || echo 'reset sysfs non esposto'
+
+for f in power/control power/runtime_status d3cold_allowed; do
+  printf '%s=' "$f"
+  test -r "$dev/$f" && cat "$dev/$f" || echo 'non esposto'
+done
+
+group=$(basename "$(readlink -f "$dev/iommu_group")")
+echo "IOMMU group: $group"
+find "/sys/kernel/iommu_groups/$group/devices" -maxdepth 1 -type l -printf '%f\n'
+grep -o 'pcie_acs_override=[^ ]*' /proc/cmdline || echo 'ACS override non presente'
+~~~
+
+`reset_method` elenca i metodi di reset esposti dal kernel; non prova da solo che un reset dopo ogni errore guest funzionera. `D3cold` e un possibile stato energetico del dispositivo, non il metodo ACPI `_ROM`. ACS override non e usato dallo script: se e necessario per un altro laptop, e una scelta di isolamento da valutare separatamente, non una correzione automatica.
+
 ## 2. Preflight e preparazione del nodo
 
 Installa il comando in una posizione stabile, poi esegui prima una simulazione. `--prepare-host` non modifica il firmware BIOS: aggiunge solo configurazione Linux IOMMU/VFIO e la copia della ROM.
