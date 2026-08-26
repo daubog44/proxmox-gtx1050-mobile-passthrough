@@ -413,6 +413,8 @@ qga_b64() {
     result=$(qga_result "$1" "$2")
     encoded=$(sed -nE 's/.*"out-data"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' <<<"$result")
     [[ -n $encoded ]] || return 0
+    # I chiamanti codificano l'output guest per trasportare testo senza
+    # ambiguita nella risposta JSON di QEMU Guest Agent.
     printf '%s' "$encoded" | base64 -d
 }
 
