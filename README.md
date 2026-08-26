@@ -6,6 +6,18 @@ Repository didattico e operativo per assegnare la GPU NVIDIA discreta di un port
 
 ![Prova finale: nvtop mostra glxgears al 99% della GTX 1050 e Xorg NVIDIA sul display :2](evidence/nvtop-glxgears-proof.png)
 
+## Prova dello switch: Ubuntu -> Kali -> Ubuntu
+
+Questo non è solo un progetto teorico. Lo switch reale è stato eseguito tra le due VM presenti sul nodo:
+
+| Passo | VM sorgente | VM destinazione | Esito |
+| --- | --- | --- | --- |
+| 1 | Ubuntu `1001` | Kali `1000` | GPU scollegata, SSDT dinamica rigenerata per Kali e avvio completato. |
+| 2 | Kali `1000` | Ubuntu `1001` | GPU restituita a Ubuntu, SSDT rigenerata e driver NVIDIA operativo. |
+| Verifica finale | Ubuntu `1001` | - | `NVIDIA GeForce GTX 1050`, driver `580.173.02`, 4096 MiB e rendering `glxgears` reale. |
+
+Questa prova valida il trasferimento tra firmware guest diversi (Kali SeaBIOS/Q35, Ubuntu OVMF/Q35) e il cleanup della configurazione generata. Non prova automaticamente ogni possibile portatile, GPU o installatore driver di ogni distribuzione: il workaround rimane specifico alle NVIDIA mobile/Optimus che chiedono `_ROM`.
+
 ## Macchina verificata e perimetro
 
 | Voce | Valore osservato |
@@ -117,7 +129,37 @@ Con una scheda desktop, `hostpci` e talvolta `romfile=...` esponendo la finestra
 file .rom OEM -> QEMU fw_cfg -> SSDT AML -> _ROM(offset, length) -> driver NVIDIA
 ```
 
+Lo stesso flusso, senza abbreviazioni:
+
+```text
+file gtx1050_hp_native.rom sul nodo Proxmox
+        |
+        v
+QEMU fw_cfg: espone il blob al guest a ogni avvio
+        |
+        v
+SSDT AML: legge il blob e lo conserva nel buffer FWBI
+        |
+        v
+metodo ACPI _ROM(offset, length): restituisce i byte richiesti
+        |
+        v
+driver NVIDIA nella VM: inizializza la GTX 1050 Mobile
+```
+
 `fw_cfg` è solo un canale QEMU per byte; non capisce NVIDIA. La SSDT legge il blob una volta, lo tiene in un buffer AML e restituisce al driver la fetta richiesta. Quindi VBIOS e file `.rom` qui sono lo stesso firmware, mentre `rombar` è un'altra cosa: la finestra ROM PCI emulata.
+
+Il BDF host non è un nome misterioso: è l'indirizzo della funzione grafica fisica.
+
+```text
+0000:02:00.0
+│    │  │  └─ funzione 0: GPU grafica
+│    │  └──── dispositivo PCI 00
+│    └────── bus PCI 02
+└─────────── dominio PCI 0000
+```
+
+Il BDF host dice **dove si trova il dispositivo fisico**. Il percorso ACPI guest dice invece **dove la DSDT virtuale lo descrive**. Sono due coordinate diverse; confonderle è il motivo per cui fissare a mano uno scope ACPI può fallire.
 
 ### Mini lezione ACPI, SSDT, ASL e AML
 
@@ -131,6 +173,8 @@ ACPI è il linguaggio con cui firmware e sistema operativo descrivono hardware e
 - `Mid(FWBI, Arg0, Local0)` restituisce i byte da `Arg0` per `Local0` byte: questa è la risposta `_ROM`.
 
 La difficoltà è lo **scope**. L'indirizzo PCI host `0000:02:00.0` non diventa automaticamente un percorso ACPI del guest. Nel guest `lspci -PP` può mostrare `00:1c.0/01:00.0`; ogni hop diventa `Sxx` con `slot * 8 + funzione`: `1c.0 -> 0xe0 -> SE0`, `00.0 -> S00`, quindi `\_SB.PCI0.SE0.S00`. Lo script fa discovery in una prima accensione e compila la SSDT per la topologia reale della VM, invece di fissare un valore a mano. Dettaglio completo: [architettura](docs/architecture.md) e [glossario](docs/glossary.md).
+
+Per una spiegazione riga per riga delle opzioni Proxmox, dei blocchi ASL e dei passaggi dello script, leggi anche [walkthrough ACPI](docs/acpi-line-by-line.md). Il glossario è controllato da [`scripts/validate_documentation.py`](scripts/validate_documentation.py): verifica presenza dei termini obbligatori, diagrammi, riferimenti e hash della ROM; non sostituisce però la lettura tecnica delle fonti.
 
 ## Secure Boot e MOK: due percorsi, nessuna promessa falsa
 
@@ -174,10 +218,11 @@ firmware/gtx1050_hp_native.rom    VBIOS OEM verificata per questo HP
 scripts/gpu-vm-switch             setup host + switch idempotente + Secure Boot/MOK
 scripts/extract_gtx1050_rom.py    estrazione VBIOS dal payload HP
 docs/architecture.md              lezione tecnica del workaround ACPI
+docs/acpi-line-by-line.md         spiegazione guidata riga per riga
 docs/glossary.md                  glossario esteso di tutti i termini
 docs/attempts-and-outcomes.md     tentativi falliti, causa e correzione
 evidence/                         prova nvtop + glxgears
-output/pdf/                       relazione tecnica con fonti
+output/pdf/                       relazione tecnica con fonti e diagrammi
 ```
 
 Risorse consigliate, dall'ordine più pratico al più profondo:

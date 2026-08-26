@@ -130,7 +130,8 @@ def build():
         ["GPU", "NVIDIA GP107M GTX 1050 Mobile (Pascal), PCI ID 10de:1c8d"],
         ["Firmware", "VBIOS OEM HP inclusa nel repository privato, 169472 byte, 86.07.5F.00.2C"],
         ["Ubuntu", "Driver NVIDIA 580.173.02, 4096 MiB, nvidia-smi valido"],
-        ["Kali", "Driver NVIDIA installabile, SeaBIOS/Q35 mantenuto"],
+        ["Kali", "SeaBIOS/Q35; switch reale Ubuntu -> Kali -> Ubuntu riuscito"],
+        ["Switch VM", "Cleanup, discovery PCI/ACPI e SSDT riusciti in entrambe le direzioni"],
         ["Prova rendering", "glxgears sul display NVIDIA :2, circa 24-25 mila FPS"],
     ]
     table = Table(overview, colWidths=[4.2 * cm, 11.2 * cm])
@@ -156,7 +157,7 @@ def build():
     story += [h("1. Problema e criterio di successo")]
     story += [
         p(
-            "Una GPU mobile Optimus non e una GPU desktop isolata: nel Pavilion 15-cs1xxx il display fisico resta normalmente collegato alla iGPU e il driver NVIDIA puo richiedere la propria VBIOS attraverso ACPI. Il passthrough standard con hostpci e una ROM PCI non era sufficiente.",
+            "Una GPU mobile Optimus non e una GPU desktop isolata: nel Pavilion 15-cs1xxx il display fisico resta normalmente collegato alla iGPU e il driver NVIDIA puo richiedere la propria VBIOS attraverso ACPI. hostpci assegna correttamente il dispositivo PCI, ma non aggiunge automaticamente un metodo ACPI _ROM: per questo il passthrough standard con una ROM PCI non era sufficiente.",
         ),
         p(
             "La GTX 1050 Mobile di questo caso usa GP107M, una GPU Pascal laptop con 640 CUDA core nella configurazione GTX 1050 e 4 GiB verificati nel guest. In Optimus la NVIDIA e render-only: puo accelerare CUDA/OpenGL/Vulkan, ma non ha necessariamente un CRTC o un connettore display assegnabile. La procedura e quindi mirata a NVIDIA mobile/Optimus e richiede una VBIOS OEM coerente; non e una soluzione universale per ogni GPU laptop.",
@@ -195,8 +196,18 @@ def build():
             "La soluzione passa lo stesso file VBIOS OEM mediante fw_cfg. Una SSDT in AML si aggancia al device della GPU, legge il file una volta, lo mantiene in un buffer e implementa _ROM restituendo il segmento richiesto. rombar=0 resta intenzionale.",
         ),
         Preformatted(
-            "QEMU fw_cfg  ->  SSDT AML  ->  metodo ACPI _ROM  ->  driver NVIDIA\n"
-            "file VBIOS OEM     cache buffer       slice offset/length",
+            "gtx1050_hp_native.rom sul nodo\n"
+            "        |\n"
+            "        v\n"
+            "QEMU fw_cfg -> SSDT AML (buffer FWBI) -> _ROM(offset,length) -> driver NVIDIA",
+            code,
+        ),
+        Preformatted(
+            "0000:02:00.0\n"
+            "|    |  |  +-- funzione 0: GPU\n"
+            "|    |  +----- dispositivo 00\n"
+            "|    +-------- bus 02\n"
+            "+------------- dominio PCI 0000",
             code,
         ),
         h("4. PCI -> ACPI senza valori fissi"),
@@ -209,6 +220,18 @@ def build():
             code,
         ),
         p("ASL e il testo generato; iasl lo compila in AML, il bytecode che QEMU carica. External dichiara il device gia presente nella DSDT, Scope lo apre, RINT legge fw_cfg nel buffer FWBI e _ROM restituisce Mid(FWBI, offset, length). Lo script avvia brevemente la VM, scopre questa topologia reale e genera la SSDT specifica della VM. Cosi il metodo puo adattarsi a un'altra NVIDIA mobile, se vengono indicati BDF host e VBIOS OEM corretti."),
+        h("4b. SSDT: lettura guidata"),
+        Preformatted(
+            "External (\\_SB.PCI0.SE0.S00, DeviceObj)  # device esistente\n"
+            "Scope (\\_SB.PCI0.SE0.S00)                # aggiungi metodi alla GPU\n"
+            "Name (FWIT, 0) / Name (FWBI, Buffer(){}) # flag + buffer VBIOS\n"
+            "OperationRegion (... 0x510, 2)           # porte QEMU fw_cfg\n"
+            "FISL (...)                                # trova nome e dimensione blob\n"
+            "RINT ()                                   # carica una volta FWBI\n"
+            "_ROM (offset,length) -> Mid(FWBI,...)     # risposta al driver",
+            code,
+        ),
+        p("RWRD, RDWD e RBUF sono lettori rispettivamente a 16 bit, 32 bit e buffer; Serialized evita letture concorrenti. Il walkthrough del repository spiega ogni blocco e anche il limite a 4 KiB per richiesta _ROM."),
         PageBreak(),
     ]
 
@@ -223,6 +246,7 @@ def build():
             "Discovery ACPI, generazione AML, avvio finale e verifica nvidia-smi.",
             "Nessuna conversione forzata di BIOS, OVMF, SeaBIOS, Q35 o vga: questi restano proprieta della VM.",
             "Se hostpci, SSDT/fw_cfg e nvidia-smi sono gia corretti nella VM richiesta, non opera ne riavvia; se resta solo MOK, non ricostruisce lo switch.",
+            "Test reale completato: Ubuntu 1001 OVMF/Q35 -> Kali 1000 SeaBIOS/Q35 -> Ubuntu 1001; cleanup e SSDT sono stati rigenerati in entrambe le direzioni.",
         ]
     )
     story += [h("Comandi principali"), Preformatted(

@@ -26,6 +26,15 @@ Lo screenshot mostra `/usr/bin/glxgears` al 99% GPU, Xorg NVIDIA sul display `:2
 
 È una prova di rendering della GPU reale, non soltanto di enumerazione da `nvidia-smi`.
 
+## Test di trasferimento riuscito: Ubuntu -> Kali -> Ubuntu
+
+| Direzione | Firmware/chipset guest | Cosa è stato verificato |
+| --- | --- | --- |
+| Ubuntu `1001` -> Kali `1000` | OVMF/Q35 -> SeaBIOS/Q35 | Cleanup della configurazione Ubuntu, assegnazione della GPU, discovery PCI/ACPI Kali e SSDT Kali. |
+| Kali `1000` -> Ubuntu `1001` | SeaBIOS/Q35 -> OVMF/Q35 | Cleanup Kali, nuova discovery Ubuntu, SSDT Ubuntu e ritorno del driver NVIDIA funzionante. |
+
+Il test ha dimostrato che lo script non dipende da un unico firmware guest e che rimuove/ripristina solo le opzioni da lui gestite. La verifica finale su Ubuntu è `NVIDIA GeForce GTX 1050, 580.173.02, 4096 MiB`; lo screenshot sopra dimostra anche rendering effettivo.
+
 ## Limite rimasto: Secure Boot off
 
 Sono stati verificati: stato Secure Boot reale sul guest, prompt interattivo, sintassi, self-test SSDT, codice di backup e tentativo di rollback prima del primo Guest Agent. La sostituzione dell'EFI disk per `--disable-secure-boot` **non è stata eseguita sulla VM Ubuntu principale**. La prima esecuzione va trattata come modifica firmware: backup/snapshot, console noVNC disponibile e nessun dato non salvato nella VM.

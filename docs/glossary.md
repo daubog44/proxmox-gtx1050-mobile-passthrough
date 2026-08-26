@@ -90,3 +90,21 @@ Questo glossario separa termini che spesso vengono confusi. I riferimenti nel te
 ## Idempotenza
 
 Un comando è **idempotente** quando eseguirlo una o più volte porta allo stesso stato senza effetti aggiuntivi indesiderati. Qui significa: preparazione host senza flag/moduli/ROM duplicati; switch già riuscito senza riavvio; configurazione già presente ma MOK incompleto senza staccare e riattaccare la GPU. Idempotenza non significa che lo script possa correggere ogni firmware laptop: gli errori di topologia o VBIOS richiedono diagnosi specifica.
+
+## Come è stato validato il glossario
+
+Il glossario non è una lista copiata da una guida generica. Ogni famiglia di termini è stata confrontata con una fonte concreta:
+
+| Area | Evidenza usata |
+| --- | --- |
+| BDF, PCI ID, VBIOS e VFIO | `lspci`, driver `vfio-pci` e ROM verificata sul nodo HP |
+| Q35, `hostpci`, `rombar`, OVMF e QGA | Configurazione Proxmox e comportamento dello script `gpu-vm-switch` |
+| SSDT, ASL, AML, `_ROM` e `fw_cfg` | ASL generata, compilazione/disassemblaggio `iasl` e documentazione QEMU/ACPI |
+| Optimus, driver, VRAM e benchmark | `nvidia-smi`, Xorg `:2`, `nvtop` e `nvidia-glxgears` |
+| Secure Boot e MOK | `mokutil` sul guest, codice OVMF/Proxmox analizzato e documentazione NVIDIA/Proxmox |
+
+~~~bash
+python3 scripts/validate_documentation.py
+~~~
+
+Il validatore controlla automaticamente copertura dei termini, diagrammi, file locali e impronta della ROM. Non può dimostrare da solo che una definizione sia corretta: per questo il README collega fonti ufficiali e il walkthrough collega ogni concetto ai blocchi ASL/script che lo implementano.
