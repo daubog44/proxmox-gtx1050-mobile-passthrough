@@ -196,6 +196,61 @@ Il flusso è:
 
 Il comando completo è disponibile con `gpu-vm-switch --help`.
 
+## Output completo di `gpu-vm-switch --help`
+
+Questo e l'output **integrale**, non un riassunto, prodotto dallo script presente in questo repository. Puoi ristamparlo in qualunque momento sul nodo con `gpu-vm-switch --help`; per eseguire invece lo switch devi essere sul **[NODO]** come root.
+
+~~~text
+Uso:
+  gpu-vm-switch                         menu interattivo delle VM
+  gpu-vm-switch --vm VMID --yes         trasferimento non interattivo
+  gpu-vm-switch --vm VMID --dry-run     simulazione senza modifiche
+  gpu-vm-switch --prepare-host           prepara i prerequisiti del nodo Proxmox
+
+Opzioni:
+  --vm VMID           VM Proxmox che ricevera la GPU
+  --gpu 0000:BB:DD    GPU del nodo (default: 0000:02:00)
+  --rom /percorso.rom VBIOS OEM da esporre alla VM
+  --skip-drivers      non installa/aggiorna il driver nel guest
+  --mok-manual        conserva Secure Boot e guida il passaggio MOK manuale
+  --disable-secure-boot
+                      disabilita Secure Boot in modo permanente per una VM OVMF
+                      creando nuove variabili EFI senza chiavi; conserva una copia
+                      ripristinabile delle vecchie variabili sul nodo Proxmox
+  --prepare-host      installa gli strumenti host, configura IOMMU/VFIO e la ROM
+  --rom-source FILE   file VBIOS OEM sorgente da installare sul nodo con --prepare-host
+  --reboot            riavvia il nodo soltanto dopo --prepare-host e conferma esplicita
+  --yes               non chiede conferma
+  --dry-run           non modifica nulla
+  --self-test         compila/disassembla una SSDT di prova
+  -h, --help          mostra questo aiuto
+
+Casi d'uso:
+  Ubuntu:                       gpu-vm-switch
+  Debian/Kali/Arch/Fedora/RHEL: gpu-vm-switch --vm 123 --yes
+  Driver gia gestito da te:     gpu-vm-switch --vm 123 --skip-drivers --yes
+  OVMF senza MOK/Secure Boot:   gpu-vm-switch --vm 123 --disable-secure-boot --yes
+  OVMF con Secure Boot/MOK:     gpu-vm-switch --vm 123 --mok-manual
+  Prepara host dal repository:  gpu-vm-switch --prepare-host --rom-source ./firmware/gtx1050_hp_native.rom --yes
+  Prepara host e riavvia:       gpu-vm-switch --prepare-host --rom-source ./firmware/gtx1050_hp_native.rom --reboot --yes
+  Altra NVIDIA mobile/Optimus:  gpu-vm-switch --gpu 0000:03:00 --rom /usr/share/kvm/oem.rom --vm 123 --yes
+
+La VM di destinazione deve usare Q35, SeaBIOS o OVMF, e avere il QEMU Guest Agent attivo.
+Il trasferimento e idempotente: se la GPU e gia pronta sulla VM scelta non
+riavvia o modifica nulla. Le VM sorgenti che erano accese vengono riaccese
+automaticamente senza la GPU alla fine, anche se lo switch incontra un errore.
+Quando una VM perde la GPU vengono rimossi hostpci, ROM, SSDT, fw_cfg e le
+opzioni CPU specifiche del passthrough; firmware e chipset restano invariati.
+Se Secure Boot e attivo, il menu interattivo propone di disattivarlo. In modalita
+--yes non viene mai disattivato senza l'opzione esplicita --disable-secure-boot.
+--mok-manual non prova a premere MOK Manager: conserva Secure Boot, verifica se
+il driver parte e stampa il passaggio da completare dalla console noVNC quando serve.
+L'operazione Secure Boot e permanente: evita MOK, ma sostituisce solo le variabili
+EFI dopo avere creato un fallback di boot e una copia ripristinabile delle vecchie.
+Se il nuovo EFI non completa il primo boot fino al Guest Agent, lo script ripristina
+automaticamente efidisk0 originale; prima dell'uso e comunque consigliato uno snapshot.
+~~~
+
 ## Perché il solo passthrough PCI non basta in Optimus
 
 Con una scheda desktop, `hostpci` e talvolta `romfile=...` esponendo la finestra ROM PCI possono bastare. Qui no. Su un portatile Optimus il driver NVIDIA può chiedere la VBIOS al firmware della scheda madre tramite il metodo ACPI standard **`_ROM(offset, length)`** associato al device ACPI della GPU. Questo riflette la progettazione laptop: alimentazione, muxless graphics e firmware sono coordinati dalla piattaforma ACPI, non solo dal bus PCIe.

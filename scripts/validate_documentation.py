@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -64,6 +67,7 @@ def main() -> None:
             "docs/acpi-line-by-line.md",
             "docs/reproducible-runbook.md",
             "scripts/validate_documentation.py",
+            "## Output completo di `gpu-vm-switch --help`",
         ),
         "README",
     )
@@ -111,7 +115,22 @@ def main() -> None:
     if digest != EXPECTED_ROM_SHA256:
         raise AssertionError(f"SHA-256 ROM inatteso: {digest}")
 
-    print("documentazione-validata: glossario, diagrammi, link locali e ROM OEM ok")
+    marker = "~~~text\nUso:\n"
+    start = readme.index(marker) + len("~~~text\n")
+    end = readme.index("\n~~~", start)
+    documented_help = readme[start:end].rstrip()
+    git_bash = Path(os.environ.get("ProgramFiles", "")) / "Git" / "bin" / "bash.exe"
+    bash = str(git_bash) if git_bash.is_file() else (shutil.which("bash") or "bash")
+    actual_help = subprocess.run(
+        [bash, str(ROOT / "scripts" / "gpu-vm-switch"), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.rstrip()
+    if documented_help != actual_help:
+        raise AssertionError("README: l'output --help non corrisponde allo script")
+
+    print("documentazione-validata: glossario, diagrammi, help, link locali e ROM OEM ok")
 
 
 if __name__ == "__main__":
