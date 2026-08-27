@@ -65,7 +65,7 @@ Opzioni:
 
 Casi d'uso:
   Ubuntu:                       gpu-vm-switch
-  Debian/Kali/Arch/Fedora/RHEL: gpu-vm-switch --vm 123 --yes
+  Debian/Kali/Arch/Omarchy/Fedora/RHEL: gpu-vm-switch --vm 123 --yes
   Driver gia gestito da te:     gpu-vm-switch --vm 123 --skip-drivers --yes
   OVMF senza MOK/Secure Boot:   gpu-vm-switch --vm 123 --disable-secure-boot --yes
   OVMF con Secure Boot/MOK:     gpu-vm-switch --vm 123 --mok-manual
@@ -74,6 +74,9 @@ Casi d'uso:
   Altra NVIDIA mobile/Optimus:  gpu-vm-switch --gpu 0000:03:00 --rom /usr/share/kvm/oem.rom --vm 123 --yes
 
 La VM di destinazione deve usare Q35, SeaBIOS o OVMF, e avere il QEMU Guest Agent attivo.
+Se il disco del guest e cifrato con LUKS, dopo ogni avvio necessario allo switch
+devi sbloccarlo dalla console noVNC: la passphrase non viene e non deve essere
+automatizzata dallo script.
 Il trasferimento e idempotente: se la GPU e gia pronta sulla VM scelta non
 riavvia o modifica nulla. Le VM sorgenti che erano accese vengono riaccese
 automaticamente senza la GPU alla fine, anche se lo switch incontra un errore.
@@ -390,11 +393,11 @@ start_vm() {
 }
 
 wait_for_agent() {
-    local vm=$1 elapsed=0
+    local vm=$1 deadline
     (( DRY_RUN )) && return
+    deadline=$((SECONDS + 180))
     while ! qm agent "$vm" ping >/dev/null 2>&1; do
-        (( elapsed += 2 ))
-        (( elapsed < 180 )) || die "QEMU Guest Agent non raggiungibile nella VM $vm"
+        (( SECONDS < deadline )) || die "QEMU Guest Agent non raggiungibile nella VM $vm entro 180 secondi. Controlla la console noVNC: un guest con disco LUKS deve essere sbloccato manualmente prima che il Guest Agent possa partire."
         sleep 2
     done
 }
@@ -419,7 +422,26 @@ qga_b64() {
 }
 
 guest_distro() {
-    qga_b64 "$1" '. /etc/os-release; printf "%s" "$ID" | base64 -w0'
+    # Alcune derivate non usano l'ID della famiglia di pacchetti (per esempio
+    # Omarchy: ID=omarchy, ID_LIKE=arch). Normalizziamo solo le famiglie che
+    # hanno un percorso di installazione esplicitamente supportato qui.
+    qga_b64 "$1" '
+        . /etc/os-release
+        case "${ID:-}" in
+            ubuntu|debian|kali|arch|fedora|rhel|rocky|almalinux)
+                printf "%s" "$ID"
+                ;;
+            *)
+                case " ${ID_LIKE:-} " in
+                    *" arch "*) printf "arch" ;;
+                    *" debian "*) printf "debian" ;;
+                    *" fedora "*) printf "fedora" ;;
+                    *" rhel "*) printf "rhel" ;;
+                    *) printf "%s" "${ID:-unknown}" ;;
+                esac
+                ;;
+        esac | base64 -w0
+    '
 }
 
 check_vm_layout() {
@@ -857,6 +879,7 @@ cleanup() {
     exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 if (( HOST_PREP )); then
     prepare_host
