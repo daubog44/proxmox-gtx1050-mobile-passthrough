@@ -10,10 +10,10 @@ Questa pagina riguarda l'accesso remoto alla VM Ubuntu, non VBIOS, VFIO o SSDT. 
 | GNOME Remote Desktop 50.2, modo `system` | attivo su TCP 3389 | E' il server RDP Wayland corretto, chiamato da GNOME **Remote Login**. |
 | Stack Ubuntu installato | `gnome-remote-desktop 50.2-0ubuntu0.1`, `gnome-settings-daemon 50.0-1ubuntu1+rdphandover1`, `libfreerdp3 3.30.0` | Il suffisso `+rdphandover1` e' un backport locale e versionato della correzione di hand-over. Il candidato ufficiale resta `50.0-1ubuntu1`, quindi non viene sovrascritto finche' non arrivera' una revisione Ubuntu successiva. |
 | `xrdp`, `xorgxrdp`, GNOME Flashback/Metacity | **rimossi** | Non sono piu' listener, pacchetti o processi della VM. |
-| Client Windows `mstsc` predefinito | usato con profilo RDSTLS | E' la stessa app Windows preinstallata; il file `.rdp` fornisce l'attributo RDSTLS che la GUI non espone. |
-| Profilo RDSTLS salvato | caricato da `mstsc` | E' Unicode UTF-16 LE e contiene IP, utente, RDSTLS e richiesta di audio sul PC locale. Windows puo' chiedere una conferma manuale per autorizzare l'apertura di file `.rdp`. |
+| Client Windows `mstsc` predefinito | corretto per RDSTLS | La normale app Windows legge il profilo nascosto `Documents\Default.rdp`. Il 2026-08-27 conteneva `use redirection server name:i:0`: dopo il redirect sceglieva NLA. E' stato corretto in `:i:1`, quindi ora anche l'indirizzo digitato nella GUI eredita RDSTLS. |
+| Profilo RDSTLS salvato | disponibile come fallback riproducibile | `clients/windows-rdstls-template.rdp` e la copia Desktop sono Unicode UTF-16 LE e contengono IP, utente, RDSTLS e richiesta di audio sul PC locale. Sono per la stessa app `mstsc.exe`, non per un client alternativo. |
 | Audio RDP playback | **verificato manualmente dall'utente** | L'audio prodotto dalla VM e' arrivato al PC Windows con `audiomode:i:0`. Non e' una deduzione dai log: e' un ascolto reale riferito dall'utente. |
-| Hand-over dopo backport | installato, test Windows finale da ripetere | Il server emette `Sending server redirection`; il pacchetto corretto e' stato installato e GDM/RDP sono stati riavviati. Serve ora una nuova connessione `mstsc` per la prova visiva greeter -> desktop. |
+| Hand-over dopo backport | servizi e RDSTLS verificati; prova grafica diretta da ripetere dopo la correzione locale | Il server emette `Sending server redirection`, crea il greeter Wayland e avvia `gnome-remote-desktop-daemon --handover`. L'utente ha riferito che il profilo `.rdp` funziona; `Default.rdp` e' stato corretto per estendere la stessa modalita' al collegamento diretto. Una nuova prova visiva greeter -> desktop dal client predefinito resta il controllo finale. |
 
 Non e' corretto dichiarare RDP riuscito solo perche' il listener e il greeter partono. La prova conclusiva e' vedere il greeter e il desktop in `mstsc`, senza chiusura della finestra e senza errori di autenticazione/hand-over nel journal. Il renderer del desktop Wayland e il fix KMS sono documentati in [wayland-nvidia-kms.md](wayland-nvidia-kms.md): sono separati dalla negoziazione RDP.
 
@@ -85,7 +85,7 @@ ERRINFO_LOGOFF_BY_USER                     # il primo socket viene chiuso per la
 
 Le prove precedenti avevano mostrato anche `Could not find user in SAM database`, `SEC_E_NO_CREDENTIALS` e `client authentication failure`: erano il caso NLA descritto sotto. **SAM** qui non e' il file utenti Linux `/etc/passwd`: e' il database credenziali NTLM interno a FreeRDP. Nel secondo tratto GNOME puo' usare credenziali monouso trasmesse nella redirezione. Se `mstsc` sceglie NLA invece di RDSTLS, presenta credenziali che quel server temporaneo non trova nel suo SAM; la negoziazione fallisce e la finestra diventa nera.
 
-La redirezione gia' osservata dimostra che la GPU, il listener sulla 3389, il certificato e il primo login headless non sono il problema. Quello che manca e' il **secondo collegamento** a `gnome-remote-desktop-handover.service`. Questa sequenza corrisponde al problema Ubuntu [LP #2141992](https://bugs.launchpad.net/ubuntu/+source/gnome-remote-desktop/+bug/2141992): il problema storico `gsd-sharing` che fermava la unit di handover e il problema NLA/RDSTLS sono correlati nella stessa catena, ma non sono la stessa cosa.
+La redirezione gia' osservata dimostra che la GPU, il listener sulla 3389, il certificato e il primo login headless non sono il problema. Il log del tentativo delle 02:07 ha inoltre provato che il servizio handover si avviava e riceveva il collegamento. Il fallimento residuo era lato scelta del protocollo client: `Default.rdp` aveva `use redirection server name:i:0`, quindi un successivo tentativo manuale presentava NLA e il server riportava `SAM database`/`SEC_E_NO_CREDENTIALS`. Questa sequenza corrisponde al problema Ubuntu [LP #2141992](https://bugs.launchpad.net/ubuntu/+source/gnome-remote-desktop/+bug/2141992): la race storica di `gsd-sharing` e il passaggio NLA/RDSTLS sono correlati nella stessa catena, ma non sono la stessa cosa. Il primo e' mitigato dal backport; il secondo e' corretto nel profilo predefinito Windows.
 
 ## 3. Causa nel codice di gsd-sharing e backport installato
 
@@ -123,7 +123,7 @@ Il daemon GNOME 50.2 stesso indica questa opzione per rendere sicuro l'hand-over
 use redirection server name:i:1
 ~~~
 
-Usa [windows-rdstls-template.rdp](../clients/windows-rdstls-template.rdp): nel laboratorio contiene gia' `192.168.0.17:3389` e `daubog44`, ma non contiene password. E' un profilo per **la stessa** app `mstsc.exe` preinstallata, non un client alternativo. La GUI classica consente di digitare l'indirizzo, ma non espone `use redirection server name:i:1`, richiesto dalla redirezione RDSTLS di GNOME Remote Login.
+Usa [windows-rdstls-template.rdp](../clients/windows-rdstls-template.rdp) come fallback riproducibile: nel laboratorio contiene gia' `192.168.0.17:3389` e `daubog44`, ma non contiene password. E' un profilo per **la stessa** app `mstsc.exe` preinstallata, non un client alternativo. La GUI classica consente di digitare l'indirizzo, ma non espone l'attributo `use redirection server name:i:1`.
 
 Il file e' intenzionalmente UTF-16 LE con terminatori Windows: il client `mstsc` di questo PC non caricava il precedente modello UTF-8 con segnaposto. Sul Desktop e' stata copiata la versione pronta `Ubuntu-Wayland-RDSTLS.rdp`. Le righe rilevanti sono:
 
@@ -137,9 +137,28 @@ audiocapturemode:i:0
 
 `audiomode:i:0` chiede di ascoltare sul PC Windows l'audio prodotto nella VM; `audiocapturemode:i:0` non redirige il microfono. La password resta nel gestore credenziali di Windows o viene richiesta da `mstsc`; non va scritta nel file o nel repository. L'audio playback e' stato ascoltato e confermato manualmente dall'utente; il microfono non e' stato testato.
 
+### Rendere RDSTLS predefinito anche nella GUI Windows
+
+`mstsc` memorizza le impostazioni usate dalla sua finestra in `%USERPROFILE%\Documents\Default.rdp` (nascosto). Il file separato funzionava perche' conteneva `:i:1`; la GUI continuava invece a caricare il valore precedente `:i:0`. Il 2026-08-27, a `mstsc` chiuso, e' stato salvato nel profilo predefinito questo cambiamento:
+
+~~~diff
+-use redirection server name:i:0
++use redirection server name:i:1
+~~~
+
+Questa non installa software, non modifica Secure Boot e non memorizza la password. Cambia soltanto il protocollo da usare **dopo** il redirect GNOME. La verifica riproducibile sul PC Windows e':
+
+~~~powershell
+Get-Content "$env:USERPROFILE\Documents\Default.rdp" |
+  Select-String '^use redirection server name:'
+# atteso: use redirection server name:i:1
+~~~
+
+Ora si puo' aprire `Connessione Desktop remoto` dal menu Start, inserire `192.168.0.17` (o `192.168.0.17:3389`) e premere Connetti: e' la stessa applicazione del file `.rdp`, ma eredita RDSTLS. Non eliminare il file template: e' il fallback esplicito se in futuro Windows o l'utente risalvano `Default.rdp` con un valore diverso.
+
 Alla **prima** apertura Windows mostra una conferma locale equivalente a “autorizzo l'apertura dei file RDP su questo dispositivo per il mio account”. E' una protezione del client Windows, non una schermata MOK e non proviene da Ubuntu. Deve essere confermata manualmente dall'utente Windows: un'automazione non deve abilitare quella preferenza di sicurezza al suo posto.
 
-L'impostazione richiede a `mstsc` di usare RDSTLS per il secondo tratto invece del normale NLA. E' necessaria, ma non puo' correggere da sola un difetto nel servizio GNOME che deve ricevere la connessione reindirizzata. Il test visuale va rifatto partendo dal file autorizzato; il criterio di successo e' sotto.
+L'impostazione richiede a `mstsc` di usare RDSTLS per il secondo tratto invece del normale NLA. E' necessaria, ma non puo' correggere da sola un difetto nel servizio GNOME che deve ricevere la connessione reindirizzata. Il test visuale va rifatto dalla GUI diretta (oppure, in fallback, dal file template); il criterio di successo e' sotto.
 
 ## 5. Verifica riproducibile, senza dare nulla per scontato
 
@@ -171,10 +190,10 @@ sudo journalctl -f | grep -E -i \
 
 ### Sul PC Windows
 
-1. Apri il profilo `.rdp` dal modello, non soltanto l'indirizzo digitato a mano in `mstsc`.
-2. Conferma manualmente l'apertura del file al primo uso, se Windows lo chiede.
-3. Inserisci/usa le credenziali RDP configurate in GNOME Remote Login.
-4. Controlla nel journal: devono comparire `RDP server started` e `Sending server redirection`; la finestra non deve poi chiudersi. Se compaiono `SAM database` o `SEC_E_NO_CREDENTIALS`, annotali: indicano NLA, non NVIDIA.
+1. Verifica prima che `Default.rdp` mostri `use redirection server name:i:1` con il comando sopra. Se non lo mostra, apri il file template `.rdp`, che forza la stessa opzione.
+2. Apri `Connessione Desktop remoto` Windows, inserisci `192.168.0.17` (o `192.168.0.17:3389`) e connettiti; non serve installare un'altra app.
+3. Inserisci/usa le credenziali RDP configurate in GNOME Remote Login. Il file non contiene e non deve contenere password.
+4. Controlla nel journal: devono comparire `RDP server started` e `Sending server redirection`; la finestra non deve poi chiudersi. Se compaiono `SAM database` o `SEC_E_NO_CREDENTIALS`, controlla di nuovo il valore di `Default.rdp`: indicano NLA, non NVIDIA.
 5. Il risultato valido e' prima il greeter GNOME Wayland, poi il desktop dopo il login. Un listener aperto, CUDA inizializzato oppure la sola redirezione non bastano.
 
 ## 6. Quando fermarsi e rollback
