@@ -34,6 +34,9 @@ def main() -> None:
         encoding="utf-8"
     )
     rdp_wayland = (ROOT / "docs" / "rdp-wayland.md").read_text(encoding="utf-8")
+    sunshine_omarchy = (ROOT / "docs" / "sunshine-moonlight-omarchy.md").read_text(
+        encoding="utf-8"
+    )
 
     require(
         glossary,
@@ -160,6 +163,20 @@ def main() -> None:
         ),
         "diagnosi RDP",
     )
+    require(
+        sunshine_omarchy,
+        (
+            "h264_nvenc",
+            "nvidia-smi pmon",
+            "AQ_DRM_DEVICES",
+            "adapter_name = /dev/dri/card1",
+            "VirtIO",
+            "Couldn't import RGB Image: 0000300C",
+            "sunshine-linux-nvenc-system-memory-input.patch",
+            "sunshine-wayland-virtio-gbm.patch",
+        ),
+        "Sunshine/Moonlight Omarchy",
+    )
 
     for local_path in (
         ROOT / "evidence" / "nvtop-glxgears-proof.png",
@@ -171,8 +188,11 @@ def main() -> None:
         ROOT / "docs" / "laptop-passthrough-claim-matrix.md",
         ROOT / "docs" / "rdp-wayland.md",
         ROOT / "docs" / "wayland-nvidia-kms.md",
+        ROOT / "docs" / "sunshine-moonlight-omarchy.md",
         ROOT / "clients" / "windows-rdstls-template.rdp",
         ROOT / "patches" / "gnome-settings-daemon-50.0-rdp-handover.patch",
+        ROOT / "patches" / "sunshine-linux-nvenc-system-memory-input.patch",
+        ROOT / "patches" / "sunshine-wayland-virtio-gbm.patch",
     ):
         if not local_path.is_file():
             raise AssertionError(f"file locale mancante: {local_path.relative_to(ROOT)}")

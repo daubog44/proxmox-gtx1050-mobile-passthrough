@@ -1,0 +1,14 @@
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -524,9 +524,9 @@ namespace video {
+       AV_HWDEVICE_TYPE_NONE,
+       AV_PIX_FMT_D3D11,
+   #else
+-      AV_HWDEVICE_TYPE_CUDA,
+       AV_HWDEVICE_TYPE_NONE,
+-      AV_PIX_FMT_CUDA,
++      AV_HWDEVICE_TYPE_NONE,
++      AV_PIX_FMT_NONE,
+   #endif
+       AV_PIX_FMT_NV12,
+       AV_PIX_FMT_P010,

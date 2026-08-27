@@ -256,7 +256,9 @@ Opzioni:
 
 Casi d'uso:
   Ubuntu:                       gpu-vm-switch
-  Debian/Kali/Arch/Fedora/RHEL: gpu-vm-switch --vm 123 --yes
+  Debian/Kali/Fedora/RHEL:       gpu-vm-switch --vm 123 --yes
+  Omarchy + GTX 1050 Pascal:     gpu-vm-switch --vm 123 --yes
+  Arch con GPU recente:          gpu-vm-switch --vm 123 --yes
   Driver gia gestito da te:     gpu-vm-switch --vm 123 --skip-drivers --yes
   OVMF senza MOK/Secure Boot:   gpu-vm-switch --vm 123 --disable-secure-boot --yes
   OVMF con Secure Boot/MOK:     gpu-vm-switch --vm 123 --mok-manual
@@ -265,6 +267,9 @@ Casi d'uso:
   Altra NVIDIA mobile/Optimus:  gpu-vm-switch --gpu 0000:03:00 --rom /usr/share/kvm/oem.rom --vm 123 --yes
 
 La VM di destinazione deve usare Q35, SeaBIOS o OVMF, e avere il QEMU Guest Agent attivo.
+Se il disco del guest e cifrato con LUKS, dopo ogni avvio necessario allo switch
+devi sbloccarlo dalla console noVNC: la passphrase non viene e non deve essere
+automatizzata dallo script.
 Il trasferimento e idempotente: se la GPU e gia pronta sulla VM scelta non
 riavvia o modifica nulla. Le VM sorgenti che erano accese vengono riaccese
 automaticamente senza la GPU alla fine, anche se lo switch incontra un errore.
@@ -450,6 +455,9 @@ docs/glossary.md                  glossario esteso di tutti i termini
 docs/attempts-and-outcomes.md     tentativi falliti, causa e correzione
 docs/rdp-wayland.md               diagnostica RDP: xrdp/X11 e Remote Login GNOME/Wayland
 docs/wayland-nvidia-kms.md        fix KMS, renderer Wayland, VSync, Xorg :2, APT e audio RDP
+docs/sunshine-moonlight-omarchy.md  cattura VirtIO stabile + NVENC GTX verificato su Omarchy
+patches/sunshine-linux-nvenc-system-memory-input.patch  patch per il feed NV12 a NVENC
+patches/sunshine-wayland-virtio-gbm.patch  patch GBM per la cattura Wayland su VirtIO
 evidence/                         prova nvtop + glxgears
 output/pdf/                       relazione tecnica con fonti e diagrammi
 ```
