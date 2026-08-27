@@ -24,6 +24,8 @@ EFI_RECOVERY_VM=''
 EFI_RECOVERY_DISK=''
 HOST_REBOOT_REQUIRED=0
 VFIO_CHANGED=0
+PRE_ATTACHED_ACPI_PATH=''
+DRIVER_INSTALLED_PREBOOT=0
 
 die() { echo "Errore: $*" >&2; exit 1; }
 note() { echo "==> $*"; }
@@ -977,6 +979,19 @@ if (( ! ASSUME_YES )); then
     fi
 fi
 
+# Se un precedente tentativo ha gia collegato la GPU alla VM e il Guest Agent
+# e raggiungibile, riutilizziamo quell'avvio. Questo evita un boot intermedio
+# (e una passphrase LUKS aggiuntiva) solo per scoprire il percorso ACPI.
+if [[ -n $(gpu_keys "$TARGET_VM" | head -n1 || true) ]] && ! has_optimus_args "$TARGET_VM"; then
+    PRE_ATTACHED_ACPI_PATH=$(discover_acpi_path "$TARGET_VM")
+    note "GPU gia collegata: percorso ACPI rilevato senza riavvio: \\_SB.PCI0.$PRE_ATTACHED_ACPI_PATH"
+    if (( INSTALL_DRIVERS )) && ! guest_nvidia_ready "$TARGET_VM"; then
+        note 'installo il driver prima del riavvio finale della configurazione GPU'
+        install_linux_driver "$TARGET_VM"
+        DRIVER_INSTALLED_PREBOOT=1
+    fi
+fi
+
 if (( ! DISABLE_SECURE_BOOT )) && same_optimus_attachment "$TARGET_VM"; then
     note 'idempotente: configurazione GPU/SSDT/fw_cfg gia presente; verifico solo driver e MOK'
     if (( INSTALL_DRIVERS )) && ! guest_nvidia_ready "$TARGET_VM"; then
@@ -1052,17 +1067,21 @@ enable_gpu_cpu "$TARGET_VM"
 note "collego $GPU_SLOT alla VM $TARGET_VM come $target_key"
 run qm set "$TARGET_VM" "--$target_key" "$GPU_SLOT,pcie=1,rombar=0,romfile=$(basename "$ROM")"
 
-note 'avvio temporaneo per scoprire il percorso ACPI reale della GPU'
-start_vm "$TARGET_VM"
-wait_for_agent "$TARGET_VM"
-if (( DISABLE_SECURE_BOOT )) && [[ $secure_state == enabled ]]; then
-    [[ $(secure_boot_state "$TARGET_VM") == disabled ]] ||
-        die "VM $TARGET_VM: Secure Boot risulta ancora attivo dopo la sostituzione EFI"
-    commit_efi_change
+if [[ -n $PRE_ATTACHED_ACPI_PATH ]]; then
+    acpi_path=$PRE_ATTACHED_ACPI_PATH
+else
+    note 'avvio temporaneo per scoprire il percorso ACPI reale della GPU'
+    start_vm "$TARGET_VM"
+    wait_for_agent "$TARGET_VM"
+    if (( DISABLE_SECURE_BOOT )) && [[ $secure_state == enabled ]]; then
+        [[ $(secure_boot_state "$TARGET_VM") == disabled ]] ||
+            die "VM $TARGET_VM: Secure Boot risulta ancora attivo dopo la sostituzione EFI"
+        commit_efi_change
+    fi
+    acpi_path=$(discover_acpi_path "$TARGET_VM")
+    note "percorso ACPI rilevato: \\_SB.PCI0.$acpi_path"
+    stop_vm "$TARGET_VM"
 fi
-acpi_path=$(discover_acpi_path "$TARGET_VM")
-note "percorso ACPI rilevato: \\_SB.PCI0.$acpi_path"
-stop_vm "$TARGET_VM"
 
 aml=$(build_ssdt "$TARGET_VM" "$acpi_path")
 args=$(vm_args "$TARGET_VM" | strip_optimus_args)
@@ -1076,13 +1095,13 @@ if (( DISABLE_SECURE_BOOT )) && [[ $secure_state == enabled ]]; then
     [[ $(secure_boot_state "$TARGET_VM") == disabled ]] ||
         die "VM $TARGET_VM: Secure Boot risulta ancora attivo dopo la sostituzione EFI"
 fi
-if (( INSTALL_DRIVERS )) && ! guest_nvidia_ready "$TARGET_VM"; then
+if (( INSTALL_DRIVERS && ! DRIVER_INSTALLED_PREBOOT )) && ! guest_nvidia_ready "$TARGET_VM"; then
     install_linux_driver "$TARGET_VM"
     note 'riavvio della VM per caricare il driver appena installato'
     stop_vm "$TARGET_VM"
     start_vm "$TARGET_VM"
     wait_for_agent "$TARGET_VM"
-elif ensure_linux_nvidia_kms "$TARGET_VM"; then
+elif (( ! DRIVER_INSTALLED_PREBOOT )) && ensure_linux_nvidia_kms "$TARGET_VM"; then
     note 'KMS NVIDIA aggiornato; riavvio della VM per evitare llvmpipe in Xwayland'
     stop_vm "$TARGET_VM"
     start_vm "$TARGET_VM"
