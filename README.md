@@ -2,8 +2,6 @@
 
 Repository didattico e operativo per assegnare la GPU NVIDIA discreta di un portatile HP a una VM Linux Proxmox. Il caso recuperato qui non è un normale passthrough desktop: è una GPU **NVIDIA Optimus/mobile** a cui il driver richiede la VBIOS attraverso ACPI.
 
-> Stato onesto: Ubuntu ha usato la GTX 1050 con driver `580.173.02`, `nvidia-smi` e `glxgears` sulla GPU reale. Il passaggio (con lo script per assegnare la gpu) Ubuntu -> Kali -> Ubuntu è stato verificato. Il 2026-08-27 e' stato corretto anche il rendering del desktop: la sessione resta Wayland e `glxinfo -B` ora restituisce `NVIDIA GeForce GTX 1050/PCIe/SSE2`, non `llvmpipe`; vedi [Wayland, KMS e benchmark](docs/wayland-nvidia-kms.md). Per RDP e' stato creato uno snapshot e installato il backport locale `gnome-settings-daemon 50.0-1ubuntu1+rdphandover1`, che corregge il hand-over GNOME; il test visivo Windows dopo il riavvio di GDM resta da rifare. L'audio playback RDP e' invece stato confermato manualmente. Dettagli, patch e rollback sono in [docs/rdp-wayland.md](docs/rdp-wayland.md). Il ramo che sostituisce l'EFI disk per disabilitare Secure Boot è stato controllato nel codice e con il prompt reale, ma **non è stato eseguito sulla VM Ubuntu principale**: prima prova con snapshot e noVNC aperto.
-
 ![Prova finale: nvtop mostra glxgears al 99% della GTX 1050 e Xorg NVIDIA sul display :2](evidence/nvtop-glxgears-proof.png)
 
 ## Prima dei comandi: dove sei e cosa stai guardando
