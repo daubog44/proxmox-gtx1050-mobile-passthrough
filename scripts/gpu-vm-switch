@@ -68,7 +68,9 @@ Opzioni:
 
 Casi d'uso:
   Ubuntu:                       gpu-vm-switch
-  Debian/Kali/Arch/Omarchy/Fedora/RHEL: gpu-vm-switch --vm 123 --yes
+  Debian/Kali/Fedora/RHEL:       gpu-vm-switch --vm 123 --yes
+  Omarchy + GTX 1050 Pascal:     gpu-vm-switch --vm 123 --yes
+  Arch con GPU recente:          gpu-vm-switch --vm 123 --yes
   Driver gia gestito da te:     gpu-vm-switch --vm 123 --skip-drivers --yes
   OVMF senza MOK/Secure Boot:   gpu-vm-switch --vm 123 --disable-secure-boot --yes
   OVMF con Secure Boot/MOK:     gpu-vm-switch --vm 123 --mok-manual
@@ -407,7 +409,9 @@ wait_for_agent() {
 
 guest_has_luks() {
     local result
-    result=$(qga_result "$1" 'lsblk -nr -o TYPE | grep -qx crypto_LUKS') || return 1
+    # L'assenza di LUKS e' un esito normale, non un errore QGA da stampare.
+    result=$(qm guest exec "$1" --timeout 30 -- /bin/sh -c \
+        'lsblk -nr -o TYPE | grep -qx crypto_LUKS') || return 1
     grep -q '"exitcode"[[:space:]]*:[[:space:]]*0' <<<"$result"
 }
 
