@@ -2,7 +2,7 @@
 
 Repository didattico e operativo per assegnare la GPU NVIDIA discreta di un portatile HP a una VM Linux Proxmox. Il caso recuperato qui non è un normale passthrough desktop: è una GPU **NVIDIA Optimus/mobile** a cui il driver richiede la VBIOS attraverso ACPI.
 
-> Stato onesto: Ubuntu ha usato la GTX 1050 con driver `580.173.02`, `nvidia-smi` e `glxgears` sulla GPU reale. Il passaggio (con lo script per assegnare la gpu) Ubuntu -> Kali -> Ubuntu è stato verificato. Il ramo che sostituisce l'EFI disk per disabilitare Secure Boot è stato controllato nel codice e con il prompt reale, ma **non è stato eseguito sulla VM Ubuntu principale**: prima prova con snapshot e noVNC aperto.
+> Stato onesto: Ubuntu ha usato la GTX 1050 con driver `580.173.02`, `nvidia-smi` e `glxgears` sulla GPU reale. Il passaggio (con lo script per assegnare la gpu) Ubuntu -> Kali -> Ubuntu è stato verificato. Il 2026-08-27 e' stato corretto anche il rendering del desktop: la sessione resta Wayland e `glxinfo -B` ora restituisce `NVIDIA GeForce GTX 1050/PCIe/SSE2`, non `llvmpipe`; vedi [Wayland, KMS e benchmark](docs/wayland-nvidia-kms.md). Per RDP e' stato creato uno snapshot e installato il backport locale `gnome-settings-daemon 50.0-1ubuntu1+rdphandover1`, che corregge il hand-over GNOME; il test visivo Windows dopo il riavvio di GDM resta da rifare. L'audio playback RDP e' invece stato confermato manualmente. Dettagli, patch e rollback sono in [docs/rdp-wayland.md](docs/rdp-wayland.md). Il ramo che sostituisce l'EFI disk per disabilitare Secure Boot è stato controllato nel codice e con il prompt reale, ma **non è stato eseguito sulla VM Ubuntu principale**: prima prova con snapshot e noVNC aperto.
 
 ![Prova finale: nvtop mostra glxgears al 99% della GTX 1050 e Xorg NVIDIA sul display :2](evidence/nvtop-glxgears-proof.png)
 
@@ -71,8 +71,9 @@ La tabella non mescola prova reale, controllo del codice e funzionalita non anco
 | Preparazione idempotente | [NODO], script in simulazione | `gpu-vm-switch --prepare-host --rom-source /usr/share/kvm/gtx1050_hp_native.rom --dry-run --yes` | Nessuna scrittura e nessun reboot. | Il preflight e ripetibile senza toccare il nodo. |
 | Ubuntu -> Kali -> Ubuntu | [NODO], `gpu-vm-switch` | `gpu-vm-switch --vm 1000 --yes`, poi `gpu-vm-switch --vm 1001 --yes` | Cleanup, discovery PCI/ACPI e SSDT riusciti in entrambe le direzioni. | Il trasferimento OVMF/Q35 <-> SeaBIOS/Q35 e reale; non certifica altri laptop. |
 | Driver su Ubuntu | [VM Ubuntu], `nvidia-smi` | `nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader` | `NVIDIA GeForce GTX 1050, 580.173.02, 4096 MiB`. | Driver e VRAM sono visibili; non e un benchmark. |
-| Rendering OpenGL | [VM Ubuntu], Xorg NVIDIA headless `:2` e `nvidia-glxgears` | `nvidia-glxgears` e screenshot [nvtop](evidence/nvtop-glxgears-proof.png) | Circa 24-25 mila FPS; `nvtop` mostra `nvidia-glxgears` al 99% GPU. | Il rendering e sulla GTX 1050; non equivale a un benchmark di gioco. |
+| Rendering OpenGL | [VM Ubuntu], desktop Wayland/Xwayland | `glxinfo -B`, `nvidia-smi`, `nvtop`, `glxgears` | Renderer `NVIDIA GeForce GTX 1050/PCIe/SSE2`; `glxgears` visibile ~60 FPS con VSync RDP. | 60 FPS e' il refresh virtuale, non il limite GPU; il vecchio Xorg `:2` e' soltanto un supporto diagnostico headless. |
 | Idempotenza switch | [NODO], script | `gpu-vm-switch --vm 1001 --mok-manual --yes` con Ubuntu gia pronta | Messaggio idempotente, nessuna riscrittura o riavvio. | Ripetere il comando non riconfigura una GPU gia collegata. |
+| RDP Wayland | [VM Ubuntu], GNOME Remote Login + `mstsc` Windows | Profilo [RDSTLS](clients/windows-rdstls-template.rdp), snapshot e backport locale `gnome-settings-daemon` | L'audio playback su Windows e' stato confermato manualmente; il server emette `Sending server redirection`. | La patch impedisce che `gsd-sharing` spenga l'hand-over con il daemon RDP di sistema ancora vivo. Dopo il riavvio GDM serve il nuovo test visivo greeter -> desktop; vedi [diagnosi RDP](docs/rdp-wayland.md). |
 | Disabilitazione Secure Boot | Non eseguita su Ubuntu principale | Revisione del codice e del prompt soltanto. | **Nessuna prova runtime dichiarata.** | Richiede snapshot e noVNC; non e dichiarata risolta/testata. |
 
 ## Perche funziona in questo HP, in sette passaggi
@@ -346,11 +347,44 @@ Non basta lanciare lo switch e leggere un messaggio di successo. La procedura ri
 
 I comandi esatti, output attesi, varianti per un'altra GPU e condizioni in cui fermarsi sono nel [runbook](docs/reproducible-runbook.md). Il runbook distingue esplicitamente verifiche statiche/documentali da prova reale sul nodo/guest.
 
+### Flusso effettivo di gpu-vm-switch, nell'ordine in cui avviene
+
+Questa sequenza è utile soprattutto quando la GPU è già collegata a un'altra VM: non occorre modificare a mano il file di configurazione Proxmox.
+
+1. Lo script controlla di essere root su Proxmox, acquisisce un lock per evitare due switch simultanei, verifica BDF, ROM, iasl e lspci. Con --dry-run si ferma qui dopo avere mostrato proprietario e destinazione: non ferma né modifica VM.
+2. Sceglie la destinazione dal menu oppure prende --vm VMID; richiede Q35, SeaBIOS oppure OVMF e abilita QEMU Guest Agent se manca. Avvia temporaneamente la destinazione solo per poter parlare con il Guest Agent.
+3. Legge Secure Boot dentro il guest con mokutil --sb-state o, se mokutil non esiste, con la variabile EFI SecureBoot-*. Nel menu interattivo chiede se disabilitarlo; con --yes non può mai farlo senza l'opzione esplicita --disable-secure-boot.
+4. Prima di spostare hardware, controlla l'idempotenza: se una sola VM possiede già questa GPU, ha hostpci, SSDT e fw_cfg corretti e nvidia-smi funziona, stampa idempotente e termina senza riavviare nulla. Se l'assegnazione è corretta ma il driver non parte, conserva l'assegnazione e fa solo il controllo/installazione driver o le istruzioni MOK.
+5. Cerca le altre VM che possiedono il BDF. Per ciascuna salva se era accesa, ferma il benchmark opzionale e la VM, poi elimina soltanto la chiave hostpciN della GPU, gli argomenti -acpitable/-fw_cfg creati dal tool, la SSDT generata e cpu=host,hidden=1 quando è esattamente la scelta del tool. Non converte BIOS/OVMF, chipset Q35, dischi, rete o video virtuale.
+6. Ferma la VM destinazione, collega hostpciN=0000:BB:DD,pcie=1,rombar=0,romfile=..., ripulisce eventuali argomenti Optimus precedenti della sola destinazione e abilita la CPU hidden gestita dal tool.
+7. La riavvia una prima volta senza SSDT per eseguire lspci -PP -n -d <PCI-ID> dal guest. Trasforma quel percorso PCI virtuale nel percorso ACPI reale, genera ASL, lo compila con iasl in AML e spegne di nuovo la VM.
+8. Scrive nella destinazione sia -acpitable file=ssdt-VMID.aml sia -fw_cfg name=opt/com.lion328/nvidia-rom,file=<ROM>, poi avvia la VM definitivamente. Se necessario installa driver/headers/DKMS per la distribuzione rilevata, marca manuali le radici driver contro `autoremove`, corregge un eventuale `nvidia_drm modeset=0`, aggiorna initramfs e riavvia soltanto se serve prima di verificare nvidia-smi.
+9. All'uscita, anche dopo un errore, il trap dello script riaccende le VM sorgenti che erano attive prima dello switch, questa volta senza la GPU. Se è in corso il ramo EFI, il trap ripristina anche efidisk0 originale finché il primo avvio nuovo non ha raggiunto il Guest Agent.
+
+Questo è il significato concreto di “idempotente”: ripetere lo stesso comando su una VM già pronta non duplica hostpci, ROM, args, SSDT, repository APT o reboot. Il controllo KMS aggiorna initramfs e riavvia solo se trova davvero un override `modeset=0`. Non significa che un firmware OEM incompatibile, un gruppo IOMMU pericoloso o una DSDT diversa diventino automaticamente compatibili.
+
 ## Secure Boot e MOK: due percorsi, nessuna promessa falsa
 
-**MOK** significa *Machine Owner Key*. Il driver NVIDIA non “causa MOK” da solo: il caso tipico è `nvidia-dkms`, che compila il modulo kernel localmente. Con Secure Boot attivo il kernel carica solo moduli firmati da chiavi fidate. DKMS può firmare il modulo con una chiave propria, ma il suo certificato deve essere approvato dal firmware tramite MOK Manager, una schermata pre-boot.
+**Prima separiamo cinque cose diverse.** Il driver NVIDIA è il software; un *modulo kernel* è la sua parte che Linux deve caricare; **DKMS** è il compilatore automatico che può ricreare quel modulo quando cambia kernel; **Secure Boot** è la politica UEFI che accetta soltanto componenti firmati da chiavi fidate; **MOK** (*Machine Owner Key*) è il certificato pubblico che il proprietario autorizza; **shim** è il piccolo componente UEFI firmato dalla distribuzione che, dopo l'enrollment, consegna quella fiducia alla catena Linux. MOK non è il driver e non è una password dell'utente.
 
-`mokutil` può programmare l'import, ma SSH e QEMU Guest Agent non possono premere la schermata pre-boot. Lo script offre quindi due scelte esplicite:
+Quindi NVIDIA non “fa apparire MOK” per definizione. Se la distribuzione fornisce un modulo già firmato con una chiave già fidata, il driver può caricare e MOK non compare. MOK serve quando DKMS compila e firma un modulo locale, come `nvidia.ko`, con una chiave pubblica che il kernel non considera ancora fidata. La password scelta con `mokutil --import` non è la password dell'account e non firma il driver: protegge soltanto la richiesta di registrazione fino alla schermata firmware successiva.
+
+Il percorso completo, senza salti, è:
+
+~~~text
+1. lo script accende la VM scelta se serve, aspetta il Guest Agent e legge **nel guest** `mokutil --sb-state` (fallback: variabile EFI `SecureBoot-*`), prima di qualsiasi cleanup
+2. in modalità interattiva, se Secure Boot è enabled, chiede se disabilitarlo; con `--yes` non lo cambia mai senza `--disable-secure-boot`
+3. esegue lo switch oppure mantiene GPU/SSDT/`fw_cfg` se sono già corretti: questo è il ramo idempotente
+4. solo se serve installa/aggiorna il driver; DKMS può compilare `nvidia.ko`, poi la VM viene riavviata e lo script prova `nvidia-smi`
+5. se `nvidia-smi` resta non pronto con Secure Boot attivo, `--mok-manual` non importa alcuna chiave: lascia il passthrough intatto, mostra `mokutil --list-new` e cerca i certificati DKMS
+6. l'utente esegue `mokutil --import certificato.der`, sceglie la password temporanea e riavvia
+7. UEFI avvia shim; MOK Manager appare prima di Linux; l'utente conferma `Enroll MOK -> Continue -> Yes`
+8. al reboot successivo shim rende la chiave approvata disponibile al kernel; il modulo firmato può caricare e lo script ripete solo la verifica idempotente
+~~~
+
+Il punto 5 è il confine reale dell'automazione: in quel momento non esistono ancora rete, SSH, QEMU Guest Agent o un processo Linux a cui mandare tasti. Un programma che dicesse di “premere MOK automaticamente” starebbe promettendo una cosa che non può fare in modo affidabile. MOK Manager compare **solo** se esiste una chiave pendente, non a ogni avvio.
+
+Lo script offre quindi due scelte esplicite:
 
 ```bash
 # [NODO] come root: conserva Secure Boot e stampa istruzioni se serve MOK.
@@ -363,9 +397,20 @@ gpu-vm-switch --vm 1001 --mok-manual
 gpu-vm-switch --vm 1001 --disable-secure-boot --yes
 ```
 
-Per il percorso A, dopo che lo script indica che il modulo non è pronto, apri la console **noVNC** della VM: nel guest importa il certificato DKMS indicato (ad esempio `sudo mokutil --import /percorso/al/certificato.der`), scegli una password temporanea, riavvia e in MOK Manager seleziona **Enroll MOK -> Continue -> Yes**, inserendo quella password. Al boot successivo ripeti `gpu-vm-switch --vm 1001 --mok-manual`; se il driver era già firmato dalla distribuzione, MOK potrebbe non essere necessario.
+Nel percorso A, `--mok-manual` non cambia EFI né Secure Boot e non lancia `mokutil --import` al posto dell'utente. Dopo lo switch (o nel ramo in cui il passthrough era già presente) installa il driver se manca, riavvia e prova `nvidia-smi`. Se il modulo non è utilizzabile con Secure Boot attivo, mostra `mokutil --list-new` e cerca certificati plausibili in `/var/lib/dkms` e `/var/lib/shim-signed`. A quel punto:
 
-Il percorso B prepara `EFI/BOOT/BOOTX64.EFI`, salva copia raw e metadata in `/usr/share/kvm/optimus-gpu-switch/efi-backups/` e sostituisce solo le variabili OVMF con un template senza chiavi pre-caricate. Il vecchio EFI disk resta `unused` e lo script tenta il rollback prima del primo boot con Guest Agent se il nuovo avvio fallisce. Riduce la protezione della catena di boot e, soprattutto, **non è stato ancora testato eseguendolo sulla Ubuntu principale**. Fare snapshot/backup e tenere noVNC aperto prima di usarlo.
+~~~bash
+# [VM] usa esattamente il file .der che lo script ha indicato.
+sudo mokutil --sb-state
+sudo mokutil --list-new
+sudo mokutil --import /percorso/al/certificato.der
+# scegli una password temporanea, poi:
+sudo reboot
+~~~
+
+Apri noVNC durante il reboot e scegli **Enroll MOK -> Continue -> Yes**; inserisci la stessa password temporanea, completa il riavvio e ripeti gpu-vm-switch --vm 1001 --mok-manual. Se la GPU era già assegnata correttamente, questa seconda esecuzione prende il ramo idempotente e verifica solamente il driver.
+
+Nel percorso B, --disable-secure-boot è disponibile solo con OVMF e efidisk0 da 4 MiB. Dopo aver verificato Secure Boot nel guest, lo script prepara EFI/BOOT/BOOTX64.EFI, copia variabili e metadata in /usr/share/kvm/optimus-gpu-switch/efi-backups/ e sostituisce solo il disco di variabili EFI con uno senza chiavi pre-caricate. Il vecchio disco EFI resta unused; fino al primo avvio riuscito con Guest Agent il trap può ripristinarlo. È una scelta **permanente finché non ripristini le vecchie variabili**, evita l'enrollment MOK ma riduce la protezione della catena di boot. Il ramo è stato analizzato e protetto da backup/rollback, ma **non è stato ancora eseguito sulla VM Ubuntu principale**: prima snapshot, backup e noVNC aperto.
 
 ## Driver, benchmark e monitoraggio
 
@@ -374,14 +419,18 @@ Il percorso B prepara `EFI/BOOT/BOOTX64.EFI`, salva copia raw e metadata in `/us
 ```bash
 # [VM Ubuntu] nella console noVNC/SSH della VM, non sul nodo Proxmox
 nvidia-glxgears
-# 120907 frames in 5.0 seconds = 24181.367 FPS
-# 125006 frames in 5.0 seconds = 25001.096 FPS
+glxinfo -B | grep -E 'OpenGL vendor|OpenGL renderer'
+# atteso: NVIDIA Corporation / NVIDIA GeForce GTX 1050/PCIe/SSE2
+
+# Nel desktop RDP: ~60 FPS e' normale, perche' glxgears segue VSync a 60 Hz.
+# __GL_SYNC_TO_VBLANK=0 glxgears mostra un contatore non sincronizzato,
+# non un benchmark di gioco.
 
 watch -n 1 nvidia-smi
 nvtop
 ```
 
-`htop` vede processi, CPU e RAM del sistema operativo, non i contatori proprietari NVIDIA; per GPU, VRAM e processi usare `nvidia-smi` o `nvtop`. `glmark2-es2-drm` non è un buon test in questa topologia muxless: può finire sul DRM virtuale/QXL e `llvmpipe`, non sulla NVIDIA.
+`htop` vede processi, CPU e RAM del sistema operativo, non i contatori proprietari NVIDIA; per GPU, VRAM e processi usare `nvidia-smi` o `nvtop`. `glmark2-es2-drm` non è un buon test in questa topologia muxless: può finire sul DRM virtuale/QXL e `llvmpipe`, non sulla NVIDIA. La verifica e il fix `nvidia_drm.modeset=Y`, il ruolo di Xorg `:2` e la protezione da `apt autoremove` sono spiegati in [wayland-nvidia-kms.md](docs/wayland-nvidia-kms.md).
 
 ## Contenuto e studio
 
@@ -395,6 +444,8 @@ docs/reproducible-runbook.md      procedura completa e verificabile, senza passa
 docs/laptop-passthrough-claim-matrix.md  valutazione verificabile dei problemi tipici laptop
 docs/glossary.md                  glossario esteso di tutti i termini
 docs/attempts-and-outcomes.md     tentativi falliti, causa e correzione
+docs/rdp-wayland.md               diagnostica RDP: xrdp/X11 e Remote Login GNOME/Wayland
+docs/wayland-nvidia-kms.md        fix KMS, renderer Wayland, VSync, Xorg :2, APT e audio RDP
 evidence/                         prova nvtop + glxgears
 output/pdf/                       relazione tecnica con fonti e diagrammi
 ```
@@ -406,5 +457,6 @@ Risorse consigliate, dall'ordine più pratico al più profondo:
 3. [Specifiche QEMU fw_cfg](https://qemu-project.gitlab.io/qemu/specs/fw_cfg.html) per il canale usato qui.
 4. [Specifiche ACPI UEFI](https://uefi.org/acpi/specs) e [ACPICA/iasl](https://acpica.org/) per leggere e compilare ASL/AML.
 5. [NVIDIA: moduli kernel driver](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/kernel-modules.html) e [GTX 10 Laptop/Pascal](https://www.nvidia.com/en-us/geforce/news/nvidia-geforce-gtx-1050-laptops/).
+6. [GNOME Remote Login](https://teams.pages.gitlab.gnome.org/Websites/help.gnome.org/gnome-help/remote-login.html) per RDP nativo Wayland, separato dal passthrough.
 
 Il PDF [relazione-passthrough-gtx1050.pdf](output/pdf/relazione-passthrough-gtx1050.pdf) raccoglie il percorso tecnico, il glossario sintetico, i prerequisiti, le verifiche e le fonti.

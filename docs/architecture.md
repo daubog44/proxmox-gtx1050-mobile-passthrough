@@ -97,24 +97,30 @@ preparazione host idempotente
   -> riavvio esplicito del nodo
 
 switch idempotente
-  individua proprietario GPU
+  preflight BDF/ROM/Q35/QGA e lettura Secure Boot guest
+  -> se già pronto: verifica nvidia-smi, nessun reboot
+  -> individua proprietario GPU
   -> stop VM sorgente, cleanup solo delle opzioni gestite
-  -> restart sorgente senza GPU se prima running
   -> assegna hostpci alla destinazione
   -> boot temporaneo + lspci -PP
-  -> ASL -> AML
+  -> PCI guest -> scope ACPI -> ASL -> AML
   -> boot finale con -acpitable e -fw_cfg
   -> driver, nvidia-smi, benchmark
+  -> trap finale: restart sorgente senza GPU se prima running
 ```
 
 Il cleanup non usa un “ripristino della VM” generico. Rimuove soltanto la chiave `hostpciN` che punta alla GPU selezionata, gli argomenti `-acpitable`/`-fw_cfg` generati, l'SSDT generata e `cpu=host,hidden=1` se è precisamente la scelta dello script. Non cambia firmware OVMF/SeaBIOS, chipset Q35, dischi o video virtuale.
 
 ## Secure Boot e il confine dell'automazione
 
-La parte guest può installare driver, riavviare e leggere `mokutil`, ma MOK Manager è prima del kernel. Per questo ci sono due procedure volutamente separate:
+Secure Boot verifica chi firma ciò che Linux carica. Se l'installazione del driver usa DKMS, DKMS può compilare `nvidia.ko` e firmarlo con una chiave nuova; il firmware non la considera fidata finché l'utente non ne conferma il certificato MOK. Questo non è un difetto NVIDIA: un pacchetto con modulo già firmato da una chiave fidata non richiede alcun MOK.
+
+La parte guest può installare driver, riavviare e leggere `mokutil`, ma MOK Manager è prima del kernel. La password temporanea scelta durante `mokutil --import` protegge la richiesta di registrazione, non il modulo e non l'account Linux. Per questo ci sono due procedure volutamente separate:
 
 - `--mok-manual` conserva Secure Boot. Se DKMS crea un modulo firmato con chiave non fidata, lo script lascia l'assegnazione GPU intatta, segnala MOK e fornisce i certificati che riesce a trovare. L'utente completa l'import e l'enrollment nella console noVNC.
 - `--disable-secure-boot` sostituisce le variabili OVMF con un template senza chiavi, creando prima fallback, backup raw e rollback. È più automatizzabile ma è un cambio permanente della politica di boot e riduce una protezione di sicurezza.
+
+Nello script il controllo dello stato avviene subito dopo che la destinazione risponde al Guest Agent e prima di staccare una VM sorgente. Il controllo driver avviene alla fine: se il passthrough è già completo ma il driver fallisce con Secure Boot attivo, `--mok-manual` non ricostruisce né riattacca la GPU; stampa chiavi pendenti/certificati e lascia la configurazione invariata. MOK Manager appare solo se la richiesta è pendente e non può essere pilotato da SSH/QGA.
 
 L'host Ubuntu rilevato aveva Secure Boot attivo con `mokutil` anche quando la stringa Proxmox riportava `pre-enrolled-keys=0`: quel parametro non ricostruisce il contenuto delle vecchie variabili EFI già salvate. Il ramo “Secure Boot off” non è stato eseguito sulla Ubuntu principale, quindi non va considerato una prova runtime finché non viene testato con snapshot e console disponibile.
 

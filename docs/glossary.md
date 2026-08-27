@@ -69,22 +69,39 @@ Questo glossario separa termini che spesso vengono confusi. I riferimenti nel te
 | **CRTC** | Blocco hardware che guida un output video. Una GPU render-only può non esporne uno utile nel guest. |
 | **DKMS** | Sistema che ricompila automaticamente un modulo kernel quando cambia kernel. NVIDIA può usarlo per creare `nvidia.ko` nel guest. |
 | **modulo kernel** | Codice caricato dal kernel, qui il driver NVIDIA. È diverso dalle librerie userspace usate da `nvidia-smi`. |
+| **`nvidia_drm`** | Parte DRM del driver kernel NVIDIA. Espone la GPU al sottosistema grafico Linux; il suo parametro `modeset` deve essere `Y` per il desktop Wayland accelerato di questo caso. |
+| **KMS / `modeset=1`** | *Kernel Mode Setting*: il kernel gestisce modalita' display e buffer attraverso DRM. In questo guest consente a Mutter/GNOME di scegliere `nvidia-drm` come GPU primaria; `modeset=0` lasciava Xwayland su llvmpipe. |
+| **GBM** | *Generic Buffer Management*: interfaccia con cui il compositor Wayland ottiene buffer grafici DRM. Nel journal corretto GNOME crea un renderer GBM per `nvidia-drm`. |
+| **Wayland** | Protocollo e architettura del desktop moderno. Qui GNOME Shell e' il display server Wayland; `loginctl` mostra `Type=wayland`. Non e' Xorg anche se una singola app usa GLX. |
+| **Xwayland** | Server X11 di compatibilita' dentro una sessione Wayland. Permette a `glxgears` (app X11/GLX) di aprirsi nel desktop Wayland. Deve selezionare NVIDIA, non llvmpipe. |
+| **llvmpipe** | Renderer Mesa software: OpenGL viene eseguito dalla CPU. Non e' un errore di `nvidia-smi`, ma e' errato per un test grafico NVIDIA; si riconosce con `glxinfo -B`. |
+| **VSync / vertical refresh** | Sincronizzazione della presentazione dei frame con il refresh del display. Sul monitor RDP a 60 Hz `glxgears` mostra circa 60 FPS: e' normale e non misura il limite della GPU. |
 | **`nvidia-smi`** | Utility NVIDIA che verifica enumerazione, driver, VRAM e processi GPU. È la verifica minima dello switch. |
 | **Xorg headless** | Server grafico X senza monitor fisico. Nel guest è stato creato sul display `:2` per lanciare un benchmark OpenGL in SSH. |
 | **GLX / `glxgears`** | GLX collega OpenGL a X11. `glxgears` disegna tre ingranaggi e stampa FPS; il wrapper `nvidia-glxgears` forza il display NVIDIA headless. |
 | **`glmark2`** | Benchmark OpenGL. Da SSH senza `DISPLAY` dà “Could not initialize canvas”; non prova un guasto della GPU. |
 | **`nvtop`** | Monitor per GPU, VRAM e processi. È più adatto di `htop` al carico NVIDIA. |
 | **`htop`** | Monitor CPU/RAM/processi del sistema operativo; non legge i contatori proprietari della GPU NVIDIA. |
+| **profilo `.rdp` / RDSTLS** | File di configurazione letto da `mstsc.exe`, la stessa app Windows preinstallata. Qui trasporta `use redirection server name:i:1` per GNOME Remote Login; non contiene password. |
+| **`audiomode:i:0`** | Attributo del profilo RDP che chiede di riprodurre sul PC Windows l'audio generato dalla VM. E' separato dal passthrough GPU. |
+| **RDP hand-over / consegna** | Passaggio controllato del client RDP da un daemon GNOME a un altro: sistema -> greeter Wayland -> sessione Wayland dell'utente. Il client si disconnette e si riconnette intenzionalmente usando un token; non e' un reset della GPU. |
+| **Server Redirection** | Messaggio RDP con cui il primo server dice al client di riconnettersi al destinatario successivo. `ERRINFO_LOGOFF_BY_USER` subito dopo puo' essere la chiusura normale del primo socket. |
+| **NLA e RDSTLS** | Due metodi di sicurezza RDP. NLA autentica con CredSSP/NTLM; RDSTLS permette a GNOME di portare nel secondo tratto le credenziali monouso della redirezione. Il profilo imposta RDSTLS per `mstsc`. |
+| **SAM FreeRDP** | Database NTLM interno della libreria FreeRDP, non `/etc/passwd` Linux. L'errore SAM durante il secondo tratto segnala una negoziazione NLA errata, non un problema NVIDIA. |
+| **`gsd-sharing` / `system_service_running`** | Plugin di GNOME Settings Daemon che avvia/ferma servizi della sessione. Il flag e' vero quando il daemon RDP di sistema e' attivo; il backport lo controlla prima di fermare il daemon di hand-over. |
 
 ## Secure Boot e chiavi
 
 | Termine | Significato pratico |
 | --- | --- |
-| **Secure Boot** | Politica UEFI che accetta componenti di boot e moduli kernel firmati da chiavi fidate. Non è un semplice flag in `qm config`: lo stato va letto nel guest con `mokutil --sb-state` o dalla variabile EFI. |
-| **MOK** | *Machine Owner Key*: certificato aggiunto dall'utente alle chiavi fidate di Secure Boot per autorizzare, per esempio, un modulo DKMS. |
-| **MOK Manager** | Schermata UEFI pre-boot in cui si conferma l'enrollment MOK. Non gira dentro Linux: SSH e QGA non possono automatizzarla. |
-| **`mokutil`** | Utility Linux per leggere Secure Boot, importare un certificato MOK e vedere chiavi in attesa. L'import richiede password e la conferma al riavvio. |
-| **`--mok-manual`** | Modalità dello script che mantiene Secure Boot, non ricrea `efidisk0`, e se il driver non parte spiega il passaggio noVNC e i possibili certificati trovati. |
+| **Secure Boot** | Politica UEFI della VM: avvia componenti firmati da chiavi fidate e fa sì che il kernel rifiuti moduli con firma non fidata. Non è un semplice flag in `qm config`: lo stato va letto **nel guest** con `mokutil --sb-state` o dalla variabile EFI. |
+| **MOK** | *Machine Owner Key*: certificato **pubblico** aggiunto dall'utente all'elenco fidato per autorizzare, per esempio, la firma di un modulo DKMS. Non è il driver NVIDIA, non è una chiave privata e non è la password dell'account. |
+| **MOK Manager** | Menu UEFI/shim pre-boot che conferma l'enrollment MOK prima del kernel. SSH, rete e QGA non esistono ancora e non possono automatizzarlo. Appare solo se una chiave è pendente. |
+| **enrollment MOK** | Registrazione della chiave pubblica nella lista MOK. Avviene in due stadi: `mokutil --import` mette la richiesta in attesa dal Linux già avviato; al reboot UEFI avvia shim e MOK Manager la conferma. |
+| **password temporanea MOK** | Segreto scelto durante `mokutil --import`, usato una volta da MOK Manager per confermare la richiesta al boot successivo. Non firma il modulo, non è la password Linux e non si usa ai boot successivi. |
+| **`mokutil`** | Utility Linux per leggere Secure Boot, importare un certificato MOK e vedere chiavi in attesa con `--list-new`. L'import richiede password e la conferma firmware al riavvio. |
+| **shim** | Piccolo componente UEFI firmato usato da molte distribuzioni Linux. Avvia il bootloader e rende il certificato MOK approvato disponibile alla catena Linux; per questo MOK Manager è “prima del kernel”. La cartella `/var/lib/shim-signed` può contenere certificati rilevanti. |
+| **`--mok-manual`** | Modalità dello script che mantiene Secure Boot e non ricrea `efidisk0`. Se, dopo installazione/reboot, il driver non parte, lascia GPU/SSDT/fw_cfg invariati, mostra chiavi pendenti e possibili certificati, poi guida l'utente in noVNC. Non esegue `mokutil --import` e non può premere MOK Manager. |
 | **`--disable-secure-boot`** | Modalità alternativa, solo OVMF + `efidisk0` 4m. Crea nuove variabili EFI senza chiavi pre-caricate. È permanente finché non ripristini le vecchie variabili; il percorso non è stato ancora eseguito sulla Ubuntu principale. |
 
 ## Idempotenza

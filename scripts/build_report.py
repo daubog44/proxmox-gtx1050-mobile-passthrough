@@ -141,7 +141,7 @@ def build():
         ["Ubuntu", "Driver NVIDIA 580.173.02, 4096 MiB, nvidia-smi valido"],
         ["Kali", "SeaBIOS/Q35; switch reale Ubuntu -> Kali -> Ubuntu riuscito"],
         ["Switch VM", "Cleanup, discovery PCI/ACPI e SSDT riusciti in entrambe le direzioni"],
-        ["Prova rendering", "glxgears sul display NVIDIA :2, circa 24-25 mila FPS"],
+        ["Prova rendering", "Wayland/Xwayland: renderer GTX 1050; glxgears circa 60 FPS con VSync RDP"],
     ]
     table = Table(overview, colWidths=[4.2 * cm, 11.2 * cm])
     table.setStyle(
@@ -223,7 +223,7 @@ def build():
             "Generatore ACPI: gpu-vm-switch --self-test ha concluso self-test: ok. Prova AML, non il driver guest.",
             "Trasferimento reale: Ubuntu 1001 OVMF/Q35 -> Kali 1000 SeaBIOS/Q35 -> Ubuntu 1001; cleanup, discovery e SSDT sono riusciti in entrambe le direzioni.",
             "Ubuntu: nvidia-smi ha restituito NVIDIA GeForce GTX 1050, driver 580.173.02, 4096 MiB.",
-            "Rendering: nvidia-glxgears ha prodotto circa 24-25 mila FPS e nvtop ha mostrato il processo al 99% GPU. E prova OpenGL sulla GPU, non benchmark di gioco.",
+            "Rendering: prima il display diagnostico :2 ha mostrato GLX NVIDIA; dopo il fix KMS il desktop Wayland/Xwayland restituisce NVIDIA GTX 1050. I circa 60 FPS di glxgears in RDP sono VSync, non benchmark di gioco.",
             "Secure Boot off: il codice/prompt sono stati esaminati ma la sostituzione EFI non e stata eseguita sulla Ubuntu principale; nessuna prova runtime viene rivendicata.",
         ]
     )
@@ -291,11 +291,11 @@ def build():
     story += bullets(
         [
             "Prima del primo switch: --prepare-host installa acpica-tools/pciutils, installa la ROM OEM se diversa, aggiunge solo flag IOMMU/VFIO mancanti e aggiorna initramfs; il reboot e sempre esplicito.",
-            "Menu numerato delle VM oppure --vm VMID per automazione.",
-            "Ricerca proprietario corrente della GPU e arresto pulito della sola VM coinvolta.",
-            "Cleanup mirato: hostpci, romfile, rombar, argomenti SSDT/fw_cfg e CPU hidden generati dallo script.",
-            "Riavvio automatico della VM sorgente che prima era accesa.",
-            "Discovery ACPI, generazione AML, avvio finale e verifica nvidia-smi.",
+            "Menu numerato oppure --vm VMID; preflight di Q35, firmware, Guest Agent, BDF e ROM. Secure Boot viene letto nel guest prima del cleanup.",
+            "Ramo idempotente: se una sola VM ha gia hostpci, SSDT, fw_cfg e nvidia-smi funzionante, il tool non modifica ne riavvia.",
+            "Ricerca proprietario e cleanup mirato: soltanto hostpci della GPU, romfile/rombar collegati, argomenti SSDT/fw_cfg, CPU hidden e SSDT generata dal tool.",
+            "Assegnazione alla destinazione, boot temporaneo con lspci -PP, conversione PCI->ACPI, ASL->AML e boot finale con -acpitable e -fw_cfg.",
+            "Driver della distro, riavvio se serve, nvidia-smi e benchmark. Il trap finale riaccende la sorgente prima attiva senza GPU, anche dopo un errore.",
             "Nessuna conversione forzata di BIOS, OVMF, SeaBIOS, Q35 o vga: questi restano proprieta della VM.",
             "Se hostpci, SSDT/fw_cfg e nvidia-smi sono gia corretti nella VM richiesta, non opera ne riavvia; se resta solo MOK, non ricostruisce lo switch.",
             "Test reale completato: Ubuntu 1001 OVMF/Q35 -> Kali 1000 SeaBIOS/Q35 -> Ubuntu 1001; cleanup e SSDT sono stati rigenerati in entrambe le direzioni.",
@@ -330,33 +330,49 @@ def build():
     story += [h("6. Secure Boot senza automazione fittizia")]
     story += [
         p(
-            "MOK non e causato dal nome NVIDIA: compare quando DKMS compila il modulo localmente e Secure Boot richiede una firma di una chiave fidata. DKMS puo firmare con una propria chiave, ma questa deve essere registrata come Machine Owner Key. La schermata MOK e fuori dall'OS: SSH e QEMU Guest Agent non possono premere tasti prima dell'avvio.",
+            "MOK non e NVIDIA e non e una password Linux. Secure Boot e la politica UEFI della VM; DKMS puo compilare nvidia.ko localmente e firmarlo con una chiave nuova; MOK (Machine Owner Key) e il certificato pubblico autorizzato dal proprietario; shim porta quella autorizzazione nella catena Linux.",
             styles["Callout"],
         ),
-        p("Lo script rileva lo stato reale nel guest, con mokutil oppure con la variabile EFI SecureBoot. Per mantenere Secure Boot esiste --mok-manual: non finge di premere il firmware, conserva la GPU gia configurata e stampa certificati/passaggi per noVNC. Dopo sudo mokutil --import certificato.der, al riavvio l'utente sceglie Enroll MOK, Continue, Yes e inserisce la password temporanea."),
+        p("Se il pacchetto contiene un modulo gia firmato da una chiave fidata, MOK non compare. Il caso MOK e: driver installato -> DKMS compila e firma -> il kernel non conosce ancora il certificato pubblico -> il modulo e rifiutato. La password temporanea di mokutil protegge solo la richiesta pendente fino al reboot; non firma il modulo e non e la password dell'account."),
+        Preformatted(
+            "script: legge Secure Boot prima del cleanup -> installa driver se manca -> prova nvidia-smi\n"
+            "  -> se fallisce con Secure Boot: stampa istruzioni, ma non esegue mokutil --import\n"
+            "  -> utente: mokutil --import certificato.der -> reboot\n"
+            "  -> UEFI avvia shim; MOK Manager prima del kernel\n"
+            "  -> Enroll MOK -> Continue -> Yes + password temporanea\n"
+            "  -> reboot: shim rende la chiave disponibile, modulo ammesso, nvidia-smi\n"
+            "  -> gpu-vm-switch --mok-manual: sola verifica idempotente",
+            code,
+        ),
+        p("Lo script legge lo stato reale nel guest con mokutil oppure con la variabile EFI SecureBoot prima del cleanup e dopo QEMU Guest Agent. Nel menu interattivo propone Secure Boot off; con --yes non lo cambia mai senza --disable-secure-boot. Con --mok-manual conserva Secure Boot: soltanto se il controllo finale nvidia-smi fallisce, lascia GPU/SSDT/fw_cfg invariati, mostra chiavi pendenti e cerca certificati DKMS per noVNC; l'import e la schermata MOK restano manuali."),
         Preformatted("gpu-vm-switch --vm 123 --mok-manual\n"
                      "gpu-vm-switch --vm 123 --disable-secure-boot --yes", code),
-        p("L'alternativa Secure Boot off e permanente e solo OVMF/efidisk0 4m. Prima crea EFI/BOOT/BOOTX64.EFI, copia le vecchie variabili EFI e metadata in /usr/share/kvm/optimus-gpu-switch/efi-backups/, poi sostituisce efidisk0 con il template senza chiavi. Proxmox conserva il volume precedente come unused disk. Il rollback resta attivo fino al primo boot con Guest Agent; il cambio non e stato eseguito sulla Ubuntu principale, quindi prima dell'uso fare snapshot e tenere noVNC disponibile. Questo evita MOK ma abbassa la protezione della catena di boot."),
+        p("MOK Manager e prima del kernel: SSH, rete e QEMU Guest Agent non possono premere tasti; appare solo se una richiesta e pendente. L'alternativa Secure Boot off e permanente e solo OVMF/efidisk0 4m. Prima crea EFI/BOOT/BOOTX64.EFI, copia variabili e metadata in /usr/share/kvm/optimus-gpu-switch/efi-backups/ e sostituisce efidisk0 con un template senza chiavi; l'originale rimane unused. Il rollback resta attivo fino al primo boot con Guest Agent. Questo evita MOK ma abbassa la protezione della catena di boot e non e stato eseguito sulla Ubuntu principale: usare snapshot e noVNC."),
         PageBreak(),
+        h("6 - Accesso RDP Wayland della VM Ubuntu"),
+        p("Il primo server RDP era xrdp/xorgxrdp: autenticava ma apriva una sessione X11. GNOME 50 richiedeva XDG_SESSION_TYPE=wayland e terminava la sessione, causando finestra nera/disconnessione. Il fallback Flashback X11 ha mostrato il desktop, ma non e la soluzione Wayland. Il 2026-08-27 sono stati rimossi Flashback, xrdp, xorgxrdp, file di sessione e processi X11 orfani. L'autoremove non e stato eseguito: il driver 580 attivo e stato poi marcato manuale e una simulazione non propone pacchetti NVIDIA."),
+        p("E stato configurato GNOME Remote Desktop 50.2 in modalita system (Remote Login): gnome-remote-desktop-daemon e attivo sulla porta 3389. Il client e sempre mstsc.exe Windows: il profilo RDSTLS UTF-16 fornisce use redirection server name:i:1, che la GUI non espone, e audiomode:i:0 per riprodurre l'audio remoto sul PC. L'audio playback e stato ascoltato e confermato manualmente dall'utente. Il server emette davvero Sending server redirection, quindi GPU, listener e primo greeter non sono il blocco. Il 2026-08-27 e stato creato lo snapshot Proxmox pre-rdp-handover-backport-20260827 e installato il backport locale gnome-settings-daemon 50.0-1ubuntu1+rdphandover1: una guardia impedisce a gsd-sharing di spegnere il servizio di hand-over mentre il daemon RDP di sistema e vivo. Il test visivo mstsc greeter->desktop dopo il riavvio GDM resta da ripetere. Nessun PPA e stato installato."),
     ]
 
     story += [h("7. Benchmark e prova di rendering")]
     story += [
-        p("glmark2 da SSH ha fallito con Could not initialize canvas: e previsto, perche glmark2 X11 necessita un display. Il DRM della GPU mobile render-only non offre un CRTC utile al test. E stato quindi creato un Xorg NVIDIA headless sul display :2 e installato il wrapper nvidia-glxgears."),
+        p("glmark2 da SSH ha fallito con Could not initialize canvas: e previsto, perche glmark2 X11 necessita un display. Il DRM della GPU mobile render-only non offre un CRTC utile al test. E stato quindi creato Xorg NVIDIA headless su :2 e il wrapper nvidia-glxgears: e un display diagnostico, non il desktop Wayland."),
         Preformatted(
-            "nvidia-glxgears\n"
-            "120907 frames in 5.0 seconds = 24181.367 FPS\n"
-            "125006 frames in 5.0 seconds = 25001.096 FPS\n"
+            "# Nel terminale della sessione RDP/Wayland\n"
+            "glxinfo -B | grep -E 'OpenGL vendor|OpenGL renderer'\n"
+            "# NVIDIA Corporation / NVIDIA GeForce GTX 1050/PCIe/SSE2\n"
+            "glxgears  # circa 60 FPS: sincronizzato a VSync RDP\n"
+            "__GL_SYNC_TO_VBLANK=0 glxgears  # solo contatore non sincronizzato\n"
             "watch -n 1 nvidia-smi\n"
             "nvtop",
             code,
         ),
-        p("htop non visualizza i contatori NVIDIA perche legge CPU e RAM del sistema operativo. nvidia-smi e nvtop interrogano invece driver e GPU."),
+        p("La causa del software rendering era nvidia_drm modeset=0 in due vecchi file locali, non VFIO o la VBIOS. Dopo modeset=1, initramfs e reboot, GNOME seleziona nvidia-drm primario e Xwayland usa NVIDIA. htop non visualizza i contatori NVIDIA perche legge CPU e RAM; nvidia-smi e nvtop interrogano invece driver e GPU."),
     ]
     if EVIDENCE.exists():
         image = Image(str(EVIDENCE))
         image._restrictSize(16.3 * cm, 9.9 * cm)
-        story += [Spacer(1, 0.25 * cm), KeepTogether([image, Spacer(1, 0.12 * cm), p("Figura 1 - nvtop: glxgears usa il 99% della GPU; Xorg gira su :2.", styles["Small"])])]
+        story += [Spacer(1, 0.25 * cm), KeepTogether([image, Spacer(1, 0.12 * cm), p("Figura 1 - precedente prova sul display diagnostico Xorg :2: prova renderer, non benchmark universale.", styles["Small"])])]
     story += [PageBreak(), h("8. Estrazione della VBIOS OEM")]
     story += [
         p("Il punto di partenza e il pacchetto driver/firmware ufficiale HP per il Pavilion 15-cs1xxx, estratto localmente fino al payload, per esempio 084C0.bin. Lo script Python non scarica nulla: cerca la signature PCI option ROM 55 aa, verifica PCIR, vendor NVIDIA e device 1c8d. Scansiona il payload RAW e stream LZMA, quindi estrae tutte le immagini della ROM fino al flag finale."),
@@ -371,6 +387,8 @@ def build():
         ["Solo romfile / rombar", "Il driver Optimus non leggeva la ROM dalla sola finestra PCI.", "SSDT _ROM + fw_cfg."],
         ["ACPI scritto a mano", "Cambiando bridge cambia lo scope del device.", "Discovery lspci -PP e conversione Sxx."],
         ["glmark2 via SSH", "Mancava un canvas X11.", "Xorg NVIDIA :2 e glxgears."],
+        ["Wayland con llvmpipe", "Due override locali disabilitavano nvidia_drm KMS.", "modeset=1, initramfs, reboot e glxinfo NVIDIA."],
+        ["Autoremove NVIDIA", "Pacchetti attivi potevano essere automatici.", "apt-mark manual e simulazione pulita; script lo fa dopo install."],
         ["Prima installazione Kali", "Headers/DKMS non pronti.", "Headers, build tools, DKMS e riavvio."],
         ["Repo Debian riscritta", "Automazione non idempotente.", "Verifica componenti prima di aggiungere."],
     ]
@@ -385,18 +403,17 @@ def build():
     ]
     failed_table = Table([failed_header] + failed_rows, colWidths=[4.0 * cm, 5.7 * cm, 5.7 * cm])
     failed_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#087F5B")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D1D5DB")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("FONTSIZE", (0, 0), (-1, -1), 7.4), ("LEADING", (0, 0), (-1, -1), 8.7), ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4), ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
-    story += [failed_table, Spacer(1, 0.45 * cm)]
+    story += [failed_table, Spacer(1, 0.2 * cm)]
     story += [h("10. Ripetere il procedimento")]
-    story += bullets(
-        [
-            "Controllare che IOMMU/VFIO isolino GPU e funzione audio sul nodo.",
-            "Estrarre la VBIOS OEM del nuovo dispositivo e verificare BDF e PCI ID con lspci.",
-            "Configurare la VM con Q35 e Guest Agent; mantenere il firmware scelto dalla VM.",
-            "Eseguire gpu-vm-switch con --gpu e --rom, poi nvidia-smi.",
-            "Per un test grafico su guest muxless, creare un display X NVIDIA headless e usare nvidia-glxgears.",
-            "Scegliere consapevolmente MOK o --disable-secure-boot per OVMF; non alternare automaticamente le due politiche.",
-        ]
-    )
+    story += [
+        p(
+            "Checklist: verificare IOMMU/VFIO e audio; estrarre la VBIOS OEM e controllare BDF/PCI ID; "
+            "configurare Q35 e Guest Agent; usare gpu-vm-switch con --gpu e --rom; testare il renderer "
+            "con nvidia-glxgears su display NVIDIA headless; scegliere consapevolmente MOK oppure "
+            "--disable-secure-boot per OVMF.",
+            styles["Small"],
+        )
+    ]
     story += [h("Riferimenti")]
     story += [
         p("QEMU fw_cfg: https://qemu-project.gitlab.io/qemu/specs/fw_cfg.html", styles["Reference"]),
@@ -410,6 +427,7 @@ def build():
         p("NVIDIA PRIME Render Offload: https://download.nvidia.com/XFree86/Linux-x86_64/575.64/README/primerenderoffload.html", styles["Reference"]),
         p("Intel i915 / GVT-g: https://docs.kernel.org/next/gpu/i915.html", styles["Reference"]),
         p("ACPICA / iasl: https://acpica.org/", styles["Reference"]),
+        p("GNOME Remote Login: https://teams.pages.gitlab.gnome.org/Websites/help.gnome.org/gnome-help/remote-login.html", styles["Reference"]),
     ]
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     print(OUT)

@@ -1,0 +1,17 @@
+Description: keep the RDP handover service while system Remote Login is active
+Author: local backport based on Ubuntu LP #2141992
+Bug-Ubuntu: https://bugs.launchpad.net/bugs/2141992
+Applies-to: gnome-settings-daemon 50.0-1ubuntu1 (Ubuntu 26.04 Resolute)
+
+--- a/plugins/sharing/gsd-sharing-manager.c
++++ b/plugins/sharing/gsd-sharing-manager.c
+@@ -724,7 +724,8 @@ gsd_sharing_manager_stop_assigned_services (GsdSharingManager *manager)
+         services = g_hash_table_get_values (manager->assigned_services);
+         for (l = services; l != NULL; l = l->next) {
+                 AssignedServiceInfo *info = l->data;
+-                stop_assigned_service (manager, info);
++                if (!info->system_service_running)
++                        stop_assigned_service (manager, info);
+         }
+         g_list_free (services);
+ }

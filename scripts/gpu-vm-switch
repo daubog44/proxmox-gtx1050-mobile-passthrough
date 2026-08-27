@@ -708,6 +708,100 @@ install_linux_driver() {
     esac
     note "installo il driver NVIDIA proprietario per $distro nella VM $vm"
     qga_result "$vm" "$command" >/dev/null
+    protect_linux_nvidia_packages "$vm"
+    if ensure_linux_nvidia_kms "$vm"; then
+        note "VM $vm: KMS NVIDIA corretto; il riavvio driver gia previsto lo attivera"
+    fi
+}
+
+protect_linux_nvidia_packages() {
+    # Apt puo' marcare come automatici anche metapacchetti installati da
+    # ubuntu-drivers. Li rendiamo espliciti senza rimuovere o aggiornare nulla.
+    local vm=$1 distro command
+    distro=$(guest_distro "$vm")
+    case "$distro" in
+        ubuntu|debian|kali)
+            command='set -eu
+packages=$(dpkg-query -W -f="\${binary:Package} \${db:Status-Status}\n" \
+    "nvidia-driver-*" "nvidia-utils-*" "nvidia-kernel-dkms" "nvidia-open*" "linux-modules-nvidia-*" \
+    2>/dev/null | awk "\$2 == \"installed\" {print \$1}")
+if [ -n "$packages" ]; then
+    apt-mark manual $packages >/dev/null
+fi'
+            ;;
+        arch)
+            command='set -eu
+packages=$(pacman -Qq 2>/dev/null | grep -E "^(nvidia|linux.*nvidia)" || true)
+if [ -n "$packages" ]; then
+    pacman -D --asexplicit $packages
+fi'
+            ;;
+        fedora|rhel|rocky|almalinux)
+            command='set -eu
+packages=$(rpm -qa --qf "%{NAME}\\n" | grep -E "^(nvidia|cuda-drivers|kmod-nvidia)" || true)
+if [ -n "$packages" ]; then
+    dnf -y mark install $packages
+fi'
+            ;;
+        *) return 0 ;;
+    esac
+    qga_result "$vm" "$command" >/dev/null
+}
+
+ensure_linux_nvidia_kms() {
+    # Restituisce 0 solo se cambia la configurazione guest: il chiamante deve
+    # allora riavviare. Senza KMS Xwayland puo' usare llvmpipe anche se
+    # nvidia-smi vede la GPU.
+    local vm=$1 distro command result
+    distro=$(guest_distro "$vm")
+    case "$distro" in
+        ubuntu|debian|kali)
+            command='set -eu
+changed=0
+for file in /etc/modprobe.d/*.conf; do
+    [ -f "$file" ] || continue
+    if grep -Eq "^[[:space:]]*options[[:space:]]+nvidia[-_]drm[[:space:]].*modeset=0([[:space:]]|$)" "$file"; then
+        sed -i -E "s/(^[[:space:]]*options[[:space:]]+nvidia[-_]drm[[:space:]].*)modeset=0([[:space:]]|$)/\\1modeset=1\\2/" "$file"
+        changed=1
+    fi
+done
+if ! grep -RqsE "^[[:space:]]*options[[:space:]]+nvidia[-_]drm[[:space:]].*modeset=1([[:space:]]|$)" /etc/modprobe.d; then
+    printf "%s\\n" "options nvidia_drm modeset=1" > /etc/modprobe.d/zz-gpu-vm-switch-nvidia-kms.conf
+    changed=1
+fi
+if [ "$changed" -eq 1 ]; then
+    update-initramfs -u -k all
+fi
+printf "%s" "$changed" | base64 -w0'
+            ;;
+        arch)
+            command='set -eu
+file=/etc/modprobe.d/zz-gpu-vm-switch-nvidia-kms.conf
+desired="options nvidia_drm modeset=1"
+if [ ! -f "$file" ] || [ "$(cat "$file")" != "$desired" ]; then
+    printf "%s\\n" "$desired" > "$file"
+    mkinitcpio -P
+    printf 1 | base64 -w0
+else
+    printf 0 | base64 -w0
+fi'
+            ;;
+        fedora|rhel|rocky|almalinux)
+            command='set -eu
+file=/etc/modprobe.d/zz-gpu-vm-switch-nvidia-kms.conf
+desired="options nvidia_drm modeset=1"
+if [ ! -f "$file" ] || [ "$(cat "$file")" != "$desired" ]; then
+    printf "%s\\n" "$desired" > "$file"
+    dracut -f --regenerate-all
+    printf 1 | base64 -w0
+else
+    printf 0 | base64 -w0
+fi'
+            ;;
+        *) return 1 ;;
+    esac
+    result=$(qga_b64 "$vm" "$command")
+    [[ $result == 1 ]]
 }
 
 verify_gpu() {
@@ -824,8 +918,15 @@ if [[ -n $(gpu_keys "$TARGET_VM" | head -n1 || true) ]] &&
     has_optimus_args "$TARGET_VM" &&
     guest_nvidia_ready "$TARGET_VM"; then
     GPU_ALREADY_READY=1
-    if (( ! DISABLE_SECURE_BOOT )) || [[ $secure_state != enabled ]]; then
+    if ensure_linux_nvidia_kms "$TARGET_VM"; then
+        note "VM $TARGET_VM: abilito KMS NVIDIA e riavvio una volta per evitare llvmpipe in Xwayland"
+        stop_vm "$TARGET_VM"
+        start_vm "$TARGET_VM"
+        wait_for_agent "$TARGET_VM"
+    else
         note "idempotente: la GPU e gia pronta nella VM $TARGET_VM; nessuna modifica o riavvio"
+    fi
+    if (( ! DISABLE_SECURE_BOOT )) || [[ $secure_state != enabled ]]; then
         verify_gpu "$TARGET_VM"
         exit 0
     fi
@@ -861,6 +962,11 @@ if (( ! DISABLE_SECURE_BOOT )) && same_optimus_attachment "$TARGET_VM"; then
         stop_vm "$TARGET_VM"
         start_vm "$TARGET_VM"
         wait_for_agent "$TARGET_VM"
+    elif ensure_linux_nvidia_kms "$TARGET_VM"; then
+        note 'KMS NVIDIA aggiornato; riavvio della VM per evitare llvmpipe in Xwayland'
+        stop_vm "$TARGET_VM"
+        start_vm "$TARGET_VM"
+        wait_for_agent "$TARGET_VM"
     fi
     if ! guest_nvidia_ready "$TARGET_VM"; then
         [[ $secure_state == enabled ]] && manual_mok_instructions "$TARGET_VM"
@@ -884,6 +990,12 @@ if (( GPU_ALREADY_READY )); then
     [[ $(secure_boot_state "$TARGET_VM") == disabled ]] ||
         die "VM $TARGET_VM: Secure Boot risulta ancora attivo dopo la sostituzione EFI"
     commit_efi_change
+    if ensure_linux_nvidia_kms "$TARGET_VM"; then
+        note 'KMS NVIDIA aggiornato; riavvio della VM per evitare llvmpipe in Xwayland'
+        stop_vm "$TARGET_VM"
+        start_vm "$TARGET_VM"
+        wait_for_agent "$TARGET_VM"
+    fi
     verify_gpu "$TARGET_VM"
     start_guest_benchmark "$TARGET_VM"
     exit 0
@@ -944,6 +1056,11 @@ fi
 if (( INSTALL_DRIVERS )) && ! guest_nvidia_ready "$TARGET_VM"; then
     install_linux_driver "$TARGET_VM"
     note 'riavvio della VM per caricare il driver appena installato'
+    stop_vm "$TARGET_VM"
+    start_vm "$TARGET_VM"
+    wait_for_agent "$TARGET_VM"
+elif ensure_linux_nvidia_kms "$TARGET_VM"; then
+    note 'KMS NVIDIA aggiornato; riavvio della VM per evitare llvmpipe in Xwayland'
     stop_vm "$TARGET_VM"
     start_vm "$TARGET_VM"
     wait_for_agent "$TARGET_VM"

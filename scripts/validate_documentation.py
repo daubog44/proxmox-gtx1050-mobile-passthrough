@@ -30,6 +30,10 @@ def main() -> None:
     claims = (ROOT / "docs" / "laptop-passthrough-claim-matrix.md").read_text(
         encoding="utf-8"
     )
+    wayland_kms = (ROOT / "docs" / "wayland-nvidia-kms.md").read_text(
+        encoding="utf-8"
+    )
+    rdp_wayland = (ROOT / "docs" / "rdp-wayland.md").read_text(encoding="utf-8")
 
     require(
         glossary,
@@ -46,6 +50,9 @@ def main() -> None:
             "**`_ROM(offset, length)`**",
             "**`fw_cfg`**",
             "**MOK**",
+            "**RDP hand-over / consegna**",
+            "**NLA e RDSTLS**",
+            "**`gsd-sharing` / `system_service_running`**",
             "## Idempotenza",
         ),
         "glossario",
@@ -71,8 +78,13 @@ def main() -> None:
             "0000:02:00.0",
             "docs/acpi-line-by-line.md",
             "docs/reproducible-runbook.md",
+            "docs/rdp-wayland.md",
+            "docs/wayland-nvidia-kms.md",
+            "clients/windows-rdstls-template.rdp",
             "scripts/validate_documentation.py",
             "## Output completo di `gpu-vm-switch --help`",
+            "### Flusso effettivo di gpu-vm-switch",
+            "MOK Manager compare **solo**",
         ),
         "README",
     )
@@ -99,6 +111,8 @@ def main() -> None:
             "--mok-manual",
             "nvidia-glxgears",
             "Quando fermarsi",
+            "### Cosa fa realmente il comando di switch",
+            "## 6. Secure Boot e MOK: cosa succede, quando succede e cosa fa lo script",
         ),
         "runbook riproducibile",
     )
@@ -119,6 +133,33 @@ def main() -> None:
         ),
         "matrice claim laptop",
     )
+    require(
+        wayland_kms,
+        (
+            "nvidia_drm",
+            "modeset=0",
+            "modeset=1",
+            "llvmpipe",
+            "OpenGL renderer string: NVIDIA GeForce GTX 1050/PCIe/SSE2",
+            "vertical refresh",
+            "Xorg `:2`",
+            "apt autoremove",
+            "audiomode:i:0",
+        ),
+        "fix KMS Wayland",
+    )
+    require(
+        rdp_wayland,
+        (
+            "Cosa significa davvero \u201chand-over\u201d",
+            "system_service_running",
+            "50.0-1ubuntu1+rdphandover1",
+            "pre-rdp-handover-backport-20260827",
+            "Audio RDP playback",
+            "gnome-settings-daemon-50.0-rdp-handover.patch",
+        ),
+        "diagnosi RDP",
+    )
 
     for local_path in (
         ROOT / "evidence" / "nvtop-glxgears-proof.png",
@@ -128,6 +169,10 @@ def main() -> None:
         ROOT / "docs" / "acpi-line-by-line.md",
         ROOT / "docs" / "reproducible-runbook.md",
         ROOT / "docs" / "laptop-passthrough-claim-matrix.md",
+        ROOT / "docs" / "rdp-wayland.md",
+        ROOT / "docs" / "wayland-nvidia-kms.md",
+        ROOT / "clients" / "windows-rdstls-template.rdp",
+        ROOT / "patches" / "gnome-settings-daemon-50.0-rdp-handover.patch",
     ):
         if not local_path.is_file():
             raise AssertionError(f"file locale mancante: {local_path.relative_to(ROOT)}")
