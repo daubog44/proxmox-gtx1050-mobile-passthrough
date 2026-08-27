@@ -730,7 +730,14 @@ install_linux_driver() {
         kali)
             command='set -eu; if ! grep -Rqs "kali-rolling.*contrib.*non-free" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then printf "deb http://http.kali.org/kali kali-rolling contrib non-free non-free-firmware\n" > /etc/apt/sources.list.d/gpu-vm-switch-nvidia.list; fi; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y linux-headers-amd64 build-essential dkms nvidia-driver; dkms autoinstall' ;;
         arch)
-            command='pacman -Syu --noconfirm --needed nvidia-dkms nvidia-utils linux-headers' ;;
+            # La GTX 1050 Pascal non ha il GSP richiesto da nvidia-open-dkms.
+            # Omarchy pubblica il ramo proprietario 580xx: nvidia-open-dkms
+            # dichiara "Provides: nvidia-dkms", quindi va escluso esplicitamente.
+            if [[ $GPU_PCI_ID == 10de:1c8d ]]; then
+                command='set -eu; if ! pacman -Si nvidia-580xx-dkms >/dev/null 2>&1; then echo "GTX 1050/Pascal: serve un repository con nvidia-580xx-dkms proprietario; nvidia-open-dkms non e compatibile" >&2; exit 65; fi; if pacman -Q nvidia-open-dkms >/dev/null 2>&1; then pacman -Rdd --noconfirm nvidia-open-dkms nvidia-utils; fi; yes | pacman -Syu nvidia-580xx-dkms nvidia-580xx-utils linux-headers'
+            else
+                command='pacman -Syu --noconfirm --needed nvidia-dkms nvidia-utils linux-headers'
+            fi ;;
         fedora)
             command='set -eu; arch=$(uname -m); ver=$(rpm -E %fedora); repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora$ver/$arch/cuda-fedora$ver.repo"; dnf -y install dnf-plugins-core kernel-devel-matched kernel-headers; dnf config-manager addrepo --from-repofile="$repo" || dnf config-manager --add-repo "$repo"; dnf clean expire-cache; dnf -y install cuda-drivers' ;;
         rhel|rocky|almalinux)
@@ -811,7 +818,11 @@ file=/etc/modprobe.d/zz-gpu-vm-switch-nvidia-kms.conf
 desired="options nvidia_drm modeset=1"
 if [ ! -f "$file" ] || [ "$(cat "$file")" != "$desired" ]; then
     printf "%s\\n" "$desired" > "$file"
-    mkinitcpio -P >/dev/null
+    if command -v limine-update >/dev/null 2>&1; then
+        limine-update >/dev/null
+    else
+        mkinitcpio -P >/dev/null
+    fi
     printf 1 | base64 -w0
 else
     printf 0 | base64 -w0

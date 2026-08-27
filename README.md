@@ -187,6 +187,12 @@ Lo script Python non scarica né inventa firmware: cerca `55 aa`, l'header `PCIR
 
 La VM di destinazione deve usare **Q35** e il **QEMU Guest Agent**. Può mantenere il proprio firmware: Ubuntu qui usa OVMF, Kali SeaBIOS; lo script non cambia `bios`, `machine`, `vga`, memoria o dischi. Lo switch gestisce driver per Ubuntu, Debian, Kali, Arch, Fedora, RHEL, Rocky e AlmaLinux. Per altre distribuzioni si usa `--skip-drivers` e si installa il driver secondo la documentazione della distro.
 
+### Nota essenziale per Arch/Omarchy e GTX 1050
+
+La GTX 1050 Mobile è Pascal e **non ha il GSP** (*GPU System Processor*) richiesto da `nvidia-open-dkms`. Su Omarchy il pacchetto open `610.xx` dichiara anche `Provides: nvidia-dkms`: chiedere semplicemente `nvidia-dkms` installava quindi il modulo sbagliato, pur avendo DKMS completato senza errori. Il sintomo era `nvidia-smi` non comunicante e il kernel riportava che la GPU non era supportata da `nvidia.ko` open.
+
+Per il PCI ID di questo progetto (`10de:1c8d`) lo script cerca esplicitamente il ramo proprietario `nvidia-580xx-dkms` e `nvidia-580xx-utils`; su Omarchy essi sono disponibili nel repository `omarchy`. La sostituzione è idempotente: se il ramo 580xx è già presente non rimuove nulla; se trova quello open, rimuove solo i due pacchetti in conflitto e installa subito i loro sostituti. Se un'altra Arch-like non offre il ramo proprietario, il tool si ferma invece di installare silenziosamente il driver open incompatibile. Per GPU più recenti il ramo Arch standard può essere corretto, ma va verificato rispetto al modello effettivo.
+
 ## Uso quotidiano dello switch
 
 ```bash
