@@ -174,6 +174,12 @@ def main() -> None:
             "Couldn't import RGB Image: 0000300C",
             "sunshine-linux-nvenc-system-memory-input.patch",
             "sunshine-wayland-virtio-gbm.patch",
+            "L'host ha restituito un errore: %",
+            "graphical-session.target",
+            "dpmsStatus",
+            "hyprland-dpms-enable",
+            "gtx-run",
+            "card0-HDMI-A-1",
         ),
         "Sunshine/Moonlight Omarchy",
     )

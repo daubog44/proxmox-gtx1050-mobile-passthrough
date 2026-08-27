@@ -455,7 +455,7 @@ docs/glossary.md                  glossario esteso di tutti i termini
 docs/attempts-and-outcomes.md     tentativi falliti, causa e correzione
 docs/rdp-wayland.md               diagnostica RDP: xrdp/X11 e Remote Login GNOME/Wayland
 docs/wayland-nvidia-kms.md        fix KMS, renderer Wayland, VSync, Xorg :2, APT e audio RDP
-docs/sunshine-moonlight-omarchy.md  cattura VirtIO stabile + NVENC GTX verificato su Omarchy
+docs/sunshine-moonlight-omarchy.md  cattura VirtIO stabile, DPMS/lifecycle Moonlight e NVENC/offload GTX verificati su Omarchy
 patches/sunshine-linux-nvenc-system-memory-input.patch  patch per il feed NV12 a NVENC
 patches/sunshine-wayland-virtio-gbm.patch  patch GBM per la cattura Wayland su VirtIO
 evidence/                         prova nvtop + glxgears
