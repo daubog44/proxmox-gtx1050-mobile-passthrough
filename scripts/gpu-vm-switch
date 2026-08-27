@@ -19,6 +19,7 @@ HOST_PREP=0
 REBOOT_HOST=0
 ROM_SOURCE=''
 GPU_PCI_ID=''
+AGENT_TIMEOUT=180
 RESTART_VMS=''
 EFI_RECOVERY_VM=''
 EFI_RECOVERY_DISK=''
@@ -397,11 +398,17 @@ start_vm() {
 wait_for_agent() {
     local vm=$1 deadline
     (( DRY_RUN )) && return
-    deadline=$((SECONDS + 180))
+    deadline=$((SECONDS + AGENT_TIMEOUT))
     while ! qm agent "$vm" ping >/dev/null 2>&1; do
-        (( SECONDS < deadline )) || die "QEMU Guest Agent non raggiungibile nella VM $vm entro 180 secondi. Controlla la console noVNC: un guest con disco LUKS deve essere sbloccato manualmente prima che il Guest Agent possa partire."
+        (( SECONDS < deadline )) || die "QEMU Guest Agent non raggiungibile nella VM $vm entro $AGENT_TIMEOUT secondi. Controlla la console noVNC: un guest con disco LUKS deve essere sbloccato manualmente prima che il Guest Agent possa partire."
         sleep 2
     done
+}
+
+guest_has_luks() {
+    local result
+    result=$(qga_result "$1" 'lsblk -nr -o TYPE | grep -qx crypto_LUKS') || return 1
+    grep -q '"exitcode"[[:space:]]*:[[:space:]]*0' <<<"$result"
 }
 
 qga_result() {
@@ -794,7 +801,7 @@ if ! grep -RqsE "^[[:space:]]*options[[:space:]]+nvidia[-_]drm[[:space:]].*modes
     changed=1
 fi
 if [ "$changed" -eq 1 ]; then
-    update-initramfs -u -k all
+    update-initramfs -u -k all >/dev/null
 fi
 printf "%s" "$changed" | base64 -w0'
             ;;
@@ -804,7 +811,7 @@ file=/etc/modprobe.d/zz-gpu-vm-switch-nvidia-kms.conf
 desired="options nvidia_drm modeset=1"
 if [ ! -f "$file" ] || [ "$(cat "$file")" != "$desired" ]; then
     printf "%s\\n" "$desired" > "$file"
-    mkinitcpio -P
+    mkinitcpio -P >/dev/null
     printf 1 | base64 -w0
 else
     printf 0 | base64 -w0
@@ -816,7 +823,7 @@ file=/etc/modprobe.d/zz-gpu-vm-switch-nvidia-kms.conf
 desired="options nvidia_drm modeset=1"
 if [ ! -f "$file" ] || [ "$(cat "$file")" != "$desired" ]; then
     printf "%s\\n" "$desired" > "$file"
-    dracut -f --regenerate-all
+    dracut -f --regenerate-all >/dev/null
     printf 1 | base64 -w0
 else
     printf 0 | base64 -w0
@@ -920,6 +927,10 @@ if [[ $target_initial_status == stopped ]]; then
     start_vm "$TARGET_VM"
 fi
 wait_for_agent "$TARGET_VM"
+if guest_has_luks "$TARGET_VM"; then
+    AGENT_TIMEOUT=900
+    note 'disco LUKS rilevato: dopo ogni riavvio sbloccalo dalla console noVNC; attesa Guest Agent estesa a 900 secondi'
+fi
 secure_state=$(secure_boot_state "$TARGET_VM")
 if (( DISABLE_SECURE_BOOT )) && [[ $secure_state == unknown ]]; then
     [[ $target_initial_status == stopped ]] && stop_vm "$TARGET_VM"
