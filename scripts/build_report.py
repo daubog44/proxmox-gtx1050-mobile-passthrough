@@ -373,7 +373,29 @@ def build():
         image = Image(str(EVIDENCE))
         image._restrictSize(16.3 * cm, 9.9 * cm)
         story += [Spacer(1, 0.25 * cm), KeepTogether([image, Spacer(1, 0.12 * cm), p("Figura 1 - precedente prova sul display diagnostico Xorg :2: prova renderer, non benchmark universale.", styles["Small"])])]
-    story += [PageBreak(), h("8. Estrazione della VBIOS OEM")]
+    story += [
+        PageBreak(),
+        h("7b. Omarchy: desktop headless GTX e Moonlight"),
+        p(
+            "Il 28 agosto 2026 e stato verificato un percorso distinto dal precedente desktop VirtIO: Hyprland usa AQ_DRM_DEVICES=/dev/dri/gtx1050 e AQ_NO_KMS_REQUIREMENT=1, crea l'uscita Wayland headless omarchy-gtx e Sunshine la cattura a 1920x1080/60, scala 1. nvidia-smi pmon ha mostrato Hyprland come processo grafico della GTX; durante il test Moonlight ha mostrato Sunshine con enc=12 e il log ha riportato richieste GBM 1920x1080 e h264_nvenc.",
+        ),
+        Preformatted(
+            "GTX -> Hyprland -> omarchy-gtx (1920x1080@60)\n"
+            "                    -> Sunshine GBM/Wayland -> h264_nvenc -> Moonlight\n"
+            "prova: Hyprland nella tabella NVIDIA; Sunshine enc>0 durante lo stream",
+            code,
+        ),
+        p(
+            "L'output QEMU VirtIO rimane nel file Proxmox soltanto come console noVNC di recupero: non e selezionato dal compositor. Non e stato quindi eseguito vga:none senza un'ulteriore prova utente; questa scelta preserva una strada di rollback. Il tentativo di forzare una EDID sul connettore NVIDIA disconnesso aveva lasciato guest SSH e QEMU Guest Agent non raggiungibili ed e stato rimosso, non mantenuto.",
+        ),
+        p(
+            "NVENC e hardware, ma il build Sunshine compatibile con il driver Pascal 580 ha SUNSHINE_ENABLE_CUDA=OFF e passa frame NV12 tramite RAM per evitare un precedente errore di scala: la CPU non e quindi zero. Nel test Sunshine era circa al 51% di una CPU logica, mentre Hyprland circa al 3-4%; htop puo mostrare i thread separati e non devono essere sommati. Il pacchetto Sunshine Arch ufficiale e stato provato e subito annullato: h264_nvenc ha fallito per reference frames non supportati sulla GTX 1050 ed e ricaduto a libx264 software.",
+        ),
+        p(
+            "Una ricompilazione zero-copy richiederebbe una toolchain CUDA 12.x e una prova separata. CUDA 13 non puo compilare offline per Pascal compute capability 6.1; non e stato installato il toolkit da 4.71 GiB. Il risultato documentato e quindi: desktop GTX, Full HD/60, NVENC verificato; zero-copy, CPU nulla e 2K nativo non sono dichiarati ottenuti.",
+        ),
+    ]
+    story += [h("8. Estrazione della VBIOS OEM")]
     story += [
         p("Il punto di partenza e il pacchetto driver/firmware ufficiale HP per il Pavilion 15-cs1xxx, estratto localmente fino al payload, per esempio 084C0.bin. Lo script Python non scarica nulla: cerca la signature PCI option ROM 55 aa, verifica PCIR, vendor NVIDIA e device 1c8d. Scansiona il payload RAW e stream LZMA, quindi estrae tutte le immagini della ROM fino al flag finale."),
         Preformatted(
@@ -427,6 +449,9 @@ def build():
         p("NVIDIA PRIME Render Offload: https://download.nvidia.com/XFree86/Linux-x86_64/575.64/README/primerenderoffload.html", styles["Reference"]),
         p("Intel i915 / GVT-g: https://docs.kernel.org/next/gpu/i915.html", styles["Reference"]),
         p("ACPICA / iasl: https://acpica.org/", styles["Reference"]),
+        p("Hyprland Virtual GPU: https://wiki.hypr.land/Configuring/Advanced-and-Cool/Virtual-GPU/", styles["Reference"]),
+        p("Hyprland hyprctl: https://wiki.hypr.land/Configuring/Advanced-and-Cool/Using-hyprctl/", styles["Reference"]),
+        p("NVIDIA CUDA 13 release notes: https://docs.nvidia.com/cuda/archive/13.0.0/cuda-toolkit-release-notes/index.html", styles["Reference"]),
         p("GNOME Remote Login: https://teams.pages.gitlab.gnome.org/Websites/help.gnome.org/gnome-help/remote-login.html", styles["Reference"]),
     ]
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)

@@ -193,6 +193,12 @@ La GTX 1050 Mobile è Pascal e **non ha il GSP** (*GPU System Processor*) richie
 
 Per il PCI ID di questo progetto (`10de:1c8d`) lo script cerca esplicitamente il ramo proprietario `nvidia-580xx-dkms` e `nvidia-580xx-utils`; su Omarchy essi sono disponibili nel repository `omarchy`. La sostituzione è idempotente: se il ramo 580xx è già presente non rimuove nulla; se trova quello open, rimuove solo i due pacchetti in conflitto e installa subito i loro sostituti. Se un'altra Arch-like non offre il ramo proprietario, il tool si ferma invece di installare silenziosamente il driver open incompatibile. Per GPU più recenti il ramo Arch standard può essere corretto, ma va verificato rispetto al modello effettivo.
 
+### Omarchy: desktop Wayland e Moonlight sulla GTX, senza assumere un monitor fisico
+
+La GTX mobile di questa VM non ha un connettore HDMI/DP guest collegato. Non forzare un EDID sul connettore disconnesso: il test ha lasciato il guest non raggiungibile e i parametri sono stati rimossi. La soluzione verificata usa invece Hyprland in modalita' headless sulla GTX e un'uscita Wayland virtuale `omarchy-gtx` a 1920x1080/60. Durante Moonlight `nvidia-smi pmon` mostra sia `Hyprland` sia `sunshine` sulla GTX e `enc>0` per NVENC.
+
+Lo strumento guest idempotente e' [scripts/omarchy-gtx-primary](scripts/omarchy-gtx-primary): crea l'uscita prima di Sunshine, conserva i backup e offre verifica e rollback. Non cambia VFIO, VBIOS, SSDT, kernel o Limine. La guida completa, inclusa la spiegazione della CPU residua (`GPU -> RAM -> GPU` nel build compatibile), la prova del fallimento del pacchetto Sunshine ufficiale e i comandi riproducibili e' in [Sunshine/Moonlight su Omarchy](docs/sunshine-moonlight-omarchy.md).
+
 ## Uso quotidiano dello switch
 
 ```bash
@@ -455,7 +461,7 @@ docs/glossary.md                  glossario esteso di tutti i termini
 docs/attempts-and-outcomes.md     tentativi falliti, causa e correzione
 docs/rdp-wayland.md               diagnostica RDP: xrdp/X11 e Remote Login GNOME/Wayland
 docs/wayland-nvidia-kms.md        fix KMS, renderer Wayland, VSync, Xorg :2, APT e audio RDP
-docs/sunshine-moonlight-omarchy.md  cattura VirtIO stabile, DPMS/lifecycle Moonlight e NVENC/offload GTX verificati su Omarchy
+docs/sunshine-moonlight-omarchy.md  desktop GTX headless, Moonlight Full HD/NVENC, CPU residua e rollback su Omarchy
 patches/sunshine-linux-nvenc-system-memory-input.patch  patch per il feed NV12 a NVENC
 patches/sunshine-wayland-virtio-gbm.patch  patch GBM per la cattura Wayland su VirtIO
 evidence/                         prova nvtop + glxgears

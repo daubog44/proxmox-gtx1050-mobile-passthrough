@@ -1,297 +1,190 @@
-# Omarchy, Sunshine e Moonlight: codifica hardware sulla GTX 1050
+# Omarchy, Sunshine e Moonlight: desktop Wayland primario sulla GTX 1050
 
-Questa nota riguarda la VM Omarchy (`192.168.0.28`) dopo che il passthrough della GTX 1050 Mobile era già funzionante. Non modifica VFIO, VBIOS, SSDT o la configurazione Proxmox: risolve soltanto la catena di **cattura desktop -> codifica video -> Moonlight**.
+Questa nota descrive il risultato ottenuto sulla VM Omarchy (`1002`, guest `192.168.0.28`) il 28 agosto 2026. Il passthrough VFIO, VBIOS OEM, `fw_cfg` e SSDT ACPI erano gia' funzionanti: qui si documenta soltanto il percorso **desktop Wayland -> cattura -> NVENC -> Moonlight**.
 
-## Risultato verificato
+## Risultato, stato e confini precisi
 
-Il 27 e 28 agosto 2026 è stato aperto il desktop Omarchy da Moonlight a 1920x1080/60 e l'immagine è rimasta corretta per più controlli successivi. Durante la sessione:
+Il desktop Omarchy ora usa la GTX 1050 come GPU primaria del compositor Hyprland, senza richiedere un connettore HDMI/DP fisico della GPU mobile. Hyprland espone una uscita virtuale chiamata `omarchy-gtx`; Sunshine la cattura e Moonlight la riceve a **1920x1080, 60 Hz, scala 1**.
+
+Evidenze raccolte durante il test end-to-end:
 
 ```text
+$ hyprctl monitors all
+Monitor omarchy-gtx (ID 0):
+        1920x1080@60.00000 at 0x0
+        scale: 1
+        currentFormat: XRGB8888
+
+$ nvidia-smi pmon -c 1       # mentre Moonlight e' connesso
+# gpu ... type  sm  mem enc ... command
+0       ...  G    4    0   -      Hyprland
+0       ... C+G   39    5  12     sunshine
+
 $ journalctl --user -u app-dev.lizardbyte.app.Sunshine.service
+[wayland] GBM request: 1920x1080 fourcc=0x34325241
 Found H.264 encoder: h264_nvenc [nvenc]
-New streaming session started [active sessions: 1]
-CLIENT CONNECTED
-
-$ nvidia-smi pmon -c 1
-# gpu ... enc ... command
-0       ...  4   ... sunshine
 ```
 
-`h264_nvenc` è l'encoder hardware **NVENC** della GTX, non la codifica software CPU (`libx264`). Il valore `enc` di `nvidia-smi pmon` attribuito al processo `sunshine` è la prova runtime più utile: conferma che il motore di encoding della GTX sta lavorando. Il valore può essere basso perché il desktop statico produce poche differenze tra un frame e l'altro; non deve essere 100% per essere hardware.
+`Hyprland` nella tabella NVIDIA dimostra che non e' piu' un compositor VirtIO. `enc=12` assegnato a `sunshine` dimostra che NVENC della GTX sta codificando: non e' `libx264`, cioe' non e' codifica video software CPU.
 
-## Il secondo problema: errore `%`, schermo nero e come sono stati separati
+Questa e' la topologia attuale:
 
-Durante il test sono comparsi due sintomi che sembravano identici dal client Windows, ma avevano cause diverse.
-
-| Sintomo nel client | Causa verificata sul guest | Correzione applicata |
-| --- | --- | --- |
-| `L'host ha restituito un errore: %` | Era stata pubblicata una vecchia app `Low Res Desktop` che eseguiva `xrandr --output HDMI-1 ...`. `xrandr` è un programma X11, non era installato e soprattutto non può configurare l'output Wayland `Virtual-1`. Sunshine interrompeva quindi l'avvio prima della sessione. | Rimossa l'app obsoleta. L'host pubblica ora soltanto `Desktop` e `Steam Big Picture`. |
-| Errore `%` dopo logout/riavvio della sessione grafica | Il servizio utente Sunshine restava vivo con `WAYLAND_DISPLAY=wayland-1`, ma il socket e la sessione di `daubog44` non esistevano più. Il journal riportava `Couldn't connect to Wayland display: wayland-1` e `Unable to find display or encoder during startup`. | La drop-in systemd lega Sunshine a `graphical-session.target`: quando il desktop termina Sunshine si ferma invece di mantenere un riferimento stantio; al nuovo login riparte con il socket giusto. |
-| Stream collegato, `nvidia-smi pmon` mostra `sunshine` con `enc=4`, ma immagine completamente nera | Il monitor QEMU `Virtual-1` era in **DPMS off**: Hyprland aveva spento l'output per risparmio energetico. Sunshine catturava e NVENC codificava quindi pixel neri in modo perfettamente valido. | La voce `Desktop` riaccende `Virtual-1` prima della connessione tramite un piccolo comando idempotente. La prova successiva dal client ha mostrato il lockscreen Hyprland invece del frame nero. |
-
-Il DPMS (*Display Power Management Signaling*) non spegne la GTX e non significa che NVENC si sia rotto: spegne l'output virtuale che Sunshine deve catturare. La prova è stata esplicita: prima del comando `hyprctl monitors -j` riportava `"dpmsStatus": false`; dopo il comando corretto di Hyprland riportava `true` e Moonlight visualizzava di nuovo l'immagine.
-
-### Configurazione che evita la ricaduta
-
-Drop-in della durata di vita della sessione:
-
-```ini
-# ~/.config/systemd/user/app-dev.lizardbyte.app.Sunshine.service.d/30-session-lifecycle.conf
-[Unit]
-BindsTo=graphical-session.target
-PartOf=graphical-session.target
-After=graphical-session.target
+```text
+GPU PCI passthrough /dev/dri/gtx1050
+        |
+        +-- AQ_DRM_DEVICES + AQ_NO_KMS_REQUIREMENT
+        |       |
+        |       +-- Hyprland (render e compositing sulla GTX)
+        |               |
+        |               +-- output Wayland headless "omarchy-gtx"
+        |                       1920x1080@60, scale 1
+        |                       |
+        +-----------------------+-- Sunshine: cattura GBM/Wayland
+                                        |
+                                        +-- h264_nvenc / NVENC GTX
+                                                |
+                                                +-- Moonlight Windows
 ```
 
-Comando installato in `~/.local/bin/hyprland-dpms-enable`:
+La configurazione Proxmox conserva **per ora** `vga: virtio`: serve ancora come console noVNC di recupero e non viene scelta dal desktop, che e' limitato alla GTX. Dopo una prova utente stabile e ripetuta di Moonlight si puo' valutare `qm set 1002 --vga none`; non e' stato fatto automaticamente per non eliminare l'unica console di emergenza della VM.
 
-```sh
-#!/bin/sh
-set -eu
-runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-sig=$(find "$runtime/hypr" -mindepth 1 -maxdepth 1 -type d \
-  -exec test -S '{}/.socket.sock' \; -printf '%f\n' 2>/dev/null | sort | tail -n 1)
-[ -n "$sig" ] || exit 0
-export XDG_RUNTIME_DIR="$runtime"
-export HYPRLAND_INSTANCE_SIGNATURE="$sig"
-exec hyprctl dispatch 'hl.dsp.dpms({ action = "enable" })'
+## Perche' il percorso precedente era lento o corrotto
+
+Prima la VM conteneva due GPU grafiche con ruoli incompatibili:
+
+```text
+GTX 1050 (card0)       -> GPU reale ma HDMI-A-1: disconnected
+VirtIO/QEMU (card1)    -> Virtual-1, unico output visibile nel noVNC
 ```
 
-L'app `Desktop` in `~/.config/sunshine/apps.json` contiene poi questa preparazione:
+Se Hyprland produceva `Virtual-1` con VirtIO ma Sunshine provava a catturare/importare quel buffer sulla GTX, il frame attraversava un confine DMA-BUF/GBM fra due driver. Il log `Couldn't import RGB Image: 0000300C` e le immagini corrotte in Moonlight erano la prova di quel fallimento; NVENC non era la causa.
 
-```json
-"prep-cmd": [{
-  "do": "/home/daubog44/.local/bin/hyprland-dpms-enable",
-  "undo": "/usr/bin/true"
-}]
+L'alternativa corretta non e' simulare un monitor HDMI NVIDIA con un EDID kernel: sulla GTX mobile il connettore e' disconnesso. Hyprland/Aquamarine offre invece `AQ_NO_KMS_REQUIREMENT=1`, che consente una sessione senza un'uscita KMS fisica, e `hyprctl output create headless <nome>` per creare una vera uscita Wayland. E' il modello documentato da Hyprland per GPU virtuali/headless, non un finto monitor PCI. Vedi [Virtual GPU](https://wiki.hypr.land/Configuring/Advanced-and-Cool/Virtual-GPU/) e [hyprctl](https://wiki.hypr.land/Configuring/Advanced-and-Cool/Using-hyprctl/).
+
+Un tentativo precedente con `drm.edid_firmware=... video=HDMI-A-1:...` ha reso il guest non raggiungibile (SSH e Guest Agent assenti). I due soli parametri Limine sono stati rimossi offline dall'ESP e il guest e' stato poi ripristinato; non sono presenti nella configurazione finale. Non e' stato osservato un kernel panic testuale che permetta di attribuire una causa piu' precisa.
+
+## Cosa installa `omarchy-gtx-primary`
+
+Lo script nel repository e sul guest e':
+
+```text
+scripts/omarchy-gtx-primary
+/usr/local/sbin/omarchy-gtx-primary
 ```
 
-Il comando trova dinamicamente la firma dell'istanza Hyprland corrente; non contiene una firma hard-coded e può quindi essere richiamato più volte senza cambiare stato quando l'output è già acceso. Su Hyprland 0.56 non usare la vecchia forma `hyprctl dispatch dpms on`: il dispatcher usa la sintassi Lua; la forma riportata sopra è quella documentata da Hyprland per abilitare DPMS. Vedi [hypridle / DPMS](https://wiki.hypr.land/0.56.0/Hypr-Ecosystem/hypridle/) e [uso di hyprctl](https://wiki.hypr.land/Configuring/Advanced-and-Cool/Using-hyprctl/).
+E' idempotente: rieseguirlo non duplica righe, regole monitor o drop-in systemd. Salva una sola copia dei tre file utente originari e rimuove i file propri al rollback quando non esisteva un predecessore dell'utente.
 
-Per ricaricare queste modifiche:
+`prepare-headless` esegue esattamente questi cambiamenti nel guest:
+
+1. imposta `AQ_DRM_DEVICES="/dev/dri/gtx1050"` e `AQ_NO_KMS_REQUIREMENT=1` in `~/.config/uwsm/env-hyprland`;
+2. imposta `adapter_name = /dev/dri/gtx1050` in Sunshine;
+3. aggiunge in `~/.config/hypr/monitors.lua` una sola regola Lua per `omarchy-gtx` a 1920x1080/60 e scala 1;
+4. installa `~/.local/bin/omarchy-headless-output`. Prima dell'avvio di Sunshine, esso scopre dinamicamente la firma della sessione Hyprland, crea `omarchy-gtx` solo se non esiste, ricarica la configurazione e verifica l'uscita;
+5. aggiunge la drop-in `25-headless-output.conf` con `ExecStartPre=...omarchy-headless-output`.
+
+Il punto 4 risolve il difetto piu' importante della prima versione headless: creare l'uscita a mano funzionava, ma non la rendeva disponibile in modo affidabile dopo logout, reboot o restart di Sunshine. Ora Sunshine non parte la cattura prima dell'output.
+
+Lo script **non** modifica kernel, Limine, VFIO, VBIOS, SSDT, `fw_cfg`, host PCI o configurazione Proxmox.
+
+### Comandi riproducibili
+
+Dal guest come root:
 
 ```bash
+sudo /usr/local/sbin/omarchy-gtx-primary prepare-headless
+sudo /usr/local/sbin/omarchy-gtx-primary verify-headless
+
+# Riavvio controllato di Sunshine dopo una modifica alla unit.
+systemctl --user daemon-reload
+systemctl --user restart app-dev.lizardbyte.app.Sunshine.service
+
+# Stato runtime: output, unit e processi GPU.
+sudo /usr/local/sbin/omarchy-gtx-primary status-runtime
+```
+
+L'output atteso da `status-runtime` contiene `Monitor omarchy-gtx`, `active` e una riga NVIDIA per `Hyprland`. Durante uno stream aggiunge una riga per `sunshine` e un valore `enc` maggiore di zero.
+
+Per annullare soltanto questo layer guest:
+
+```bash
+sudo /usr/local/sbin/omarchy-gtx-primary rollback-guest
 systemctl --user daemon-reload
 systemctl --user restart app-dev.lizardbyte.app.Sunshine.service
 ```
 
-Nel client Moonlight scegliere l'host `omarchy` senza triangolo di avviso e poi la voce **Desktop**. Se appare `Enter Password`, è il lockscreen Hyprland, non un errore di Sunshine: digitare la password del guest e premere Invio. La tastiera riattiva anche DPMS perché Omarchy ha `key_press_enables_dpms = true`.
-
-### Se Moonlight non trova più Omarchy
-
-Sunshine è deliberatamente un servizio **della sessione grafica**, non un demone indipendente dal desktop. Questa è la sequenza da capire:
-
-```text
-sessione grafica daubog44 attiva
-  -> /run/user/1000/wayland-1 esiste
-  -> graphical-session.target è active
-  -> Sunshine può catturare Virtual-1
-
-sessione terminata; resta soltanto il greeter SDDM
-  -> wayland-1 non esiste
-  -> graphical-session.target è inactive
-  -> Sunshine si ferma intenzionalmente
-  -> Moonlight non ha un host desktop a cui collegarsi
-```
-
-Il 28 agosto si è verificato proprio il secondo caso. Il riavvio di SDDM ha riavviato l'autologin; dopo otto secondi erano di nuovo presenti sessione `seat0`, socket `wayland-1`, Sunshine `active` e le porte TCP `47984`, `47989`, `47990`, `48010`. Non era un errore GPU.
-
-Controlli riproducibili dal guest:
+Il rollback non tocca il passthrough della GTX. Se in futuro fosse stato scelto anche `vga: none`, il ripristino della console noVNC e' separato e intenzionale:
 
 ```bash
-loginctl list-sessions
-systemctl --user is-active graphical-session.target
-systemctl --user is-active app-dev.lizardbyte.app.Sunshine.service
-ls -l /run/user/$(id -u)/wayland-*
-ss -ltnp | grep sunshine
+# Sul nodo Proxmox, non nel guest.
+qm set 1002 --vga virtio
 ```
 
-Se il primo comando mostra solo `sddm`/`greeter`, si deve prima avviare il desktop del guest dalla console Proxmox (oppure riavviare SDDM se l'autologin è la configurazione desiderata); riavviare Sunshine da solo non può inventare un desktop Wayland da catturare.
+## Qualita', fullscreen e misura corretta della CPU
 
-In quell'evento Moonlight ha inoltre chiesto un nuovo PIN: il record di accoppiamento client-host non era più considerato valido. Senza un confronto con il vecchio certificato non è possibile attribuire onestamente la causa precisa a un singolo file passato; non c'è però alcuna evidenza che VFIO, VBIOS, NVENC o `AQ_DRM_DEVICES` abbiano causato il pairing perso. L'accoppiamento è stato rifatto con la modalità prevista da Sunshine `-0` (*leggi il PIN da stdin*), senza resettare le credenziali della UI web:
+L'uscita fisica del server e' ora Full HD, non una immagine 960x540: il vecchio valore logico dimezzato veniva dalla scala 2. La modalita' supportata dall'output headless di questa versione Hyprland e' soltanto `1920x1080@60`; non dichiariamo falsamente 2K. In Moonlight impostare **1080p**, **60 FPS** e un bitrate LAN adeguato (ad esempio 30--50 Mbit/s); poi attivare il fullscreen dal pulsante di massimizzazione o dalle scorciatoie mostrate nelle impostazioni del client. Il server non puo' rendere a 2K se la sua uscita Wayland e' Full HD.
+
+`htop` puo' mostrare molte righe di thread con lo stesso nome. Non si sommano: il dato da confrontare e' la riga del processo intero (`ps -eo pid,nlwp,pcpu,comm`). Durante il primo stream headless il processo Sunshine era circa al 51% di **una** CPU logica, non quattro processi da 51%. Hyprland era circa al 3--4% come processo intero.
+
+Il 51% non e' comunque zero-copy. Il build Sunshine funzionante e' `0.0.0-14ffa6f-dirty`, compilato per il driver Pascal 580 e corretto con le patch locali. Nel suo `CMakeCache.txt` e' registrato:
+
+```text
+SUNSHINE_ENABLE_CUDA:BOOL=OFF
+```
+
+Inoltre la patch [`sunshine-linux-nvenc-system-memory-input.patch`](../patches/sunshine-linux-nvenc-system-memory-input.patch) seleziona esplicitamente frame di sistema/NV12 per non incorrere nel precedente `Couldn't scale frame: Invalid argument`. Il flusso e' quindi:
+
+```text
+cattura GTX -> RAM di sistema -> upload FFmpeg -> NVENC GTX
+```
+
+NVENC resta hardware, come prova `enc`, ma la copia/conversione richiede CPU. Questa e' la spiegazione esatta della CPU residua e della differenza fra “la GTX codifica” e “ogni pixel resta sempre in VRAM”.
+
+### Alternative CUDA provate e limite attuale
+
+Il pacchetto Sunshine Arch ufficiale `2026.516.143833-4` e' stato provato con la stessa uscita GTX. Ha rifiutato `h264_nvenc` sulla GTX 1050 con:
+
+```text
+Multiple reference frames are not supported by the device
+Provided device doesn't support required NVENC features
+Found H.264 encoder: libx264 [software]
+```
+
+E' stato immediatamente rimosso il solo override `26-official-sunshine.conf` e ripristinato il build compatibile: non rimane un fallback software attivo.
+
+Ricompilare il build locale con CUDA eliminerebbe potenzialmente il passaggio RAM, ma non e' una semplice opzione da attivare qui. La sorgente richiede `nvcc`; il repository Arch offre CUDA 13.3 (2.20 GiB da scaricare, 4.71 GiB installati), mentre NVIDIA ha rimosso da CUDA 13 il supporto di compilazione offline per Pascal/compute capability 6.1. Per una GTX 1050 servirebbe una toolchain CUDA **12.x** conservata separatamente, una build sperimentale e una nuova prova di compatibilita'. Non e' stata installata: sarebbe una modifica grande e non verificata. [NVIDIA CUDA 13 release notes](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-toolkit-release-notes/index.html) e [CUDA/driver/architecture matrix](https://docs.nvidia.com/datacenter/tesla/drivers/cuda-toolkit-driver-and-architecture-matrix.html).
+
+Quindi il risultato onesto e':
+
+| Proprietà | Stato |
+| --- | --- |
+| Desktop Hyprland renderizzato dalla GTX | verificato (`Hyprland` in `nvidia-smi pmon`) |
+| Output e stream Full HD 60 | verificato (`omarchy-gtx`, richieste GBM 1920x1080) |
+| Codifica NVIDIA | verificata (`h264_nvenc`, `enc>0`) |
+| Zero-copy GTX -> NVENC | non ottenuto; CUDA e' disabilitato nel build compatibile |
+| CPU nulla durante lo stream | non ottenuta; resta la copia RAM del build compatibile |
+| 2K nativo | non supportato dall'output headless attuale |
+
+## Verifica end-to-end dopo ogni aggiornamento
 
 ```bash
-# Solo mentre Moonlight mostra un nuovo PIN; eseguire nel terminale del guest.
-systemctl --user stop app-dev.lizardbyte.app.Sunshine.service
-env XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-1 \
-  ~/.local/lib/sunshine-gbm/sunshine -0
-# Inserire nel terminale il PIN mostrato da Moonlight.
-# Dopo "paired", Ctrl+C e:
-systemctl --user start app-dev.lizardbyte.app.Sunshine.service
-```
+# Guest: controlli prima di aprire Moonlight.
+sudo /usr/local/sbin/omarchy-gtx-primary status-runtime
+journalctl --user -u app-dev.lizardbyte.app.Sunshine.service --since '2 minutes ago' --no-pager \
+  | grep -E 'omarchy-gtx|h264_nvenc|GBM request|CLIENT CONNECTED'
 
-La verifica dopo il ritorno alla unit systemd ha mostrato di nuovo `h264_nvenc`, `CLIENT CONNECTED`, una sessione attiva e l'immagine Moonlight corretta. Il PIN è un'autorizzazione temporanea tra questo client Windows e questo host, non una password del sistema.
-
-## Il problema reale: due GPU con ruoli diversi
-
-La VM espone due dispositivi DRM:
-
-```text
-/dev/dri/card0 = GTX 1050 passata con VFIO
-/dev/dri/card1 = GPU VirtIO/QEMU che possiede l'uscita Virtual-1
-```
-
-In un test iniziale è stata resa primaria la GTX (`AQ_DRM_DEVICES=card0:card1`) e Sunshine è stato impostato a catturare da `card0`. Moonlight mostrava frame corrotti o neri. Il journal riportava anche `Couldn't import RGB Image: 0000300C`: è un fallimento dell'importazione del buffer Wayland/GBM fra GPU, non un fallimento di NVENC.
-
-La configurazione stabile separa invece i ruoli:
-
-```text
-Hyprland -> card1 (VirtIO): compone e possiede Virtual-1
-Sunshine -> card1: cattura Wayland/GBM dello stesso output
-FFmpeg h264_nvenc -> GTX card0: codifica H.264 con NVENC
-Moonlight -> decodifica sul client Windows
-```
-
-Questo è il motivo per cui non si deve forzare la GTX a essere contemporaneamente output virtuale, sorgente di cattura e encoder: su questa combinazione Hyprland + VirtIO + NVIDIA Pascal la condivisione di buffer DMA-BUF/GBM tra le due GPU non è affidabile. Tenere la cattura sul proprietario dell'output elimina il passaggio che corrompeva l'immagine, senza rinunciare a NVENC.
-
-## Rendering 3D: cosa usa davvero la GTX e cosa non è possibile imporle
-
-Sono stati provati tre percorsi, riportando ogni volta la configurazione stabile prima di continuare.
-
-| Percorso | Esito | Perché |
-| --- | --- | --- |
-| Hyprland soltanto sulla GTX (`AQ_DRM_DEVICES=card0`) | Non utilizzabile: dopo il riavvio di SDDM restava solo il greeter, senza sessione `daubog44` e senza socket `wayland-1`. | La GTX esponeva solo `card0-HDMI-A-1`, fisicamente **disconnesso**. Non poteva quindi guidare un output desktop. |
-| GTX primaria, VirtIO secondaria (`card0:card1`) | Non stabile: il desktop/stream mostrava frame corrotti o neri; Sunshine riportava `Couldn't import RGB Image: 0000300C`. | `Virtual-1` appartiene alla VirtIO. Questa disposizione costringe un import DMA-BUF tra GPU che, con driver Pascal/VirtIO di questa VM, non è affidabile. |
-| VirtIO primaria, GTX disponibile (`card1:card0`) | Stabile e mantenuta. | VirtIO guida `Virtual-1`; la GTX codifica NVENC e può rendere applicazioni 3D per offload. |
-
-La topologia verificata è quindi:
-
-```text
-GTX 1050 /dev/dri/card0      -> HDMI-A-1: disconnected
-VirtIO   /dev/dri/card1      -> Virtual-1: connected, 1920x1080
-```
-
-Non è un limite artificiale di Sunshine: nel guest non c'è un connettore video NVIDIA attivo su cui Hyprland possa creare l'output principale. Forzare la GPU sbagliata equivale a scollegare il monitor. La documentazione Hyprland avverte che selezionare soltanto una GPU tramite `AQ_DRM_DEVICES` può far perdere lo schermo; la sua guida multi-GPU descrive l'ordine come priorità/fallback, non come una garanzia di render-offload trasparente di un desktop MUXless. [FAQ Hyprland](https://wiki.hypr.land/FAQ/) e [multi-GPU Hyprland](https://wiki.hypr.land/Configuring/Advanced-and-Cool/Multi-GPU/).
-
-### Perché non è identico al caso Ubuntu
-
-"Rendere primaria la GTX" non è una singola casella Proxmox. Può significare almeno tre cose diverse: (1) il driver NVIDIA è il renderer di una app, (2) NVIDIA compone l'intero desktop, (3) NVIDIA possiede il connettore dell'unico monitor. I test Ubuntu hanno verificato i primi due in una sessione grafica diversa (KMS NVIDIA e, per il test diagnostico, Xorg NVIDIA `:2`); non trasformano automaticamente l'uscita del guest Omarchy.
-
-Omarchy ha invece `vga: virtio` nella configurazione QEMU e il suo unico output visibile è `Virtual-1` della VirtIO. La GTX è passata correttamente e funziona, ma il suo connettore emulato è disconnesso. Quindi una configurazione che può essere utile su Ubuntu non può, da sola, far diventare la GTX proprietaria di `Virtual-1`: quell'output non è cablato alla GPU NVIDIA. Il compromesso non è "una GTX non funzionante"; è assegnare ogni fase alla GPU che può svolgerla senza trasferimenti instabili:
-
-```text
-Hyprland + output Virtual-1                 -> VirtIO
-rendering pesante di una singola applicazione -> GTX, con gtx-run
-compressione del video Moonlight             -> GTX, con NVENC
-```
-
-### Offload 3D delle applicazioni: soluzione funzionante
-
-Il compositor Hyprland resta correttamente sulla VirtIO, ma le applicazioni che contano possono essere renderizzate dalla GTX. È stato installato questo wrapper:
-
-```sh
-# ~/.local/bin/gtx-run
-#!/bin/sh
-set -eu
-[ "$#" -gt 0 ] || { echo "Uso: gtx-run COMANDO [ARGOMENTI...]" >&2; exit 64; }
-export __NV_PRIME_RENDER_OFFLOAD=1
-export __GLX_VENDOR_LIBRARY_NAME=nvidia
-export VK_LAYER_NV_optimus=NVIDIA_only
-exec "$@"
-```
-
-Esempi riproducibili dal terminale grafico Omarchy:
-
-```bash
-gtx-run glxinfo -B | grep -E 'OpenGL vendor|OpenGL renderer'
-gtx-run glxgears
-gtx-run steam
+# Aprire Desktop su Moonlight Windows, muovere una finestra per alcuni secondi,
+# poi nel guest:
 nvidia-smi pmon -c 1
+ps -eo pid,nlwp,pcpu,pmem,rss,comm,args --sort=-pcpu | head -n 15
 ```
 
-Nel test `gtx-run glxinfo -B` ha restituito `NVIDIA Corporation` e `NVIDIA GeForce GTX 1050/PCIe/SSE2`; durante `gtx-run glxgears`, `nvidia-smi pmon` ha attribuito a `glxgears` circa il 45% di GPU. Questo prova rendering 3D sulla GTX. Gli effetti del desktop (barre, animazioni e compositing di Hyprland) restano invece sulla VirtIO: renderizzarli sulla GTX richiederebbe un output NVIDIA attivo o una seconda sessione headless separata, non è un miglioramento sicuro dell'attuale desktop interattivo.
+Atteso: `Hyprland` e `sunshine` sulla GPU 0; `sunshine` con `enc` non nullo mentre il client e' collegato. Se compare `libx264`, non e' accettabile come correzione: verificare quale binary esegue la unit con `systemctl --user status app-dev.lizardbyte.app.Sunshine.service` e ripristinare il build locale compatibile.
 
-Una sessione Hyprland headless separata sulla GTX è un esperimento architetturalmente diverso: richiede login/seat, output virtuale e cattura dedicati e non riusa il desktop Omarchy corrente. Non è stata installata come “fix” perché non risolverebbe il `Virtual-1` esistente e le combinazioni NVIDIA/Hyprland headless hanno ancora segnalazioni upstream di instabilità. Rimane un'alternativa da testare in una VM/snapshot separata, non una soluzione verificata per questa macchina. [Issue Hyprland NVIDIA/headless](https://github.com/hyprwm/Hyprland/issues/8390).
+## Cosa non si deve dedurre
 
-## Configurazione applicata
+- Questa soluzione e' specifica a questa GTX 1050 Mobile, al driver 580, alla versione Omarchy/Hyprland e al build Sunshine indicato. Non e' una ricetta universale per tutte le GPU mobile.
+- `vga: virtio` ancora presente in QEMU non prova che il desktop la usi; `AQ_DRM_DEVICES` e `nvidia-smi pmon` sono la prova del renderer reale.
+- Non e' stato dichiarato un fix “magico” per CUDA. Il percorso zero-copy resta un lavoro futuro, che richiede CUDA 12.x e test separati; CUDA 13 non e' compatibile con Pascal per la compilazione offline.
+- Il passthrough resta esclusivo: la GTX non puo' essere usata contemporaneamente da Omarchy e da un'altra VM.
 
-File `~/.config/uwsm/env-hyprland`:
-
-```bash
-# VirtIO deve venire prima: possiede Virtual-1.
-export AQ_DRM_DEVICES="/dev/dri/card1:/dev/dri/card0"
-```
-
-File `~/.config/sunshine/sunshine.conf`:
-
-```ini
-capture = wlr
-encoder = nvenc
-adapter_name = /dev/dri/card1
-```
-
-`capture = wlr` usa il protocollo di screencopy di Hyprland/Wayland. `adapter_name` qui sceglie l'adapter usato per la cattura GBM, quindi deve essere la VirtIO che guida `Virtual-1`; non sceglie la scheda NVENC. `encoder = nvenc` sceglie invece il codec NVIDIA.
-
-La documentazione Hyprland spiega che `AQ_DRM_DEVICES` decide priorità e fallback delle GPU e che, in presenza di GPU virtuale e fisica, vanno elencate entrambe. Sunshine documenta separatamente `capture`, `adapter_name` ed encoder. Vedi [Hyprland multi-GPU](https://wiki.hypr.land/Configuring/Advanced-and-Cool/Multi-GPU/), [Hyprland virtual GPU](https://wiki.hypr.land/Configuring/Advanced-and-Cool/Virtual-GPU/) e [opzioni Sunshine](https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2configuration.html).
-
-Per rendere effettivo `AQ_DRM_DEVICES` occorre riavviare la sessione grafica (logout/login; nel test è stato riavviato SDDM). Poi:
-
-```bash
-systemctl --user restart app-dev.lizardbyte.app.Sunshine.service
-```
-
-## Perché è stato necessario il binario Sunshine locale
-
-L'FFmpeg di sistema dell'Omarchy corrente richiedeva NVENC API 13.1, mentre il driver proprietario Pascal compatibile della GTX 1050, `580.178.04`, espone API 13.0. Lanciare il pacchetto Sunshine di sistema falliva quindi prima dello streaming con un errore equivalente a:
-
-```text
-Driver does not support required nvenc API version. Required: 13.1 Found: 13.0
-```
-
-È stato quindi compilato Sunshine con il suo FFmpeg bundled, compatibile con il driver 580. Inoltre, il backend Wayland della revisione usata non apriva esplicitamente il render node scelto da `adapter_name` e VirtIO rifiutava talvolta il primo flag GBM. La patch [sunshine-wayland-virtio-gbm.patch](../patches/sunshine-wayland-virtio-gbm.patch) apre quel render node e ritenta con un DMA-BUF lineare. Il binario risultante viene avviato dalla drop-in utente:
-
-```text
-~/.config/systemd/user/app-dev.lizardbyte.app.Sunshine.service.d/20-virtio-gbm.conf
-ExecStart=/home/daubog44/.local/lib/sunshine-gbm/sunshine
-```
-
-Il codice Linux upstream di Sunshine preferisce normalmente frame CUDA per NVENC. Il pacchetto/build in uso non contiene il convertitore CUDA; forzarlo portava a `Couldn't scale frame: Invalid argument`. La patch allegata [sunshine-linux-nvenc-system-memory-input.patch](../patches/sunshine-linux-nvenc-system-memory-input.patch) fa passare a `h264_nvenc` frame `NV12` in memoria di sistema. FFmpeg carica quindi i frame nella GTX e NVENC li codifica: la conversione/copia resta sul percorso CPU/RAM/PCIe, ma **la compressione video è hardware NVIDIA**, come dimostra `nvidia-smi pmon`.
-
-Le due patch sono state verificate contro la sorgente locale da cui è stato compilato il binario in esecuzione; non sono una promessa di applicarsi immutate a ogni release Sunshine. Prima di aggiornare, applicarle con `patch --dry-run -p1 < ...`, ricompilare e rifare la verifica runtime, invece di sovrascrivere un pacchetto funzionante.
-
-Non è stato installato il toolkit CUDA: avrebbe richiesto diversi gigabyte e avrebbe tentato di introdurre il ramo driver NVIDIA 610, incompatibile con la GTX 1050 Pascal in questa installazione. Per la compatibilità della GTX 1050 su Omarchy vedi la nota nel [README](../README.md#nota-essenziale-per-archomarchy-e-gtx-1050).
-
-## Verifica riproducibile
-
-1. Da Omarchy controllare che la GPU e il servizio siano pronti:
-
-   ```bash
-   nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
-   systemctl --user is-active app-dev.lizardbyte.app.Sunshine.service
-   grep -E '^(capture|encoder|adapter_name)' ~/.config/sunshine/sunshine.conf
-   ```
-
-   Atteso: `NVIDIA GeForce GTX 1050`, ramo driver `580.178.04`, `active`, `wlr`, `nvenc`, `/dev/dri/card1`.
-
-2. Aprire l'app `Desktop` dell'host Omarchy in Moonlight.
-
-3. Mentre la sessione è connessa, eseguire dal terminale Omarchy:
-
-   ```bash
-   journalctl --user -u app-dev.lizardbyte.app.Sunshine.service --since '2 minutes ago' --no-pager \
-     | grep -E 'h264_nvenc|New streaming session|CLIENT CONNECTED'
-   nvidia-smi pmon -c 1
-   nvidia-smi --query-gpu=utilization.encoder,utilization.gpu,memory.used --format=csv,noheader
-   ```
-
-   Atteso: `h264_nvenc`, sessione connessa e una riga `sunshine` con `enc` non nullo. Per un carico encoder più visibile, muovere finestre o riprodurre un video nel desktop: un'immagine ferma è compressa con pochi frame/differenze.
-
-4. Per vedere le statistiche sul client Moonlight premere `Ctrl` + `Alt` + `Shift` + `S`; per il full screen usare `Ctrl` + `Alt` + `Shift` + `X` oppure il pulsante della finestra. I comandi sono documentati nelle [FAQ Moonlight](https://github.com/moonlight-stream/moonlight-docs/wiki/Frequently-Asked-Questions).
-
-## Cosa non conclude questo test
-
-- Non prova che Hyprland renderizzi il desktop sulla GTX: la configurazione deliberatamente usa VirtIO come GPU di composizione per evitare la corruzione del frame. Prova invece la codifica H.264 NVENC sulla GTX.
-- Non trasforma la GTX 1050 in una GPU virtuale condivisibile: il passthrough resta esclusivo alla VM.
-- Non rende questa soluzione universale. Schede, driver, compositori e GPU virtuali diversi possono richiedere un altro adapter, altro FFmpeg o nessuna patch.
-- Se un aggiornamento di Sunshine/FFmpeg o del driver cambia l'ABI, ricompilare e ripetere la verifica sopra prima di dichiarare di nuovo NVENC funzionante.
-
-## Ripristino prudente
-
-Se un aggiornamento rompe lo stream, non cambiare VFIO né il passthrough. Prima riportare Sunshine alla configurazione che cattura il proprietario dell'output:
-
-```bash
-sed -i 's|^adapter_name = .*|adapter_name = /dev/dri/card1|' ~/.config/sunshine/sunshine.conf
-systemctl --user restart app-dev.lizardbyte.app.Sunshine.service
-```
-
-Se si desidera solo diagnosticare la cattura, impostare temporaneamente `encoder = software`, riavviare il servizio, verificare l'immagine e poi ripristinare `encoder = nvenc`. Il fallback software è un diagnostico: non soddisfa l'obiettivo NVENC e torna a usare significativamente la CPU.
+Vedi anche [tentativi ed esiti](attempts-and-outcomes.md), [architettura VFIO/ACPI](architecture.md) e [runbook riproducibile](reproducible-runbook.md).

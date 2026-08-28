@@ -169,20 +169,16 @@ def main() -> None:
             "h264_nvenc",
             "nvidia-smi pmon",
             "AQ_DRM_DEVICES",
-            "adapter_name = /dev/dri/card1",
+            "AQ_NO_KMS_REQUIREMENT",
+            "adapter_name = /dev/dri/gtx1050",
             "VirtIO",
             "Couldn't import RGB Image: 0000300C",
-            "sunshine-linux-nvenc-system-memory-input.patch",
-            "sunshine-wayland-virtio-gbm.patch",
-            "L'host ha restituito un errore: %",
-            "graphical-session.target",
-            "dpmsStatus",
-            "hyprland-dpms-enable",
-            "gtx-run",
-            "card0-HDMI-A-1",
-            "Sunshine è deliberatamente un servizio",
-            "sunshine -0",
-            "Omarchy ha invece `vga: virtio`",
+            "omarchy-gtx",
+            "1920x1080@60",
+            "SUNSHINE_ENABLE_CUDA:BOOL=OFF",
+            "libx264 [software]",
+            "omarchy-gtx-primary",
+            "cattura GTX -> RAM di sistema -> upload FFmpeg -> NVENC GTX",
         ),
         "Sunshine/Moonlight Omarchy",
     )
@@ -198,6 +194,7 @@ def main() -> None:
         ROOT / "docs" / "rdp-wayland.md",
         ROOT / "docs" / "wayland-nvidia-kms.md",
         ROOT / "docs" / "sunshine-moonlight-omarchy.md",
+        ROOT / "scripts" / "omarchy-gtx-primary",
         ROOT / "clients" / "windows-rdstls-template.rdp",
         ROOT / "patches" / "gnome-settings-daemon-50.0-rdp-handover.patch",
         ROOT / "patches" / "sunshine-linux-nvenc-system-memory-input.patch",
@@ -226,6 +223,20 @@ def main() -> None:
     ).stdout.rstrip()
     if documented_help != actual_help:
         raise AssertionError("README: l'output --help non corrisponde allo script")
+
+    omarchy_script = ROOT / "scripts" / "omarchy-gtx-primary"
+    subprocess.run([bash, "-n", str(omarchy_script)], check=True)
+    omarchy_help = subprocess.run(
+        [bash, str(omarchy_script), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    require(
+        omarchy_help,
+        ("prepare-headless", "verify-headless", "status-runtime", "rollback-guest", "idempotente"),
+        "help omarchy-gtx-primary",
+    )
 
     print("documentazione-validata: glossario, diagrammi, help, link locali e ROM OEM ok")
 

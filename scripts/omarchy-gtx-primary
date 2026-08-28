@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# Run an Omarchy/Hyprland desktop directly on a passed-through NVIDIA GPU.
+# This deliberately uses Hyprland's headless output instead of faking a DRM connector.
+set -Eeuo pipefail
+
+readonly USER_NAME='daubog44'
+readonly USER_HOME="/home/$USER_NAME"
+readonly ENV_FILE="$USER_HOME/.config/uwsm/env-hyprland"
+readonly SUNSHINE_FILE="$USER_HOME/.config/sunshine/sunshine.conf"
+readonly MONITORS_FILE="$USER_HOME/.config/hypr/monitors.lua"
+readonly HEADLESS_HELPER="$USER_HOME/.local/bin/omarchy-headless-output"
+readonly SUNSHINE_DROPIN="$USER_HOME/.config/systemd/user/app-dev.lizardbyte.app.Sunshine.service.d/25-headless-output.conf"
+readonly SUNSHINE_SERVICE='app-dev.lizardbyte.app.Sunshine.service'
+readonly BACKUP_DIR='/root/omarchy-gtx-headless-backup'
+readonly STALE_EDID='/usr/lib/firmware/edid/omarchy-1920x1200.bin'
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+require_root() { (( EUID == 0 )) || die 'eseguire come root'; }
+
+backup_once() {
+  local file=$1 target
+  [[ -e "$file" ]] || return 0
+  mkdir -p "$BACKUP_DIR"
+  target="$BACKUP_DIR${file}"
+  [[ -e "$target" ]] || { mkdir -p "$(dirname "$target")"; cp -a "$file" "$target"; }
+}
+
+# These purpose-named files are written by this script.  On a later idempotent
+# run, do not mistake our own first version for user data and back it up as an
+# "original": rollback must remove it when no genuine predecessor existed.
+backup_if_unmanaged() {
+  local file=$1
+  [[ -e "$file" ]] || return 0
+  case "$file" in
+    "$HEADLESS_HELPER") grep -Fq 'Managed by omarchy-gtx-primary' "$file" && return 0 ;;
+    "$SUNSHINE_DROPIN") grep -Fxq "ExecStartPre=$HEADLESS_HELPER" "$file" && return 0 ;;
+  esac
+  backup_once "$file"
+}
+
+replace_or_append() {
+  local file=$1 expression=$2 value=$3
+  if grep -Eq "$expression" "$file"; then
+    sed -i -E "s|$expression|$value|" "$file"
+  else
+    printf '%s\n' "$value" >>"$file"
+  fi
+}
+
+prepare_headless() {
+  require_root
+  [[ -e "$ENV_FILE" && -e "$SUNSHINE_FILE" && -e "$MONITORS_FILE" ]] || die 'file di configurazione Omarchy inatteso o mancante'
+  backup_once "$ENV_FILE"
+  backup_once "$SUNSHINE_FILE"
+  backup_once "$MONITORS_FILE"
+  backup_if_unmanaged "$HEADLESS_HELPER"
+  backup_if_unmanaged "$SUNSHINE_DROPIN"
+
+  # AQ_NO_KMS_REQUIREMENT permits Hyprland to run on the NVIDIA DRM device even
+  # when the passed-through laptop GPU exposes no physically connected connector.
+  # It removes the VirtIO--NVIDIA DMA-BUF hop; the output is created explicitly
+  # below rather than with a kernel EDID override.
+  replace_or_append "$ENV_FILE" '^export AQ_DRM_DEVICES=.*$' 'export AQ_DRM_DEVICES="/dev/dri/gtx1050"'
+  replace_or_append "$ENV_FILE" '^export AQ_NO_KMS_REQUIREMENT=.*$' 'export AQ_NO_KMS_REQUIREMENT=1'
+  sed -i '/^export AQ_NO_MODIFIERS=/d' "$ENV_FILE"
+  chown "$USER_NAME:$USER_NAME" "$ENV_FILE"
+
+  replace_or_append "$SUNSHINE_FILE" '^adapter_name = .*$' 'adapter_name = /dev/dri/gtx1050'
+  chown "$USER_NAME:$USER_NAME" "$SUNSHINE_FILE"
+
+  # Keep one managed block, so running the script again is idempotent and does
+  # not duplicate monitor rules after upgrades of the Omarchy defaults. Current
+  # Hyprland headless outputs offer 1920x1080@60; it is physical Full HD, scale 1.
+  sed -i '/-- BEGIN sunshine-virtual-display (managed locally)/,/-- END sunshine-virtual-display/d' "$MONITORS_FILE"
+  printf '%s\n' \
+    '' \
+    '-- BEGIN sunshine-virtual-display (managed locally)' \
+    '-- GTX-only Wayland output for Sunshine/Moonlight; no VirtIO display ownership.' \
+    'hl.monitor({ output = "omarchy-gtx", mode = "1920x1080@60", position = "0x0", scale = 1 })' \
+    '-- END sunshine-virtual-display' \
+    >>"$MONITORS_FILE"
+  chown "$USER_NAME:$USER_NAME" "$MONITORS_FILE"
+
+  # Sunshine must see a Wayland output before probing the capture backend.  This
+  # helper waits for the active Hyprland instance, creates one named output once,
+  # and reloads the monitor rule above.  It is a user-service pre-start hook, so
+  # it also repairs a manually stopped/restarted Sunshine service.
+  install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "$(dirname "$HEADLESS_HELPER")" "$(dirname "$SUNSHINE_DROPIN")"
+  cat >"$HEADLESS_HELPER" <<'EOF'
+#!/usr/bin/env bash
+# Managed by omarchy-gtx-primary.  Creates a GTX-only virtual output once.
+set -Eeuo pipefail
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+for attempt in {1..40}; do
+  signature="$(hyprctl instances 2>/dev/null | awk '/^instance / {gsub(/:$/, "", $2); print $2; exit}')"
+  [[ -n "$signature" ]] && break
+  sleep 0.25
+done
+[[ -n "${signature:-}" ]] || { echo 'Hyprland instance not ready' >&2; exit 1; }
+export HYPRLAND_INSTANCE_SIGNATURE="$signature"
+
+if ! hyprctl monitors all 2>/dev/null | grep -Fq 'Monitor omarchy-gtx '; then
+  hyprctl output create headless omarchy-gtx
+fi
+
+# The Lua monitor declaration is applied after the named output exists.
+hyprctl reload
+hyprctl monitors all 2>/dev/null | grep -Fq 'Monitor omarchy-gtx ' || {
+  echo 'omarchy-gtx output was not available after reload' >&2
+  exit 1
+}
+EOF
+  chmod 0755 "$HEADLESS_HELPER"
+  chown "$USER_NAME:$USER_NAME" "$HEADLESS_HELPER"
+  cat >"$SUNSHINE_DROPIN" <<EOF
+# Managed by omarchy-gtx-primary.
+[Service]
+ExecStartPre=$HEADLESS_HELPER
+EOF
+  chown "$USER_NAME:$USER_NAME" "$SUNSHINE_DROPIN"
+
+  # The earlier EDID experiment is not used by the headless design. It is safe
+  # to remove only after the Limine drop-in has already been removed by rollback.
+  rm -f "$STALE_EDID"
+  note 'stage pronto: riavviare la sessione grafica con VirtIO ancora presente, verificare omarchy-gtx/NVIDIA/Sunshine; solo dopo impostare vga: none sul nodo'
+}
+
+verify_headless() {
+  require_root
+  grep -Fxq 'export AQ_DRM_DEVICES="/dev/dri/gtx1050"' "$ENV_FILE" || die 'AQ_DRM_DEVICES non punta alla GTX'
+  grep -Fxq 'export AQ_NO_KMS_REQUIREMENT=1' "$ENV_FILE" || die 'AQ_NO_KMS_REQUIREMENT non abilitato'
+  grep -Fxq 'adapter_name = /dev/dri/gtx1050' "$SUNSHINE_FILE" || die 'Sunshine non punta alla GTX'
+  grep -Fq 'output = "omarchy-gtx"' "$MONITORS_FILE" || die 'monitor headless non configurato'
+  [[ -x "$HEADLESS_HELPER" ]] || die 'helper di creazione output mancante'
+  grep -Fxq "ExecStartPre=$HEADLESS_HELPER" "$SUNSHINE_DROPIN" || die 'pre-start Sunshine mancante'
+  note 'configurazione headless GTX coerente; controllare a runtime renderer, omarchy-gtx e NVENC'
+}
+
+status_runtime() {
+  require_root
+  local user_id
+  user_id="$(id -u "$USER_NAME")"
+  note 'stato runtime Omarchy/GTX (enc aumenta solo durante uno stream)'
+  runuser -u "$USER_NAME" -- env \
+    XDG_RUNTIME_DIR="/run/user/$user_id" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$user_id/bus" \
+    SUNSHINE_SERVICE="$SUNSHINE_SERVICE" \
+    bash -s <<'EOF'
+set -Eeuo pipefail
+signature="$(hyprctl instances 2>/dev/null | awk '/^instance / {gsub(/:$/, "", $2); print $2; exit}')"
+[[ -n "$signature" ]] || { echo 'Hyprland non e attivo'; exit 1; }
+export HYPRLAND_INSTANCE_SIGNATURE="$signature"
+hyprctl monitors all | sed -n '/^Monitor omarchy-gtx /,/^$/p'
+systemctl --user is-active "$SUNSHINE_SERVICE"
+nvidia-smi pmon -c 1
+EOF
+}
+
+rollback_guest() {
+  require_root
+  [[ -e "$BACKUP_DIR$ENV_FILE" ]] && cp -a "$BACKUP_DIR$ENV_FILE" "$ENV_FILE"
+  [[ -e "$BACKUP_DIR$SUNSHINE_FILE" ]] && cp -a "$BACKUP_DIR$SUNSHINE_FILE" "$SUNSHINE_FILE"
+  [[ -e "$BACKUP_DIR$MONITORS_FILE" ]] && cp -a "$BACKUP_DIR$MONITORS_FILE" "$MONITORS_FILE"
+  [[ -e "$BACKUP_DIR$HEADLESS_HELPER" ]] && cp -a "$BACKUP_DIR$HEADLESS_HELPER" "$HEADLESS_HELPER" || rm -f "$HEADLESS_HELPER"
+  [[ -e "$BACKUP_DIR$SUNSHINE_DROPIN" ]] && cp -a "$BACKUP_DIR$SUNSHINE_DROPIN" "$SUNSHINE_DROPIN" || rm -f "$SUNSHINE_DROPIN"
+  note 'file guest ripristinati; systemctl --user daemon-reload; sul nodo lasciare o riportare: qm set 1002 --vga virtio'
+}
+
+usage() {
+  cat <<'EOF'
+Uso: omarchy-gtx-primary <prepare-headless|verify-headless|status-runtime|rollback-guest>
+
+  prepare-headless  prepara Hyprland sulla GTX senza display fisico usando
+                    AQ_NO_KMS_REQUIREMENT e omarchy-gtx 1920x1080@60.
+                    Installa un pre-start idempotente: Sunshine avvia la sua
+                    cattura solo dopo che l'uscita virtuale esiste.
+                    Non modifica kernel, Limine, VBIOS, SSDT o Proxmox.
+  verify-headless   controlla i file predisposti prima del riavvio della sessione.
+  status-runtime    mostra uscita virtuale, servizio Sunshine e processi NVIDIA.
+  rollback-guest    ripristina i tre file utente; rimuove (o ripristina) helper
+                    e drop-in Sunshine creati dallo script.
+
+Flusso sicuro:
+  1. prepare-headless; riavvia SDDM lasciando per ora vga: virtio.
+  2. status-runtime; verifica renderer NVIDIA, omarchy-gtx e Sunshine/NVENC
+     da SSH/Moonlight. In Moonlight scegli 1080p/60 e una qualita' adeguata.
+  3. Solo se il test e' valido: qm set 1002 --vga none e reboot pulito.
+
+Lo script e' idempotente: non duplica righe o backup e usa un blocco monitor gestito.
+EOF
+}
+
+case "${1:-}" in
+  prepare-headless) prepare_headless ;;
+  verify-headless) verify_headless ;;
+  status-runtime) status_runtime ;;
+  rollback-guest) rollback_guest ;;
+  -h|--help|'') usage ;;
+  *) die "azione sconosciuta: $1" ;;
+esac
