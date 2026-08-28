@@ -134,22 +134,29 @@ o un difetto della GPU. Il canary e' reversibile con
 
 In Moonlight scegliere HEVC/preferire HEVC, **1920x1200**, 60 FPS e un bitrate
 LAN iniziale di 30--50 Mbit/s. Il profilo Windows verificato il 2026-08-28 era
-inizialmente a **23 Mbps** (`bitrate = 23000` in kilobit/s); e' stato portato a
-**40 Mbps fissi** (`40000`, con `autoadjustbitrate = false`). Questo e' il
-bitrate *richiesto* nella successiva negoziazione, non un contatore esatto dei
-byte sul cavo: rate control e overhead possono far variare il traffico reale.
+inizialmente a **23 Mbps** (`bitrate = 23000` in kilobit/s). Il primo intervento
+lo aveva fissato a 40 Mbps per verificare una soglia minima, ma questo non e'
+il default corretto per tutti i formati: era una scelta diagnostica, non una
+regola da mantenere. Lo script ora usa la modalita' `MoonlightDefault`, replica
+la formula ufficiale del client e riabilita `autoadjustbitrate`: al profilo
+corrente 1920x1200/60 con YUV 4:4:4 calcola **46 Mbps** (`46000`). Questo flag **non** adatta il bitrate al jitter
+della rete frame per frame: Moonlight lo usa per ricalcolare il suo valore
+predefinito quando l'utente modifica risoluzione o FPS. Per bloccare una scelta
+manuale resta disponibile `Fixed`. In entrambi i casi e' un bitrate *richiesto*
+nella successiva negoziazione, non un contatore esatto dei byte sul cavo.
 Chiudere e riaprire Moonlight dopo la modifica, perche' il processo gia'
 avviato conserva le preferenze in memoria. Il valore e' riproducibile con
 [`clients/moonlight-windows-settings.ps1`](../clients/moonlight-windows-settings.ps1):
 
 ```powershell
 .\moonlight-windows-settings.ps1 -Show
-.\moonlight-windows-settings.ps1 -BitrateMbps 40
+.\moonlight-windows-settings.ps1                         # default Moonlight per formato attuale
+.\moonlight-windows-settings.ps1 -Mode Fixed -BitrateMbps 40
 ```
 
 Moonlight salva il bitrate in kbps e lo mostra come Mbps nell'interfaccia; il
-suo sorgente conferma questa conversione e il fatto che l'auto-adjust puo'
-modificare il target. [Moonlight streaming preferences](https://github.com/moonlight-stream/moonlight-qt/blob/master/app/settings/streamingpreferences.cpp),
+suo sorgente conferma conversione, formula e semantica del flag. [Moonlight
+streaming preferences](https://github.com/moonlight-stream/moonlight-qt/blob/master/app/settings/streamingpreferences.cpp),
 [interfaccia bitrate](https://github.com/moonlight-stream/moonlight-qt/blob/master/app/gui/SettingsView.qml).
 Non forzare HEVC se un client specifico non lo decodifica bene: H.264 e' il
 fallback deliberato. Sunshine raccomanda il rilevamento automatico per HEVC/AV1
@@ -228,6 +235,17 @@ Hyprland documenta `hl.monitor` come sintassi Lua corrente. [Sunshine app
 examples](https://github.com/LizardByte/Sunshine/blob/master/docs/app_examples.md),
 [Hyprland monitors](https://wiki.hypr.land/Configuring/Basics/Monitors/).
 
+Non e' un interruttore universale nativo di Sunshine perche' Sunshine non puo'
+sapere quale compositor Linux sia in uso, quale uscita debba cambiare, ne'
+quali modalita' siano sicure. L'upstream passa percio' W/H/FPS a un **prep
+command** e mostra esempi diversi per X11, wlroots, GNOME, KDE e NVIDIA. Nel
+nostro caso l'uscita e' una GPU virtuale headless creata da Hyprland 0.56, non
+un HDMI fisico. L'esempio `wlr-xrandr` e' generico e non e' stato assunto
+compatibile con questa uscita e questa versione; il test `hyprctl keyword` ha
+fallito, mentre la sintassi runtime Lua `hyprctl eval hl.monitor(...)` ha
+funzionato. L'helper e' quindi l'integrazione minima e specifica necessaria,
+non una sostituzione di una funzione nativa mancante.
+
 Questo non crea due desktop indipendenti: un unico output `omarchy-gtx` ha una
 sola modalita' attiva. Con due client simultanei, la prima sessione Desktop
 mantiene l'output; un secondo client deve usare la stessa risoluzione oppure
@@ -279,19 +297,36 @@ non clipboard host-verso-client. [Moonlight setup guide](https://github.com/moon
 
 Per un clipboard bidirezionale reale serve un secondo canale. Il setup scelto
 e' **KDE Connect**: `kdeconnect` 26.08.0 e' installato su Omarchy e
-`kdeconnectd` ascolta TCP/UDP 1716; l'installer Windows richiede elevazione e
-deve essere completato/accettato localmente. Poi avvia KDE Connect su Windows,
-seleziona `omarchy`, invia la richiesta di pairing e accettala anche nel guest.
-Abilita il plugin **Clipboard** su entrambi: da quel momento il testo copiato
-in Windows arriva in Omarchy e viceversa, indipendentemente da Moonlight.
+`kdeconnectd` ascolta TCP/UDP 1716. Il 2026-08-28 sono state installate le
+regole UFW del guest e Windows (TCP+UDP 1714--1764), ristrette alla LAN
+`192.168.0.0/24`; sono ora visibili e paired `omarchy` e `DESKTOP-KQRALU3`.
+Esistono le directory del plugin `kdeconnect_clipboard` su entrambi i lati.
+Non leggiamo ne' sovrascriviamo gli appunti dell'utente per il test: la prova
+finale e' copiare una breve frase non sensibile in Windows, incollarla in
+Omarchy e ripetere nell'altra direzione.
 
-Il pairing e' deliberatamente manuale: equivale a fidare un dispositivo con
-accesso agli appunti e richiede la conferma di entrambi i lati. KDE Connect usa
-le porte TCP e UDP 1714--1764 per discovery e comunicazione; se Windows non
-vede Omarchy, consentire l'app sulla rete privata nel firewall. Per file grandi
-usare comunque cartella condivisa/SFTP: la clipboard e' per testo, non per
-trasferimenti. [Download KDE Connect](https://kdeconnect.kde.org/download.html),
+Il pairing resta deliberatamente manuale: ogni nuovo PC genera una propria
+chiave e fidarlo equivale a concedergli accesso agli appunti. Il riuso e'
+automatizzato da [`clients/kde-connect-windows-setup.ps1`](../clients/kde-connect-windows-setup.ps1): dopo l'installazione di KDE Connect eseguire
+`-ConfigureFirewall`, approvare UAC, usare `-Show`, poi inviare `-PairDeviceId`
+e accettare nel guest. Non copia identita' o chiavi da un PC a un altro. Il
+daemon guest e' headless e non richiede un secondo desktop; per sincronizzare
+gli appunti deve pero' esistere la sessione Wayland/Hyprland che possiede la
+clipboard. Per file grandi usare cartella condivisa/SFTP: la clipboard e' per
+testo, non per trasferimenti. [Download KDE Connect](https://kdeconnect.kde.org/download.html),
 [clipboard e porte](https://userbase.kde.org/KDEConnect/en).
+
+### Futuro: condividere la GTX con piu' VM
+
+Il passthrough attuale assegna la GTX intera a **una sola VM**: VFIO non puo'
+condividerla con altre VM contemporaneamente. La GTX 1050 Mobile non compare
+nella matrice ufficiale NVIDIA vGPU; `vGPU Unlock` sarebbe un esperimento
+non supportato che modifica/aggira controlli del driver, e su una Pascal mobile
+legacy puo' essere fragile dopo ogni aggiornamento di kernel, driver o host.
+Non e' stato installato ne' considerato parte del percorso riproducibile. Se
+lo si affrontera' in futuro, sara' un laboratorio separato con snapshot,
+rollback, licenze verificate e senza compromettere questa configurazione
+VFIO funzionante. [Matrice NVIDIA vGPU](https://docs.nvidia.com/vgpu/latest/product-support-matrix/index.html).
 
 ### TV: Moonlight, non DLNA
 

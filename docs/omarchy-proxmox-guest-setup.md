@@ -168,11 +168,14 @@ shell non interattive e' previsto.
 ### Bitrate, NVENC e clipboard nel client Windows
 
 Il bitrate e' deciso dal **client Moonlight**, non da `sunshine.conf`. Nel
-profilo Windows di questo laboratorio il valore iniziale era 23 Mbps e il
-target e' stato impostato a 40 Mbps fissi per 1920x1200/60 HEVC. Il file
-[`clients/moonlight-windows-settings.ps1`](../clients/moonlight-windows-settings.ps1)
-mostra o imposta il valore in modo riproducibile; Moonlight va chiuso e
-riaperto prima di riconnettersi.
+profilo Windows di questo laboratorio il valore iniziale era 23 Mbps. Il
+precedente 40 Mbps fisso era diagnostico: il tool ora applica la formula
+predefinita Moonlight e riabilita `autoadjustbitrate`, che con
+1920x1200/60/YUV 4:4:4 produce 46 Mbps. Il flag ricalcola il default al cambio
+di risoluzione/FPS, non e' un controllo del jitter di rete in tempo reale.
+Il file [`clients/moonlight-windows-settings.ps1`](../clients/moonlight-windows-settings.ps1)
+mostra o imposta `MoonlightDefault` o `Fixed` in modo riproducibile; Moonlight
+va chiuso e riaperto prima di riconnettersi.
 
 `enc > 0` in `nvidia-smi pmon` o NVTOP prova che Sunshine sta usando NVENC:
 e' la percentuale di occupazione del motore encoder nel suo intervallo di
@@ -180,10 +183,12 @@ misura, non Mbps e non l'utilizzo totale della GTX. In questo setup sono stati
 osservati `enc=28`, `enc=30` e `NVTOP enc=38%`, valori compatibili tra loro.
 
 Moonlight non possiede clipboard bidirezionale; KDE Connect e' il canale
-separato scelto. Il lato Omarchy e' installato e in ascolto sulla porta 1716.
-Completare l'installazione elevata di KDE Connect su Windows, fare pairing
-reciproco e abilitare il plugin Clipboard. La guida con le considerazioni di
-fiducia, firewall e privacy e' in
+separato scelto. Il lato Omarchy e' installato, le regole UFW TCP/UDP
+1714--1764 sono ristrette alla LAN e Windows/Omarchy sono paired. Lo script
+idempotente [`clients/kde-connect-windows-setup.ps1`](../clients/kde-connect-windows-setup.ps1)
+prepara gli altri PC Windows: installare KDE Connect, eseguire
+`-ConfigureFirewall`, approvare UAC, poi richiedere e accettare pairing per
+ogni PC. La guida con fiducia, test clipboard, firewall e limite vGPU e' in
 [Sunshine/Moonlight su Omarchy](sunshine-moonlight-omarchy.md).
 
 ## 4. Applicazione, verifica e rollback

@@ -102,7 +102,10 @@ client per quella sessione. Nel setup Omarchy, un prep command invoca
 Hyprland per applicarli al solo output headless `omarchy-gtx` prima della
 cattura. Alla disconnessione il comando undo torna al fallback. E' dinamico
 per le nuove aperture Desktop, ma non puo' assegnare risoluzioni diverse a due
-client contemporanei che guardano la stessa uscita virtuale.
+client contemporanei che guardano la stessa uscita virtuale. Sunshine fornisce
+solo le variabili e il punto di aggancio: non puo' integrare nativamente un
+unico cambio monitor per tutti i compositor Linux. Qui serve l'helper perche'
+`omarchy-gtx` e' un output headless Hyprland, non un connettore fisico.
 
 ### Clipboard GameStream
 
@@ -110,8 +113,10 @@ Moonlight puo' inviare testo dal client al guest con la scorciatoia
 `Ctrl`+`Alt`+`Shift`+`V`: viene immesso come tastiera nel guest. GameStream non
 prevede invece la sincronizzazione del clipboard guest -> client; Sunshine non
 ha un'opzione che lo renda bidirezionale. Per una clipboard reale serve un
-canale indipendente, per esempio KDE Connect dopo pairing manuale dei due
-device.
+canale indipendente, qui KDE Connect. Il daemon e' headless ma per copiare da e
+verso la GUI occorre una sessione Wayland che possieda la clipboard. Il pairing
+di ciascun PC resta manuale: automatizzare chiavi e consenso eliminerebbe la
+barriera di fiducia.
 
 ### NVENC `enc`
 
@@ -124,10 +129,21 @@ Mbps e non e' l'utilizzo generale della GPU: per quello vanno letti anche
 ### Bitrate richiesto
 
 Il **bitrate richiesto** e' il tetto che Moonlight invia all'host nella
-negoziazione, espresso internamente in kbps (40000 = 40 Mbps). Non equivale
-sempre al traffico esatto osservato sulla LAN: encoder e protocollo hanno rate
-control e overhead. In questo progetto il target e' 40 Mbps fissi; si applica
-alla nuova connessione dopo il riavvio del client Moonlight.
+negoziazione, espresso internamente in kbps. Non equivale sempre al traffico
+esatto osservato sulla LAN: encoder e protocollo hanno rate control e overhead.
+Il primo valore osservato era 23000 (23 Mbps). La modalita' `MoonlightDefault`
+del tool calcola 46000 (46 Mbps) per 1920x1200/60 con YUV 4:4:4; `Fixed 40`
+resta disponibile. `autoadjustbitrate` ricalcola il default quando cambiano
+risoluzione/FPS, non misura ne' corregge il jitter ad ogni frame.
+
+### vGPU / vGPU Unlock
+
+**vGPU** divide una GPU fisica fra VM con un driver host e profili virtuali; e'
+diverso dal passthrough VFIO, che consegna l'intera GPU a una VM. La GTX 1050
+Mobile non e' un prodotto ufficialmente supportato da NVIDIA vGPU. `vGPU
+Unlock` e' un workaround non supportato, non installato in questo progetto e
+non adatto a essere sovrapposto alla configurazione VFIO stabile: richiede un
+laboratorio separato, rollback e verifica di compatibilita'/licenza.
 
 ### DLNA e Moonlight
 
