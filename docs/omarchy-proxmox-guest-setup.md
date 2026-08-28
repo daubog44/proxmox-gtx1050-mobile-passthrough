@@ -173,6 +173,9 @@ precedente 40 Mbps fisso era diagnostico: il tool ora applica la formula
 predefinita Moonlight e riabilita `autoadjustbitrate`, che con
 1920x1200/60/YUV 4:4:4 produce 46 Mbps. Il flag ricalcola il default al cambio
 di risoluzione/FPS, non e' un controllo del jitter di rete in tempo reale.
+Una misura successiva Omarchy→Windows di 80,6 Mbps (256 MiB in 26,63 s, con
+trasporto SSH conservativo) ha portato alla scelta corrente `Fixed 40 Mbps`,
+per mantenere margine reale sulla LAN.
 Il file [`clients/moonlight-windows-settings.ps1`](../clients/moonlight-windows-settings.ps1)
 mostra o imposta `MoonlightDefault` o `Fixed` in modo riproducibile; Moonlight
 va chiuso e riaperto prima di riconnettersi. Lo script rifiuta ora di cambiare

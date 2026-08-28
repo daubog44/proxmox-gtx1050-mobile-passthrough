@@ -171,6 +171,18 @@ sotto la **banda sostenibile** del collegamento reale, non sotto il solo valore
 nominale. Su Wi-Fi o Ethernet a 100 Mbps con congestione, provare 35--40 Mbps
 fissi o disabilitare 4:4:4 se l'overlay Moonlight mostra perdita o latenza.
 
+### Misura LAN e profilo selezionato il 2026-08-28
+
+Per non confondere la velocita' Internet con quella che serve allo streaming,
+e' stata misurata la direzione importante **Omarchy → Windows** inviando 256
+MiB dal guest e scartandoli sul client: 26,63 s, cioe' **80,6 Mbps**. Il test
+passa nel trasporto SSH, quindi e' intenzionalmente conservativo e non e' un
+benchmark puro di NIC; e' comunque molto piu' pertinente di uno speedtest
+verso Internet. Con questo dato il profilo Windows e' stato impostato a
+`Fixed 40 Mbps`: circa meta' della banda misurata, con margine per overhead,
+Wi-Fi e traffico concorrente. Il default calcolato resta 46 Mbps, ma non e'
+attivo finche' il profilo e' `Fixed`.
+
 Moonlight salva il bitrate in kbps e lo mostra come Mbps nell'interfaccia; il
 suo sorgente conferma conversione, formula e semantica del flag. [Moonlight
 streaming preferences](https://github.com/moonlight-stream/moonlight-qt/blob/master/app/settings/streamingpreferences.cpp),

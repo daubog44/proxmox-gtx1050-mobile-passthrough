@@ -133,7 +133,8 @@ negoziazione, espresso internamente in kbps. Non equivale sempre al traffico
 esatto osservato sulla LAN: encoder e protocollo hanno rate control e overhead.
 Il primo valore osservato era 23000 (23 Mbps). La modalita' `MoonlightDefault`
 del tool calcola 46000 (46 Mbps) per 1920x1200/60 con YUV 4:4:4; `Fixed 40`
-resta disponibile. `autoadjustbitrate` ricalcola il default quando cambiano
+e' il profilo attualmente scelto dopo una misura LAN di 80,6 Mbps nel percorso
+Omarchy→Windows. `autoadjustbitrate` ricalcola il default quando cambiano
 risoluzione/FPS, non misura ne' corregge il jitter ad ogni frame.
 
 `RequestedMbps` e' il valore davvero salvato; `MoonlightDefaultMbps` e' il
