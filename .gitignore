@@ -6,3 +6,5 @@ tmp/
 *.asl
 __pycache__/
 *.py[cod]
+# Render intermedi di verifica PDF: il PDF finale resta versionato.
+output/pdf-render*/

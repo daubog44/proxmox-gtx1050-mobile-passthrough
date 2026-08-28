@@ -14,10 +14,10 @@ recupero: non e' il renderer di Hyprland.
 ```text
 GTX /dev/dri/gtx1050
   -> Hyprland (render/compositing)
-  -> output Wayland headless omarchy-gtx, 1920x1200@60, scale 1
-  -> Sunshine wlr/GBM
-  -> FFmpeg h264_nvenc oppure hevc_nvenc
-  -> NVENC GTX
+  -> output Wayland headless omarchy-gtx
+  -> Sunshine riceve larghezza/altezza/FPS da Moonlight
+  -> helper Lua `hl.monitor(...)` imposta l'output per quello stream
+  -> Sunshine wlr/GBM -> FFmpeg h264_nvenc oppure hevc_nvenc -> NVENC GTX
   -> Moonlight
 ```
 
@@ -152,36 +152,116 @@ Provare P2, poi P1, ha senso solo se una nuova misura mostra latenza host
 stabilmente alta o frame persi **dopo** avere corretto risoluzione e rete. Non
 risolve bande nere, schermata corrotta, client in finestra o latenza di rete.
 
-### Risoluzione: evitare bande nere da formati diversi
+### Risoluzione dinamica: Moonlight sceglie il formato del nuovo stream
 
 La schermata iniziale aveva Moonlight impostato a 1920x1200 mentre la regola
 Hyprland e i log `GBM request` erano ancora 1920x1080. Era un mismatch fra la
 dimensione richiesta al client e la superficie realmente catturata: Sunshine
 poteva scalare/letterboxare il desktop e lasciare aree nere. La modalita'
-gestita e' ora **1920x1200@60**, uguale al desktop Windows 16:10 usato nel
-testo. Dopo il cambio lo stream viene chiuso deliberatamente: riaprire
-`Desktop` da Moonlight affinche' client, output Wayland e GBM negozino la stessa
-modalita'.
+di fallback e' **1920x1200@60**, uguale al desktop Windows 16:10 usato nel
+testo; non e' piu' obbligatorio configurarla manualmente per ogni client.
+
+La build Sunshine attiva espone `SUNSHINE_CLIENT_WIDTH`,
+`SUNSHINE_CLIENT_HEIGHT` e `SUNSHINE_CLIENT_FPS` al comando di preparazione
+dell'app `Desktop`. Lo script installa in modo idempotente un solo hook in
+`~/.config/sunshine/apps.json`:
+
+```json
+{
+  "do": "/home/daubog44/.local/bin/omarchy-moonlight-mode apply",
+  "undo": "/home/daubog44/.local/bin/omarchy-moonlight-mode restore"
+}
+```
+
+Prima della cattura, `apply` valida i tre valori e chiama la API Lua richiesta
+da Hyprland 0.55+:
+
+```bash
+hyprctl eval 'hl.monitor({ output = "omarchy-gtx", mode = "<W>x<H>@<FPS>", position = "0x0", scale = 1 })'
+```
+
+Il test runtime ha applicato 1920x1080@60 e ripristinato 1920x1200@60 senza
+riavviare Hyprland. Alla chiusura di Desktop, `restore` riporta il display
+headless alla modalita' fallback salvata. Quindi un notebook 16:10, un monitor
+FHD e una TV 16:9 possono aprire **uno alla volta** Desktop con il proprio
+formato richiesto. Sunshine documenta queste variabili per i prep command e
+Hyprland documenta `hl.monitor` come sintassi Lua corrente. [Sunshine app
+examples](https://github.com/LizardByte/Sunshine/blob/master/docs/app_examples.md),
+[Hyprland monitors](https://wiki.hypr.land/Configuring/Basics/Monitors/).
+
+Questo non crea due desktop indipendenti: un unico output `omarchy-gtx` ha una
+sola modalita' attiva. Con due client simultanei, la prima sessione Desktop
+mantiene l'output; un secondo client deve usare la stessa risoluzione oppure
+chiudere il primo e riaprire Desktop. Non facciamo cambiare la modalita' sotto
+un client gia' connesso, perche' causerebbe un salto visibile e una possibile
+rinegoziazione del decoder.
 
 Nel terminale Omarchy, dopo un nuovo login Bash o con il binario gia'
 disponibile, usare:
 
 ```bash
-# Funzione installata nei dotfiles (~/.bashrc); equivale al comando con trattini.
+# Funzione installata nei dotfiles (~/.bashrc). Imposta il fallback idle,
+# non disabilita la scelta dinamica della prossima apertura Desktop.
 omarchy_stream_resolution 1920x1200@60
 
-# Altri esempi validi:
+# Per una TV FHD 16:9, fallback esplicito quando nessuno stream e' connesso:
 omarchy_stream_resolution 1920x1080@60
 omarchy-stream-resolution status
+
+# Non eseguire `bash ~/.bashrc`: .bashrc e' un file da caricare, non uno script.
+# Per rendere disponibili le funzioni nella shell corrente:
+source ~/.bashrc
 ```
 
 Il comando valida i limiti, riscrive soltanto il blocco delimitato in
 `~/.config/hypr/monitors.lua`, ricarica Hyprland e riavvia Sunshine. E'
 idempotente: rieseguirlo con la stessa modalita' non aggiunge regole duplicate.
-Se il client Windows ha un monitor con rapporto diverso da 16:10, Moonlight
-puo' ancora mantenere il rapporto con bande nere: in quel caso scegliere la
-stessa risoluzione del monitor Windows oppure la sua modalita' di riempimento,
-sapendo che questa puo' deformare o ritagliare l'immagine.
+L'errore `return: can only return from a function or sourced script` nello
+screen e' dovuto a `bash ./.bashrc`: una `.bashrc` contiene intenzionalmente
+`return` per interrompere le shell non interattive. Il file non era corrotto;
+va usato `source ~/.bashrc` oppure si apre un nuovo terminale.
+
+Se dopo la scelta dinamica restano bande, aprire **Desktop** una volta dopo
+avere impostato risoluzione/FPS nel client Moonlight, poi controllare che
+`GBM request`, `hyprctl monitors all` e l'overlay Moonlight riportino gli
+stessi W×H e FPS. La modalita' "fill/stretch" del client puo' riempire il
+pannello Windows, ma ritaglia o deforma: non e' una correzione lato server.
+
+### Clipboard: il limite e' del protocollo Moonlight, non della GTX
+
+Moonlight/Sunshine usa il protocollo GameStream. Esso non definisce una
+clipboard bidirezionale: dalla tastiera Windows si puo' inviare testo al guest
+con `Ctrl`+`Alt`+`Shift`+`V` (Moonlight lo *digita* nel guest), ma non copia il
+clipboard del guest dentro Windows e non sincronizza file. Non c'e' una
+opzione Sunshine che possa trasformarlo in sync bidirezionale. Il comportamento
+e' confermato dal progetto Moonlight: supporta input text dal client verso host,
+non clipboard host-verso-client. [Moonlight setup guide](https://github.com/moonlight-stream/moonlight-docs/wiki/Setup-Guide),
+[limite GameStream discusso dal progetto](https://github.com/moonlight-stream/moonlight-qt/issues/554).
+
+Per un clipboard bidirezionale reale servono un secondo canale e l'accettazione
+su entrambi i dispositivi: ad esempio KDE Connect (app Windows + pacchetto
+guest + pairing manuale) oppure un servizio di note/file condiviso. Non viene
+installato automaticamente: aggiunge un device fidato e un servizio di rete,
+quindi richiede una scelta esplicita dell'utente. Per file grandi usare una
+cartella condivisa/SFTP: non abusare della clipboard.
+
+### TV: Moonlight, non DLNA
+
+DLNA serve a inviare media registrati a un televisore; non trasporta input,
+desktop interattivo, bassa latenza o la negoziazione NVENC/GameStream. Per
+questa architettura la strada corretta e' un client **Moonlight** sulla TV
+(Android/Google TV, Fire TV o Apple TV, se disponibile sul dispositivo),
+aggiunto come un nuovo client Sunshine e associato con PIN. HEVC 1080p60 e' il
+profilo iniziale sicuro per una GTX 1050; 4K deve essere provato a parte per
+qualita', latenza e decoder della TV.
+
+La TV vedra' lo **stesso** desktop headless: e' un secondo punto di vista
+(mirror), non un secondo monitor indipendente. Per avere due desktop separati
+servirebbero una seconda uscita headless e una seconda istanza/cattura Sunshine
+con porte, app e risorse NVENC separate; non e' configurato qui, non e' stato
+validato sull'hardware Pascal e potrebbe peggiorare la latenza. Prima prova
+raccomandata: collegare la TV con Moonlight e lasciare che il nuovo Desktop
+negozi 1920x1080@60, con il PC Windows scollegato.
 
 ## Verifica riproducibile dopo una modifica
 

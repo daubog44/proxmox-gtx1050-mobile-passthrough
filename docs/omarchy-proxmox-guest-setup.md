@@ -153,12 +153,17 @@ omarchy_stream_resolution 1920x1200@60
 omarchy_stream_health watch
 ```
 
-La funzione riscrive soltanto il blocco delimitato in `monitors.lua`, ricarica
-Hyprland e non forza un connettore HDMI. Eseguire di nuovo lo stesso comando
-non duplica regole; per usare il comando con trattini senza riaprire la shell:
-`omarchy-stream-resolution 1920x1200@60`. Anche un successivo
-`prepare-headless` conserva una modalita' valida gia' scelta: 1920x1200@60 e'
-il default solo della prima installazione.
+Il comando statico definisce il fallback dopo una disconnessione. Alla prossima
+apertura di Desktop, `omarchy-moonlight-mode apply` legge le variabili
+`SUNSHINE_CLIENT_WIDTH`, `HEIGHT` e `FPS`, poi applica la modalita' richiesta
+all'output `omarchy-gtx` tramite l'API Lua di Hyprland. Non riavvia Sunshine e
+non tocca VirtIO; una sola uscita significa una sola modalita' condivisa, non
+due schermi indipendenti per client simultanei. Eseguire di nuovo
+`prepare-headless` non duplica ne' l'hook Desktop ne' regole; per usare il
+comando con trattini senza riaprire la shell:
+`omarchy-stream-resolution 1920x1200@60`. La `.bashrc` va caricata con
+`source ~/.bashrc`, non eseguita con `bash ~/.bashrc`: il suo `return` per le
+shell non interattive e' previsto.
 
 ## 4. Applicazione, verifica e rollback
 

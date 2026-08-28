@@ -92,6 +92,35 @@ Questo glossario separa termini che spesso vengono confusi. I riferimenti nel te
 
 ## Streaming Wayland, Sunshine e Moonlight su Omarchy
 
+### Risoluzione dinamica di Moonlight
+
+Quando il client apre l'app **Desktop**, Sunshine riceve i valori
+`SUNSHINE_CLIENT_WIDTH`, `SUNSHINE_CLIENT_HEIGHT` e `SUNSHINE_CLIENT_FPS`.
+Non sono ipotesi ricavate dal monitor del server: sono i parametri chiesti dal
+client per quella sessione. Nel setup Omarchy, un prep command invoca
+`omarchy-moonlight-mode apply`; questo chiama l'API Lua `hl.monitor(...)` di
+Hyprland per applicarli al solo output headless `omarchy-gtx` prima della
+cattura. Alla disconnessione il comando undo torna al fallback. E' dinamico
+per le nuove aperture Desktop, ma non puo' assegnare risoluzioni diverse a due
+client contemporanei che guardano la stessa uscita virtuale.
+
+### Clipboard GameStream
+
+Moonlight puo' inviare testo dal client al guest con la scorciatoia
+`Ctrl`+`Alt`+`Shift`+`V`: viene immesso come tastiera nel guest. GameStream non
+prevede invece la sincronizzazione del clipboard guest -> client; Sunshine non
+ha un'opzione che lo renda bidirezionale. Per una clipboard reale serve un
+canale indipendente, per esempio KDE Connect dopo pairing manuale dei due
+device.
+
+### DLNA e Moonlight
+
+**DLNA** e' un protocollo per riprodurre file multimediali su una TV. Non e'
+un desktop remoto: non trasporta input, non negozia la risoluzione interattiva
+e non usa il percorso Sunshine/NVENC/Moonlight a bassa latenza. Una TV che
+esegue Moonlight e' invece un client Sunshine; visualizza lo stesso desktop
+headless (mirror), non un secondo monitor indipendente.
+
 | Termine | Significato pratico nel setup Omarchy |
 | --- | --- |
 | **Hyprland** | Compositor Wayland: compone finestre e desktop in un'immagine finale. Non e' un server RDP e non codifica video; nel setup renderizza sulla GTX grazie a `AQ_DRM_DEVICES`. |

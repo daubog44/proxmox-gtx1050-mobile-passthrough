@@ -7,8 +7,10 @@ readonly USER_NAME='daubog44'
 readonly USER_HOME="/home/$USER_NAME"
 readonly ENV_FILE="$USER_HOME/.config/uwsm/env-hyprland"
 readonly SUNSHINE_FILE="$USER_HOME/.config/sunshine/sunshine.conf"
+readonly APPS_FILE="$USER_HOME/.config/sunshine/apps.json"
 readonly MONITORS_FILE="$USER_HOME/.config/hypr/monitors.lua"
 readonly HEADLESS_HELPER="$USER_HOME/.local/bin/omarchy-headless-output"
+readonly DYNAMIC_MODE_HELPER="$USER_HOME/.local/bin/omarchy-moonlight-mode"
 readonly SUNSHINE_DROPIN="$USER_HOME/.config/systemd/user/app-dev.lizardbyte.app.Sunshine.service.d/25-headless-output.conf"
 readonly RESOLUTION_COMMAND="$USER_HOME/.local/bin/omarchy-stream-resolution"
 readonly HEALTH_COMMAND="$USER_HOME/.local/bin/omarchy-stream-health"
@@ -39,7 +41,7 @@ backup_if_unmanaged() {
   case "$file" in
     "$HEADLESS_HELPER") grep -Fq 'Managed by omarchy-gtx-primary' "$file" && return 0 ;;
     "$SUNSHINE_DROPIN") grep -Fxq "ExecStartPre=$HEADLESS_HELPER" "$file" && return 0 ;;
-    "$RESOLUTION_COMMAND"|"$HEALTH_COMMAND") grep -Fq 'Managed by omarchy-gtx-primary' "$file" && return 0 ;;
+    "$RESOLUTION_COMMAND"|"$HEALTH_COMMAND"|"$DYNAMIC_MODE_HELPER") grep -Fq 'Managed by omarchy-gtx-primary' "$file" && return 0 ;;
   esac
   backup_once "$file"
 }
@@ -110,8 +112,9 @@ Esempi:
   omarchy-stream-resolution 1920x1080@60
   omarchy-stream-resolution status
 
-Il cambio aggiorna l'output headless omarchy-gtx e riavvia Sunshine; uno
-stream Moonlight attivo termina e va riaperto per negoziare la nuova modalita.
+Il cambio imposta il fallback dell'output headless omarchy-gtx e riavvia
+Sunshine; uno stream attivo termina. Alla prossima apertura Desktop, Moonlight
+puo' sostituire il fallback con la propria modalita dinamica richiesta.
 USAGE
 }
 
@@ -149,6 +152,10 @@ EOF
   chown "$USER_NAME:$USER_NAME" "$RESOLUTION_COMMAND" "$HEALTH_COMMAND"
 
   [[ -e "$BASHRC" ]] || install -o "$USER_NAME" -g "$USER_NAME" -m 0644 /dev/null "$BASHRC"
+  # Replaces an older, experimental VirtIO-oriented alias block.  It was
+  # neither used by the GTX headless output nor compatible with Hyprland >=
+  # 0.55, which moved monitor configuration to Lua.
+  sed -i '/# BEGIN sunshine-resolution aliases (managed locally)/,/^# END sunshine-resolution aliases/d' "$BASHRC"
   sed -i '/# BEGIN omarchy-gtx-primary commands/,/# END omarchy-gtx-primary commands/d' "$BASHRC"
   cat >>"$BASHRC" <<'EOF'
 
@@ -160,6 +167,105 @@ omarchy_stream_health() { command "$HOME/.local/bin/omarchy-stream-health" "$@";
 # END omarchy-gtx-primary commands
 EOF
   chown "$USER_NAME:$USER_NAME" "$BASHRC"
+}
+
+install_dynamic_resolution() {
+  backup_if_unmanaged "$DYNAMIC_MODE_HELPER"
+  backup_once "$APPS_FILE"
+  install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "$(dirname "$DYNAMIC_MODE_HELPER")"
+
+  cat >"$DYNAMIC_MODE_HELPER" <<'EOF'
+#!/usr/bin/env bash
+# Managed by omarchy-gtx-primary. Applies Moonlight's requested mode to the
+# GTX-only Hyprland output before Sunshine starts capturing it.
+set -Eeuo pipefail
+
+readonly OUTPUT='omarchy-gtx'
+readonly MONITORS_FILE="$HOME/.config/hypr/monitors.lua"
+
+die() { printf 'omarchy-moonlight-mode: %s\n' "$*" >&2; exit 1; }
+
+fallback_mode() {
+  local mode
+  mode="$(sed -n 's/.*output = "omarchy-gtx", mode = "\([0-9][0-9]*x[0-9][0-9]*@[0-9][0-9]*\)".*/\1/p' "$MONITORS_FILE" | tail -n 1)"
+  [[ "$mode" =~ ^[0-9]{3,5}x[0-9]{3,5}@[0-9]{2,3}$ ]] || mode='1920x1200@60'
+  printf '%s\n' "$mode"
+}
+
+client_mode() {
+  local width=${SUNSHINE_CLIENT_WIDTH:-} height=${SUNSHINE_CLIENT_HEIGHT:-} fps=${SUNSHINE_CLIENT_FPS:-}
+  [[ "$width" =~ ^[0-9]{3,5}$ && "$height" =~ ^[0-9]{3,5}$ && "$fps" =~ ^[0-9]{2,3}$ ]] || \
+    die 'Sunshine non ha passato una risoluzione client valida'
+  (( 10#$width >= 640 && 10#$width <= 3840 && 10#$height >= 480 && 10#$height <= 2160 && 10#$fps >= 24 && 10#$fps <= 120 )) || \
+    die "modalita Moonlight fuori dai limiti gestiti: ${width}x${height}@${fps}"
+  printf '%sx%s@%s\n' "$width" "$height" "$fps"
+}
+
+hyprland_env() {
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  local signature
+  signature="$(hyprctl instances 2>/dev/null | awk '/^instance / {gsub(/:$/, "", $2); print $2; exit}')"
+  [[ -n "$signature" ]] || die 'istanza Hyprland non disponibile'
+  export HYPRLAND_INSTANCE_SIGNATURE="$signature"
+}
+
+apply_mode() {
+  local mode=$1
+  # Hyprland 0.55+ uses the Lua API. `hyprctl keyword monitor` is a legacy
+  # parser and silently does not change an Omarchy 0.56 monitor.
+  hyprctl eval "hl.monitor({ output = \"$OUTPUT\", mode = \"$mode\", position = \"0x0\", scale = 1 })" >/dev/null
+  printf 'Moonlight dynamic resolution applied: %s\n' "$mode"
+}
+
+case "${1:-help}" in
+  apply) hyprland_env; apply_mode "$(client_mode)" ;;
+  restore) hyprland_env; apply_mode "$(fallback_mode)" ;;
+  status)
+    hyprland_env
+    printf 'Fallback dopo la disconnessione: %s\n' "$(fallback_mode)"
+    hyprctl monitors all | sed -n "/^Monitor $OUTPUT /,/^$/p"
+    ;;
+  help|-h|--help)
+    cat <<'USAGE'
+Uso: omarchy-moonlight-mode <apply|restore|status>
+
+`apply` e `restore` sono invocati automaticamente da Sunshine per Desktop.
+`apply` legge SUNSHINE_CLIENT_WIDTH/HEIGHT/FPS e imposta omarchy-gtx con
+l'API Lua di Hyprland; `restore` riporta la modalita di fallback configurata.
+USAGE
+    ;;
+  *) die "azione sconosciuta: $1" ;;
+esac
+EOF
+  chmod 0755 "$DYNAMIC_MODE_HELPER"
+  chown "$USER_NAME:$USER_NAME" "$DYNAMIC_MODE_HELPER"
+
+  # Keep every pre-existing Sunshine application and prep command. Add one
+  # precisely identifiable command to Desktop, replacing only a former copy
+  # created by this script. Sunshine injects SUNSHINE_CLIENT_WIDTH/HEIGHT/FPS
+  # into these commands for the client that opened Desktop.
+  python3 - "$APPS_FILE" "$DYNAMIC_MODE_HELPER" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+helper = sys.argv[2]
+data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+apps = data.setdefault("apps", [])
+desktop = next((app for app in apps if app.get("name") == "Desktop"), None)
+if desktop is None:
+    desktop = {"name": "Desktop", "image-path": "desktop.png", "prep-cmd": []}
+    apps.insert(0, desktop)
+commands = desktop.setdefault("prep-cmd", [])
+commands[:] = [
+    command for command in commands
+    if not (isinstance(command, dict) and command.get("do") == f"{helper} apply")
+]
+commands.append({"do": f"{helper} apply", "undo": f"{helper} restore"})
+path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+  chown "$USER_NAME:$USER_NAME" "$APPS_FILE"
 }
 
 prepare_headless() {
@@ -247,6 +353,7 @@ ExecStartPre=$HEADLESS_HELPER
 EOF
   chown "$USER_NAME:$USER_NAME" "$SUNSHINE_DROPIN"
   install_user_commands
+  install_dynamic_resolution
 
   # The earlier EDID experiment is not used by the headless design. It is safe
   # to remove only after the Limine drop-in has already been removed by rollback.
@@ -269,9 +376,11 @@ verify_headless() {
   mode="$(managed_stream_mode)"
   validate_stream_mode "$mode"
   [[ -x "$HEADLESS_HELPER" ]] || die 'helper di creazione output mancante'
+  [[ -x "$DYNAMIC_MODE_HELPER" ]] || die 'helper di risoluzione dinamica Moonlight mancante'
   grep -Fxq "ExecStartPre=$HEADLESS_HELPER" "$SUNSHINE_DROPIN" || die 'pre-start Sunshine mancante'
   [[ -x "$RESOLUTION_COMMAND" && -x "$HEALTH_COMMAND" ]] || die 'comandi utente stream mancanti'
   grep -Fq 'omarchy_stream_resolution()' "$BASHRC" || die 'funzione Bash di risoluzione mancante'
+  grep -Fq 'omarchy-moonlight-mode apply' "$APPS_FILE" || die 'hook dinamico Desktop/Sunshine mancante'
   note "configurazione headless GTX coerente ($mode); controllare a runtime renderer, omarchy-gtx e NVENC"
 }
 
@@ -279,7 +388,7 @@ status_runtime() {
   require_root
   local user_id
   user_id="$(id -u "$USER_NAME")"
-  note "stato runtime Omarchy/GTX: configurato $(managed_stream_mode) (enc aumenta solo durante uno stream)"
+  note "stato runtime Omarchy/GTX: fallback $(managed_stream_mode); Desktop Moonlight applica dinamicamente la modalita richiesta (enc aumenta solo durante uno stream)"
   runuser -u "$USER_NAME" -- env \
     XDG_RUNTIME_DIR="/run/user/$user_id" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$user_id/bus" \
@@ -314,8 +423,8 @@ set_resolution() {
   validate_stream_mode "$mode"
   backup_once "$MONITORS_FILE"
   write_monitor_block "$mode"
-  note "modalita salvata: omarchy-gtx $mode"
-  note 'applico la regola e riavvio Sunshine: lo stream Moonlight corrente verra chiuso'
+  note "modalita fallback salvata: omarchy-gtx $mode"
+  note 'applico la regola e riavvio Sunshine: lo stream Moonlight corrente verra chiuso; la prossima apertura Desktop usera poi la modalita richiesta dal client'
   apply_runtime_mode "$mode"
   user_session_env systemctl --user daemon-reload
   user_session_env systemctl --user restart "$SUNSHINE_SERVICE"
@@ -339,6 +448,7 @@ stream_health_once() {
   esac
   grep -Fxq 'encoder = nvenc' "$SUNSHINE_FILE" && echo 'Encoder richiesto: NVENC' || echo 'ATTENZIONE: encoder=nvenc non configurato'
   grep -Fxq 'nvenc_preset = 3' "$SUNSHINE_FILE" && echo 'Preset NVENC: P3 (qualita equilibrata)' || echo 'ATTENZIONE: preset NVENC P3 non configurato'
+  grep -Fq 'omarchy-moonlight-mode apply' "$APPS_FILE" && echo 'Risoluzione Moonlight: dinamica per ogni nuova apertura Desktop' || echo 'ATTENZIONE: hook risoluzione dinamica non configurato'
   if [[ -n "$last_gbm" ]]; then
     echo "Ultima cattura: $last_gbm"
     [[ "$last_gbm" == *"${mode%@*}"* ]] || echo 'ATTENZIONE: superficie GBM e modalita configurata non coincidono; riaprire Moonlight dopo il cambio'
@@ -382,11 +492,13 @@ rollback_guest() {
   [[ -e "$BACKUP_DIR$SUNSHINE_FILE" ]] && cp -a "$BACKUP_DIR$SUNSHINE_FILE" "$SUNSHINE_FILE"
   [[ -e "$BACKUP_DIR$MONITORS_FILE" ]] && cp -a "$BACKUP_DIR$MONITORS_FILE" "$MONITORS_FILE"
   [[ -e "$BACKUP_DIR$HEADLESS_HELPER" ]] && cp -a "$BACKUP_DIR$HEADLESS_HELPER" "$HEADLESS_HELPER" || rm -f "$HEADLESS_HELPER"
+  [[ -e "$BACKUP_DIR$DYNAMIC_MODE_HELPER" ]] && cp -a "$BACKUP_DIR$DYNAMIC_MODE_HELPER" "$DYNAMIC_MODE_HELPER" || rm -f "$DYNAMIC_MODE_HELPER"
   [[ -e "$BACKUP_DIR$SUNSHINE_DROPIN" ]] && cp -a "$BACKUP_DIR$SUNSHINE_DROPIN" "$SUNSHINE_DROPIN" || rm -f "$SUNSHINE_DROPIN"
   [[ -e "$BACKUP_DIR$RESOLUTION_COMMAND" ]] && cp -a "$BACKUP_DIR$RESOLUTION_COMMAND" "$RESOLUTION_COMMAND" || rm -f "$RESOLUTION_COMMAND"
   [[ -e "$BACKUP_DIR$HEALTH_COMMAND" ]] && cp -a "$BACKUP_DIR$HEALTH_COMMAND" "$HEALTH_COMMAND" || rm -f "$HEALTH_COMMAND"
+  [[ -e "$BACKUP_DIR$APPS_FILE" ]] && cp -a "$BACKUP_DIR$APPS_FILE" "$APPS_FILE"
   [[ -e "$BASHRC" ]] && sed -i '/# BEGIN omarchy-gtx-primary commands/,/# END omarchy-gtx-primary commands/d' "$BASHRC"
-  note 'file guest ripristinati; systemctl --user daemon-reload; sul nodo lasciare o riportare: qm set 1002 --vga virtio'
+  note 'file guest, hook Desktop e comandi ripristinati; systemctl --user daemon-reload; sul nodo lasciare o riportare: qm set 1002 --vga virtio'
 }
 
 usage() {
@@ -399,14 +511,17 @@ Uso: omarchy-gtx-primary <prepare-headless|verify-headless|status-runtime|set-re
                     Installa un pre-start idempotente: Sunshine avvia la sua
                     cattura solo dopo che l'uscita virtuale esiste.
                     Configura wlr + NVENC sulla GTX, HEVC in rilevamento
-                    automatico e AV1 non pubblicizzato (Pascal non lo codifica),
-                    piu i comandi Bash omarchy_stream_resolution e
-                    omarchy_stream_health.
+                    automatico e AV1 non pubblicizzato (Pascal non lo codifica).
+                    Per ogni nuova apertura Desktop, Sunshine passa le dimensioni
+                    richieste da Moonlight al helper Lua di Hyprland: omarchy-gtx
+                    cambia modalita senza riavviare Sunshine. Installa anche i
+                    comandi Bash omarchy_stream_resolution e omarchy_stream_health.
                     Non modifica kernel, Limine, VBIOS, SSDT o Proxmox.
   verify-headless   controlla i file predisposti prima del riavvio della sessione.
   status-runtime    mostra uscita virtuale, servizio Sunshine e processi NVIDIA.
-  set-resolution M  salva e applica M (es. 1920x1200@60), poi riavvia Sunshine.
-                    Chiude lo stream Moonlight attivo per negoziare M correttamente.
+  set-resolution M  salva e applica M (es. 1920x1200@60) come fallback dopo
+                    disconnessione, poi riavvia Sunshine. Una nuova apertura
+                    Desktop la sostituisce con la modalita richiesta da Moonlight.
   stream-health     mostra build, risoluzione GBM, NVENC runtime e fallback;
                     con --watch aggiorna una volta al secondo durante lo stream.
   rollback-guest    ripristina i tre file utente; rimuove (o ripristina) helper
@@ -416,8 +531,9 @@ Flusso sicuro:
   1. prepare-headless; riavvia SDDM lasciando per ora vga: virtio.
   2. status-runtime; verifica renderer NVIDIA, omarchy-gtx e Sunshine/NVENC
      da SSH/Moonlight. In Moonlight scegli la stessa modalita dell'output.
-  3. omarchy_stream_resolution 1920x1200@60 cambia la modalita in modo
-     persistente; omarchy_stream_health watch rende visibili fallback/errori.
+  3. Desktop Moonlight sceglie dinamicamente risoluzione/FPS; usare
+     omarchy_stream_resolution 1920x1200@60 solo per il fallback idle.
+     omarchy_stream_health watch rende visibili fallback/errori.
   4. Solo se il test e' valido: qm set 1002 --vga none e reboot pulito.
 
 Lo script e' idempotente: non duplica righe o backup e usa un blocco monitor gestito.

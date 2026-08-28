@@ -377,11 +377,11 @@ def build():
         PageBreak(),
         h("7b. Omarchy: desktop headless GTX e Moonlight"),
         p(
-            "Il 28 agosto 2026 e stato verificato un percorso distinto dal precedente desktop VirtIO: Hyprland usa AQ_DRM_DEVICES=/dev/dri/gtx1050 e AQ_NO_KMS_REQUIREMENT=1, crea l'uscita Wayland headless omarchy-gtx e Sunshine la cattura a 1920x1200/60, scala 1. Il campione Moonlight HEVC ha mostrato 60.19 FPS, host processing latency 7.6/8.8/7.9 ms e 0% frame persi; nvidia-smi pmon ha mostrato Hyprland come processo grafico della GTX e Sunshine con enc=28. Il mismatch precedente era tra GBM 1920x1080 e il client 1920x1200, quindi la sorgente viene ora fissata e verificata a 1920x1200.",
+            "Il 28 agosto 2026 e stato verificato un percorso distinto dal precedente desktop VirtIO: Hyprland usa AQ_DRM_DEVICES=/dev/dri/gtx1050 e AQ_NO_KMS_REQUIREMENT=1 e crea l'uscita Wayland headless omarchy-gtx. Il fallback inattivo e 1920x1200/60; ogni nuova apertura Desktop in Moonlight passa larghezza, altezza e FPS a Sunshine, che invoca un helper Lua Hyprland e imposta l'uscita prima della cattura. Il campione HEVC ha mostrato 60.19 FPS, host processing latency 7.6/8.8/7.9 ms e 0% frame persi; nvidia-smi pmon ha mostrato Hyprland come processo grafico della GTX e Sunshine con enc=28. Il mismatch precedente era GBM 1920x1080/client 1920x1200.",
         ),
         Preformatted(
-            "GTX -> Hyprland -> omarchy-gtx (1920x1200@60)\n"
-            "                    -> Sunshine GBM/Wayland -> h264_nvenc o hevc_nvenc -> Moonlight\n"
+            "Moonlight W x H x FPS -> Sunshine Desktop prep -> hl.monitor(omarchy-gtx)\n"
+            "GTX -> Hyprland -> omarchy-gtx -> Sunshine GBM/Wayland -> h264_nvenc o hevc_nvenc -> Moonlight\n"
             "prova: Hyprland nella tabella NVIDIA; Sunshine enc>0 durante lo stream",
             code,
         ),
@@ -390,6 +390,9 @@ def build():
         ),
         p(
             "Il build stabile precedente, compatibile con il driver Pascal 580, aveva SUNSHINE_ENABLE_CUDA=OFF e forzava frame NV12 in RAM per evitare un errore di scala: NVENC restava hardware ma la CPU non era zero. Nel test Sunshine era circa al 51% di una CPU logica, mentre Hyprland circa al 3-4%; htop puo mostrare i thread separati e non devono essere sommati. Il pacchetto Sunshine Arch ufficiale e stato provato e subito annullato: h264_nvenc ha fallito per reference frames non supportati sulla GTX 1050 ed e ricaduto a libx264 software.",
+        ),
+        p(
+            "Il comando dinamico non usa hyprctl keyword: Omarchy/Hyprland 0.56 usa la configurazione Lua e keyword e un parser legacy che non modifica il monitor. Il test reale di hyprctl eval hl.monitor(...) ha cambiato omarchy-gtx da 1920x1200 a 1920x1080@60 e lo ha ripristinato senza riavvio. Una sola uscita resta condivisa: due client contemporanei non ricevono due risoluzioni indipendenti. GameStream non prevede clipboard guest-verso-client: Ctrl+Alt+Shift+V invia testo dal client al guest; una clipboard bidirezionale richiede un secondo canale fidato. Per TV si usa Moonlight (mirror interattivo/NVENC), non DLNA che serve solo file multimediali.",
         ),
         p(
             "Il 28 agosto 2026 e stato compilato in un percorso separato un canary Sunshine con CUDA 12.8 e GCC 14 isolati: compila cuda.cu con --generate-code per sm_61, ha SUNSHINE_ENABLE_CUDA=ON ed e installato in /opt/sunshine-cuda12. La drop-in 29-cuda12-canary.conf lo rende attivo soltanto se Sunshine trova h264_nvenc; puo essere ritirata in modo idempotente da omarchy-sunshine-cuda12-canary rollback. Il probe ha inoltre trovato hevc_nvenc: Sunshine ora rileva automaticamente HEVC e lascia H.264 come fallback, mentre AV1 resta disabilitato perche Pascal non lo codifica in hardware. CUDA non attiva NVENC, ma puo mantenere in VRAM la superficie catturata prima dell'encoder e ridurre copie CPU/RAM. Il campione runtime prova HEVC/NVENC; non dichiara zero-copy o una riduzione CPU finche non viene confrontato con un campione equivalente. Il preset P3 e mantenuto: 7.9 ms host e zero drop non richiedono P2/P1. CUDA 13 non puo compilare offline per Pascal compute capability 6.1.",
@@ -454,6 +457,9 @@ def build():
         p("NVIDIA CUDA 13 release notes: https://docs.nvidia.com/cuda/archive/13.0.0/cuda-toolkit-release-notes/index.html", styles["Reference"]),
         p("NVIDIA CUDA architecture / driver matrix: https://docs.nvidia.com/datacenter/tesla/drivers/cuda-toolkit-driver-and-architecture-matrix.html", styles["Reference"]),
         p("Sunshine build documentation: https://github.com/LizardByte/Sunshine/blob/master/docs/building.md", styles["Reference"]),
+        p("Sunshine app prep commands / client resolution variables: https://github.com/LizardByte/Sunshine/blob/master/docs/app_examples.md", styles["Reference"]),
+        p("Hyprland monitors Lua API: https://wiki.hypr.land/Configuring/Basics/Monitors/", styles["Reference"]),
+        p("Moonlight setup and text input: https://github.com/moonlight-stream/moonlight-docs/wiki/Setup-Guide", styles["Reference"]),
         p("GNOME Remote Login: https://teams.pages.gitlab.gnome.org/Websites/help.gnome.org/gnome-help/remote-login.html", styles["Reference"]),
     ]
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
