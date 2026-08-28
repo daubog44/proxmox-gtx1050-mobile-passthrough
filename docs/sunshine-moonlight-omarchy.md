@@ -77,6 +77,51 @@ systemctl --user restart app-dev.lizardbyte.app.Sunshine.service
 
 Nel client Moonlight scegliere l'host `omarchy` senza triangolo di avviso e poi la voce **Desktop**. Se appare `Enter Password`, è il lockscreen Hyprland, non un errore di Sunshine: digitare la password del guest e premere Invio. La tastiera riattiva anche DPMS perché Omarchy ha `key_press_enables_dpms = true`.
 
+### Se Moonlight non trova più Omarchy
+
+Sunshine è deliberatamente un servizio **della sessione grafica**, non un demone indipendente dal desktop. Questa è la sequenza da capire:
+
+```text
+sessione grafica daubog44 attiva
+  -> /run/user/1000/wayland-1 esiste
+  -> graphical-session.target è active
+  -> Sunshine può catturare Virtual-1
+
+sessione terminata; resta soltanto il greeter SDDM
+  -> wayland-1 non esiste
+  -> graphical-session.target è inactive
+  -> Sunshine si ferma intenzionalmente
+  -> Moonlight non ha un host desktop a cui collegarsi
+```
+
+Il 28 agosto si è verificato proprio il secondo caso. Il riavvio di SDDM ha riavviato l'autologin; dopo otto secondi erano di nuovo presenti sessione `seat0`, socket `wayland-1`, Sunshine `active` e le porte TCP `47984`, `47989`, `47990`, `48010`. Non era un errore GPU.
+
+Controlli riproducibili dal guest:
+
+```bash
+loginctl list-sessions
+systemctl --user is-active graphical-session.target
+systemctl --user is-active app-dev.lizardbyte.app.Sunshine.service
+ls -l /run/user/$(id -u)/wayland-*
+ss -ltnp | grep sunshine
+```
+
+Se il primo comando mostra solo `sddm`/`greeter`, si deve prima avviare il desktop del guest dalla console Proxmox (oppure riavviare SDDM se l'autologin è la configurazione desiderata); riavviare Sunshine da solo non può inventare un desktop Wayland da catturare.
+
+In quell'evento Moonlight ha inoltre chiesto un nuovo PIN: il record di accoppiamento client-host non era più considerato valido. Senza un confronto con il vecchio certificato non è possibile attribuire onestamente la causa precisa a un singolo file passato; non c'è però alcuna evidenza che VFIO, VBIOS, NVENC o `AQ_DRM_DEVICES` abbiano causato il pairing perso. L'accoppiamento è stato rifatto con la modalità prevista da Sunshine `-0` (*leggi il PIN da stdin*), senza resettare le credenziali della UI web:
+
+```bash
+# Solo mentre Moonlight mostra un nuovo PIN; eseguire nel terminale del guest.
+systemctl --user stop app-dev.lizardbyte.app.Sunshine.service
+env XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-1 \
+  ~/.local/lib/sunshine-gbm/sunshine -0
+# Inserire nel terminale il PIN mostrato da Moonlight.
+# Dopo "paired", Ctrl+C e:
+systemctl --user start app-dev.lizardbyte.app.Sunshine.service
+```
+
+La verifica dopo il ritorno alla unit systemd ha mostrato di nuovo `h264_nvenc`, `CLIENT CONNECTED`, una sessione attiva e l'immagine Moonlight corretta. Il PIN è un'autorizzazione temporanea tra questo client Windows e questo host, non una password del sistema.
+
 ## Il problema reale: due GPU con ruoli diversi
 
 La VM espone due dispositivi DRM:
@@ -117,6 +162,18 @@ VirtIO   /dev/dri/card1      -> Virtual-1: connected, 1920x1080
 ```
 
 Non è un limite artificiale di Sunshine: nel guest non c'è un connettore video NVIDIA attivo su cui Hyprland possa creare l'output principale. Forzare la GPU sbagliata equivale a scollegare il monitor. La documentazione Hyprland avverte che selezionare soltanto una GPU tramite `AQ_DRM_DEVICES` può far perdere lo schermo; la sua guida multi-GPU descrive l'ordine come priorità/fallback, non come una garanzia di render-offload trasparente di un desktop MUXless. [FAQ Hyprland](https://wiki.hypr.land/FAQ/) e [multi-GPU Hyprland](https://wiki.hypr.land/Configuring/Advanced-and-Cool/Multi-GPU/).
+
+### Perché non è identico al caso Ubuntu
+
+"Rendere primaria la GTX" non è una singola casella Proxmox. Può significare almeno tre cose diverse: (1) il driver NVIDIA è il renderer di una app, (2) NVIDIA compone l'intero desktop, (3) NVIDIA possiede il connettore dell'unico monitor. I test Ubuntu hanno verificato i primi due in una sessione grafica diversa (KMS NVIDIA e, per il test diagnostico, Xorg NVIDIA `:2`); non trasformano automaticamente l'uscita del guest Omarchy.
+
+Omarchy ha invece `vga: virtio` nella configurazione QEMU e il suo unico output visibile è `Virtual-1` della VirtIO. La GTX è passata correttamente e funziona, ma il suo connettore emulato è disconnesso. Quindi una configurazione che può essere utile su Ubuntu non può, da sola, far diventare la GTX proprietaria di `Virtual-1`: quell'output non è cablato alla GPU NVIDIA. Il compromesso non è "una GTX non funzionante"; è assegnare ogni fase alla GPU che può svolgerla senza trasferimenti instabili:
+
+```text
+Hyprland + output Virtual-1                 -> VirtIO
+rendering pesante di una singola applicazione -> GTX, con gtx-run
+compressione del video Moonlight             -> GTX, con NVENC
+```
 
 ### Offload 3D delle applicazioni: soluzione funzionante
 

@@ -180,6 +180,9 @@ def main() -> None:
             "hyprland-dpms-enable",
             "gtx-run",
             "card0-HDMI-A-1",
+            "Sunshine è deliberatamente un servizio",
+            "sunshine -0",
+            "Omarchy ha invece `vga: virtio`",
         ),
         "Sunshine/Moonlight Omarchy",
     )
