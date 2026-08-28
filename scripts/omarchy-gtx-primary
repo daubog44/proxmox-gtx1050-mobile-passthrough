@@ -66,6 +66,14 @@ prepare_headless() {
   sed -i '/^export AQ_NO_MODIFIERS=/d' "$ENV_FILE"
   chown "$USER_NAME:$USER_NAME" "$ENV_FILE"
 
+  # Use the Wayland DMA-BUF backend and the NVIDIA encoder on the same GTX.
+  # HEVC mode 0 is Sunshine's recommended capability-detection mode: it
+  # advertises HEVC only after the active NVENC driver passes the probe.  GTX
+  # 1050 Pascal has no hardware AV1 encoder, so do not advertise AV1.
+  replace_or_append "$SUNSHINE_FILE" '^capture = .*$' 'capture = wlr'
+  replace_or_append "$SUNSHINE_FILE" '^encoder = .*$' 'encoder = nvenc'
+  replace_or_append "$SUNSHINE_FILE" '^hevc_mode = .*$' 'hevc_mode = 0'
+  replace_or_append "$SUNSHINE_FILE" '^av1_mode = .*$' 'av1_mode = 1'
   replace_or_append "$SUNSHINE_FILE" '^adapter_name = .*$' 'adapter_name = /dev/dri/gtx1050'
   chown "$USER_NAME:$USER_NAME" "$SUNSHINE_FILE"
 
@@ -131,6 +139,10 @@ verify_headless() {
   require_root
   grep -Fxq 'export AQ_DRM_DEVICES="/dev/dri/gtx1050"' "$ENV_FILE" || die 'AQ_DRM_DEVICES non punta alla GTX'
   grep -Fxq 'export AQ_NO_KMS_REQUIREMENT=1' "$ENV_FILE" || die 'AQ_NO_KMS_REQUIREMENT non abilitato'
+  grep -Fxq 'capture = wlr' "$SUNSHINE_FILE" || die 'Sunshine non usa la cattura Wayland wlr'
+  grep -Fxq 'encoder = nvenc' "$SUNSHINE_FILE" || die 'Sunshine non richiede NVENC'
+  grep -Fxq 'hevc_mode = 0' "$SUNSHINE_FILE" || die 'HEVC non e in rilevamento automatico'
+  grep -Fxq 'av1_mode = 1' "$SUNSHINE_FILE" || die 'AV1 deve restare disattivato sulla GTX Pascal'
   grep -Fxq 'adapter_name = /dev/dri/gtx1050' "$SUNSHINE_FILE" || die 'Sunshine non punta alla GTX'
   grep -Fq 'output = "omarchy-gtx"' "$MONITORS_FILE" || die 'monitor headless non configurato'
   [[ -x "$HEADLESS_HELPER" ]] || die 'helper di creazione output mancante'
@@ -176,6 +188,8 @@ Uso: omarchy-gtx-primary <prepare-headless|verify-headless|status-runtime|rollba
                     AQ_NO_KMS_REQUIREMENT e omarchy-gtx 1920x1080@60.
                     Installa un pre-start idempotente: Sunshine avvia la sua
                     cattura solo dopo che l'uscita virtuale esiste.
+                    Configura wlr + NVENC sulla GTX, HEVC in rilevamento
+                    automatico e AV1 non pubblicizzato (Pascal non lo codifica).
                     Non modifica kernel, Limine, VBIOS, SSDT o Proxmox.
   verify-headless   controlla i file predisposti prima del riavvio della sessione.
   status-runtime    mostra uscita virtuale, servizio Sunshine e processi NVIDIA.

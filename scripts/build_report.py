@@ -381,7 +381,7 @@ def build():
         ),
         Preformatted(
             "GTX -> Hyprland -> omarchy-gtx (1920x1080@60)\n"
-            "                    -> Sunshine GBM/Wayland -> h264_nvenc -> Moonlight\n"
+            "                    -> Sunshine GBM/Wayland -> h264_nvenc o hevc_nvenc -> Moonlight\n"
             "prova: Hyprland nella tabella NVIDIA; Sunshine enc>0 durante lo stream",
             code,
         ),
@@ -389,10 +389,10 @@ def build():
             "L'output QEMU VirtIO rimane nel file Proxmox soltanto come console noVNC di recupero: non e selezionato dal compositor. Non e stato quindi eseguito vga:none senza un'ulteriore prova utente; questa scelta preserva una strada di rollback. Il tentativo di forzare una EDID sul connettore NVIDIA disconnesso aveva lasciato guest SSH e QEMU Guest Agent non raggiungibili ed e stato rimosso, non mantenuto.",
         ),
         p(
-            "NVENC e hardware, ma il build Sunshine stabile compatibile con il driver Pascal 580 ha SUNSHINE_ENABLE_CUDA=OFF e passa frame NV12 tramite RAM per evitare un precedente errore di scala: la CPU non e quindi zero. Nel test Sunshine era circa al 51% di una CPU logica, mentre Hyprland circa al 3-4%; htop puo mostrare i thread separati e non devono essere sommati. Il pacchetto Sunshine Arch ufficiale e stato provato e subito annullato: h264_nvenc ha fallito per reference frames non supportati sulla GTX 1050 ed e ricaduto a libx264 software.",
+            "Il build stabile precedente, compatibile con il driver Pascal 580, aveva SUNSHINE_ENABLE_CUDA=OFF e forzava frame NV12 in RAM per evitare un errore di scala: NVENC restava hardware ma la CPU non era zero. Nel test Sunshine era circa al 51% di una CPU logica, mentre Hyprland circa al 3-4%; htop puo mostrare i thread separati e non devono essere sommati. Il pacchetto Sunshine Arch ufficiale e stato provato e subito annullato: h264_nvenc ha fallito per reference frames non supportati sulla GTX 1050 ed e ricaduto a libx264 software.",
         ),
         p(
-            "Il 28 agosto 2026 e stato compilato in un percorso separato un canary Sunshine con CUDA 12.8 e GCC 14 isolati: compila cuda.cu, ha SUNSHINE_ENABLE_CUDA=ON ed e installato in /opt/sunshine-cuda12. La drop-in 29-cuda12-canary.conf lo rende attivo soltanto se Sunshine trova h264_nvenc; puo essere ritirata in modo idempotente da omarchy-sunshine-cuda12-canary rollback. CUDA non attiva NVENC, ma puo mantenere in VRAM la superficie catturata prima dell'encoder e ridurre copie CPU/RAM. La build e l'avvio sono verificati; zero-copy e la diminuzione di CPU non sono dichiarati finche un stream Moonlight non fornisce un campione runtime. CUDA 13 non puo compilare offline per Pascal compute capability 6.1. Il risultato documentato e quindi: desktop GTX, Full HD/60, NVENC verificato; CPU nulla e 2K nativo non sono dichiarati ottenuti.",
+            "Il 28 agosto 2026 e stato compilato in un percorso separato un canary Sunshine con CUDA 12.8 e GCC 14 isolati: compila cuda.cu con --generate-code per sm_61, ha SUNSHINE_ENABLE_CUDA=ON ed e installato in /opt/sunshine-cuda12. La drop-in 29-cuda12-canary.conf lo rende attivo soltanto se Sunshine trova h264_nvenc; puo essere ritirata in modo idempotente da omarchy-sunshine-cuda12-canary rollback. Il probe ha inoltre trovato hevc_nvenc: Sunshine ora rileva automaticamente HEVC e lascia H.264 come fallback, mentre AV1 resta disabilitato perche Pascal non lo codifica in hardware. CUDA non attiva NVENC, ma puo mantenere in VRAM la superficie catturata prima dell'encoder e ridurre copie CPU/RAM. La build e l'avvio sono verificati; zero-copy e la diminuzione di CPU non sono dichiarati finche un stream Moonlight non fornisce un campione runtime. CUDA 13 non puo compilare offline per Pascal compute capability 6.1. Il risultato documentato e quindi: desktop GTX, Full HD/60, NVENC verificato; CPU nulla e 2K nativo non sono dichiarati ottenuti.",
         ),
     ]
     story += [h("8. Estrazione della VBIOS OEM")]

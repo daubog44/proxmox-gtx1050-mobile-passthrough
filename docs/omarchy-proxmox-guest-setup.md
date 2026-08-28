@@ -97,7 +97,7 @@ KMS NVIDIA: e' cosi' che la GTX diventa la GPU del compositor headless.
 ```ini
 capture = wlr
 encoder = nvenc
-hevc_mode = 1
+hevc_mode = 0
 av1_mode = 1
 adapter_name = /dev/dri/gtx1050
 ```
@@ -105,6 +105,13 @@ adapter_name = /dev/dri/gtx1050
 `wlr` cattura Wayland; `adapter_name` seleziona la GTX; `encoder = nvenc`
 richiede l'encoder NVIDIA. La richiesta non e' una prova: la prova reale e'
 `h264_nvenc` nel journal e `enc > 0` in `nvidia-smi pmon` durante uno stream.
+
+`hevc_mode = 0` e' il rilevamento automatico raccomandato da Sunshine: il
+client puo' scegliere HEVC/H.265 soltanto dopo il probe del driver. Nel guest
+questo probe ha trovato `hevc_nvenc`, quindi Moonlight puo' usare HEVC per una
+qualita' migliore allo stesso bitrate. H.264 rimane il fallback piu'
+compatibile. `av1_mode = 1` disabilita AV1: la GTX 1050 Pascal non possiede
+un encoder AV1 hardware; pubblicizzarlo causerebbe un fallback software.
 
 `~/.config/hypr/monitors.lua` riceve un blocco gestito unico:
 
@@ -180,15 +187,16 @@ Monitor omarchy-gtx ... 1920x1080@60 ... scale 1
 Hyprland ... G                   # compositor sulla GPU 0
 sunshine  ... C+G ... enc > 0    # cattura e NVENC durante stream
 Found H.264 encoder: h264_nvenc [nvenc]
+Found HEVC encoder: hevc_nvenc [nvenc]
 ```
 
 `enc > 0` prova che NVENC, un blocco hardware della GTX, codifica il flusso.
 Le righe ripetute in `htop` sono thread e non vanno sommate: confrontare il
 processo intero in `ps` con `nvidia-smi pmon`.
 
-## 6. CUDA, RAM e limite del build stabile
+## 6. CUDA, RAM e limite del build stabile precedente
 
-Il build stabile attuale usa NVENC ma gli passa un frame NV12 in RAM:
+Il build stabile precedente usava NVENC ma gli passava un frame NV12 in RAM:
 
 ```text
 GTX -> RAM di sistema -> upload FFmpeg -> NVENC GTX
@@ -201,7 +209,9 @@ servizio attivo.
 
 CUDA non serve ad attivare NVENC - che e' gia' hardware - ma a lasciare a
 Sunshine superfici di cattura CUDA in VRAM, evitando potenzialmente la copia
-in RAM. Il guadagno di CPU/latency e' una possibilita' da misurare, non una
+in RAM. FFmpeg usa la GTX quando seleziona `h264_nvenc` o `hevc_nvenc`: quei
+codec consegnano la compressione al blocco NVENC del driver NVIDIA. Il guadagno
+di CPU/latency del percorso CUDA e' una possibilita' da misurare, non una
 promessa. La GTX 1050 e' Pascal `sm_61`: CUDA 13 non puo' compilare offline
 per quell'architettura.
 
@@ -209,6 +219,7 @@ Il canary verificato usa CUDA 12.8 e GCC 14 isolati in `/var/tmp`, compila
 `cuda.cu`, e installa il risultato separatamente in
 `/opt/sunshine-cuda12/bin/sunshine`. Una drop-in idempotente lo rende attivo
 solo dopo che il journal conferma `Found H.264 encoder: h264_nvenc [nvenc]`.
+Il probe attuale ha inoltre confermato `Found HEVC encoder: hevc_nvenc [nvenc]`.
 Lo script [`omarchy-sunshine-cuda12-canary`](../scripts/omarchy-sunshine-cuda12-canary)
 gestisce la scelta reversibile:
 
@@ -235,3 +246,5 @@ reale; build e avvio da soli non la dimostrano.
 
 Per la storia dei frame corrotti VirtIO--NVIDIA, dello stream Full HD e dei
 limiti verificati, vedere [Sunshine/Moonlight su Omarchy](sunshine-moonlight-omarchy.md).
+Le modifiche di codice, una per una, sono in
+[patch Sunshine e CUDA](sunshine-patch-breakdown.md).

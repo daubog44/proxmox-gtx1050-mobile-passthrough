@@ -1,0 +1,16 @@
+--- a/cmake/compile_definitions/linux.cmake
++++ b/cmake/compile_definitions/linux.cmake
+@@ -50,9 +50,13 @@ if(${SUNSHINE_ENABLE_CUDA})
+             list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES 101)
+             list(APPEND CMAKE_CUDA_ARCHITECTURES 110)
+         else()
+-            list(APPEND CMAKE_CUDA_ARCHITECTURES 50 52 53 60 61 62 70 72)
++            list(APPEND CMAKE_CUDA_ARCHITECTURES 61)
+         endif()
+ 
++        # Experimental VM build: GTX 1050 Mobile is Pascal SM 6.1. Avoid compiling
++        # unrelated architectures, which neither this guest nor its driver can execute.
++        set(CMAKE_CUDA_ARCHITECTURES 61)
++
+         # sort the architectures
+         list(SORT CMAKE_CUDA_ARCHITECTURES COMPARE NATURAL)

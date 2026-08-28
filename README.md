@@ -449,6 +449,11 @@ nvtop
 
 ## Contenuto e studio
 
+Per leggere senza ripetizioni: iniziare da `reproducible-runbook.md` per il
+passthrough; per Omarchy usare come unica procedura
+`omarchy-proxmox-guest-setup.md`, poi la diagnosi Sunshine e il breakdown delle
+patch. `attempts-and-outcomes.md` e' cronologia/evidenza, non una seconda guida.
+
 ```text
 firmware/gtx1050_hp_native.rom    VBIOS OEM verificata per questo HP
 scripts/gpu-vm-switch             setup host + switch idempotente + Secure Boot/MOK
@@ -463,9 +468,12 @@ docs/rdp-wayland.md               diagnostica RDP: xrdp/X11 e Remote Login GNOME
 docs/wayland-nvidia-kms.md        fix KMS, renderer Wayland, VSync, Xorg :2, APT e audio RDP
 docs/sunshine-moonlight-omarchy.md  desktop GTX headless, Moonlight Full HD/NVENC, CPU residua e rollback su Omarchy
 docs/omarchy-proxmox-guest-setup.md configurazione PVE/guest Omarchy, file effettivi, verifica e limiti CUDA
+docs/sunshine-patch-breakdown.md    patch Sunshine/CUDA riga per riga, motivazione e confini
 scripts/omarchy-sunshine-cuda12-canary  attivazione/rollback idempotente del build CUDA separato di Sunshine
 patches/sunshine-linux-nvenc-system-memory-input.patch  patch per il feed NV12 a NVENC
 patches/sunshine-wayland-virtio-gbm.patch  patch GBM per la cattura Wayland su VirtIO
+patches/sunshine-cuda12-pascal-sm61.patch  build CUDA 12 limitato alla GTX Pascal sm_61
+patches/cuda-12.8-glibc-2.44-noexcept.patch  compatibilita' temporanea CUDA 12.8/glibc 2.44
 evidence/                         prova nvtop + glxgears
 output/pdf/                       relazione tecnica con fonti e diagrammi
 ```

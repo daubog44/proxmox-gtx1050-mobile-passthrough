@@ -1,5 +1,11 @@
 # Tentativi, diagnosi e risultato
 
+Questa e' una cronologia delle prove e non una seconda procedura di
+configurazione. Per applicare il setup Omarchy usare soltanto
+[il runbook PVE/guest](omarchy-proxmox-guest-setup.md); per il significato
+delle modifiche Sunshine/CUDA usare
+[il breakdown delle patch](sunshine-patch-breakdown.md).
+
 | Tentativo | Perché non bastava | Correzione o lezione |
 | --- | --- | --- |
 | ROM generiche da Internet | Una VBIOS diversa può non contenere i dettagli OEM di alimentazione/piattaforma del laptop. | Usare la VBIOS HP originale estratta dal payload relativo al Pavilion 15-cs1xxx; è inclusa come riferimento privato in `firmware/`. |
