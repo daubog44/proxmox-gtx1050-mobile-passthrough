@@ -213,6 +213,8 @@ def main() -> None:
             "omarchy-sunshine-cuda12-canary",
             "CUDA 12.8",
             "superfici di cattura CUDA",
+            "kdeconnect-cli --my-id",
+            "Personalizzare Hyprland per il tuo utente",
         ),
         "setup PVE/guest Omarchy",
     )

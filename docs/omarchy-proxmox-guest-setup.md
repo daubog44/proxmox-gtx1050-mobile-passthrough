@@ -191,6 +191,65 @@ prepara gli altri PC Windows: installare KDE Connect, eseguire
 ogni PC. La guida con fiducia, test clipboard, firewall e limite vGPU e' in
 [Sunshine/Moonlight su Omarchy](sunshine-moonlight-omarchy.md).
 
+### KDE Connect: demone, ID e verifica
+
+Su Omarchy non e' stato creato un servizio `system` aggiuntivo: `kdeconnectd`
+e' un daemon **per l'utente `daubog44`**, avviato da D-Bus dentro la sua
+sessione grafica. E' quindi headless (nessun secondo desktop o finestra) ma
+segue la sessione che possiede la clipboard Wayland. Il suo ID e' persistente
+per quell'installazione e si vede senza esporre chiavi private:
+
+```bash
+# [GUEST]
+kdeconnect-cli --my-id
+kdeconnect-cli -l
+ss -lntup | grep 1716
+```
+
+Nel setup corrente l'ID Omarchy e' `69a71ab3f0154ec8b89abd92448a0e75`; non e'
+un segreto, ma non serve inserirlo a mano se `kde-connect-windows-setup.ps1
+-Show` elenca `omarchy`. Per completare la prova, copiare una frase innocua su
+Windows e incollarla in un'app Omarchy, poi ripetere da Omarchy a Windows.
+
+### Personalizzare Hyprland per il tuo utente
+
+Le personalizzazioni vivono in `~/.config/hypr/` dell'utente `daubog44`, non
+in `/usr/share/omarchy`. `hyprland.lua` carica prima i default Omarchy e poi,
+in quest'ordine, i file utente: `monitors.lua`, `input.lua`, `bindings.lua`,
+`looknfeel.lua`, `autostart.lua`. Gli aggiornamenti Omarchy non riscrivono
+questi file.
+
+```text
+~/.config/hypr/hyprland.lua  orchestratore utente; normalmente non modificarlo
+~/.config/hypr/bindings.lua  scorciatoie personali con o.bind()/hl.unbind()
+~/.config/hypr/input.lua     tastiera, mouse, touchpad e gesture
+~/.config/hypr/looknfeel.lua layout, bordi, animazioni e decorazioni
+~/.config/hypr/autostart.lua processi extra con o.launch_on_start(...)
+~/.config/hypr/monitors.lua  monitor e output headless GTX
+```
+
+Esempi sicuri da scommentare/adattare nei file esistenti:
+
+```lua
+-- bindings.lua
+o.bind("SUPER + SHIFT + R", "SSH", "alacritty -e ssh mio-server")
+
+-- autostart.lua
+o.launch_on_start("mio-servizio")
+
+-- looknfeel.lua
+hl.config({ animations = { enabled = false } })
+```
+
+Non modificare manualmente il blocco delimitato `omarchy-gtx` in
+`monitors.lua`: e' gestito idempotentemente da `omarchy-gtx-primary` e dalla
+funzione `omarchy_stream_resolution`. Per modificare solo il fallback usare
+`omarchy_stream_resolution 1920x1200@60`; la successiva apertura Desktop
+Moonlight applichera' comunque la propria modalita' dinamica. Dopo modifiche
+personali, eseguire `hyprctl reload` da un terminale dentro Hyprland oppure
+fare logout/login; poi usare `omarchy_stream_health` per verificare che GTX,
+output headless e Sunshine restino coerenti.
+
 ## 4. Applicazione, verifica e rollback
 
 ```bash

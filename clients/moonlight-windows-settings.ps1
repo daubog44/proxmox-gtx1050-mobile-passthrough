@@ -78,18 +78,39 @@ function Get-MoonlightDefaultBitrateKbps {
     return [int]([math]::Round($resolutionFactor * $frameRateFactor, [MidpointRounding]::AwayFromZero) * 1000)
 }
 
+function Get-MoonlightRegistryValue {
+    param(
+        [Parameter(Mandatory)] [object] $Settings,
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [object] $Default
+    )
+
+    # QSettings omette talvolta le preferenze che valgono il default. Con
+    # StrictMode, $Settings.autoadjustbitrate farebbe quindi fallire -Show.
+    $property = $Settings.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return $Default
+    }
+    return $property.Value
+}
+
 function Get-MoonlightSettings {
     $settings = Get-ItemProperty -LiteralPath $key
-    $defaultKbps = Get-MoonlightDefaultBitrateKbps -Width $settings.width -Height $settings.height -Fps $settings.fps -Yuv444 ([bool]$settings.yuv444)
+    $width = [int](Get-MoonlightRegistryValue -Settings $settings -Name 'width' -Default 1280)
+    $height = [int](Get-MoonlightRegistryValue -Settings $settings -Name 'height' -Default 720)
+    $fps = [int](Get-MoonlightRegistryValue -Settings $settings -Name 'fps' -Default 60)
+    $yuv444 = [bool](Get-MoonlightRegistryValue -Settings $settings -Name 'yuv444' -Default $false)
+    $defaultKbps = Get-MoonlightDefaultBitrateKbps -Width $width -Height $height -Fps $fps -Yuv444 $yuv444
+    $bitrate = [int](Get-MoonlightRegistryValue -Settings $settings -Name 'bitrate' -Default $defaultKbps)
     [pscustomobject]@{
-        Resolution           = "$($settings.width)x$($settings.height)"
-        FPS                  = $settings.fps
-        RequestedMbps        = [math]::Round($settings.bitrate / 1000, 2)
+        Resolution           = "${width}x${height}"
+        FPS                  = $fps
+        RequestedMbps        = [math]::Round($bitrate / 1000, 2)
         MoonlightDefaultMbps = [math]::Round($defaultKbps / 1000, 2)
-        RateControl          = if ([bool]$settings.autoadjustbitrate) { 'MoonlightDefault' } else { 'Fixed' }
-        VSync                = [bool]$settings.vsync
-        HDR                  = [bool]$settings.hdr
-        Yuv444               = [bool]$settings.yuv444
+        RateControl          = if ([bool](Get-MoonlightRegistryValue -Settings $settings -Name 'autoadjustbitrate' -Default $true)) { 'MoonlightDefault' } else { 'Fixed' }
+        VSync                = [bool](Get-MoonlightRegistryValue -Settings $settings -Name 'vsync' -Default $true)
+        HDR                  = [bool](Get-MoonlightRegistryValue -Settings $settings -Name 'hdr' -Default $false)
+        Yuv444               = $yuv444
         AppliesOn            = 'Nuova connessione Moonlight dopo chiusura e riapertura del client'
     }
 }
@@ -100,11 +121,15 @@ if ($Show) {
 }
 
 $current = Get-ItemProperty -LiteralPath $key
+$currentWidth = [int](Get-MoonlightRegistryValue -Settings $current -Name 'width' -Default 1280)
+$currentHeight = [int](Get-MoonlightRegistryValue -Settings $current -Name 'height' -Default 720)
+$currentFps = [int](Get-MoonlightRegistryValue -Settings $current -Name 'fps' -Default 60)
+$currentYuv444 = [bool](Get-MoonlightRegistryValue -Settings $current -Name 'yuv444' -Default $false)
 if ($Mode -eq 'MoonlightDefault') {
     if ($null -ne $BitrateMbps) {
         throw 'Con -Mode MoonlightDefault non specificare -BitrateMbps: viene calcolato dal profilo corrente.'
     }
-    $targetKbps = Get-MoonlightDefaultBitrateKbps -Width $current.width -Height $current.height -Fps $current.fps -Yuv444 ([bool]$current.yuv444)
+    $targetKbps = Get-MoonlightDefaultBitrateKbps -Width $currentWidth -Height $currentHeight -Fps $currentFps -Yuv444 $currentYuv444
     $autoAdjust = 1
 }
 else {
