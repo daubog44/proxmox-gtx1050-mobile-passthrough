@@ -265,46 +265,53 @@ hl.config({ animations = { enabled = false } })
 
 Omarchy usa qui la configurazione **Lua**, non i tradizionali file
 `hyprland.conf`: `hyprland.lua` carica moduli Lua e questi invocano l'API di
-Hyprland. La forma equivalente alla sintassi `.conf`
-`input { kb_options = caps:super }` e' quindi:
+Hyprland. Una rimappatura come `kb_options = "caps:super"` in
+`~/.config/hypr/input.lua` fa di Caps un normale modificatore Super: per una
+scorciatoia bisogna tenerlo premuto. Non e' il comportamento richiesto in
+questo setup.
 
-```lua
--- input.lua
-hl.config({
-  input = {
-    kb_options = "caps:super", -- Caps Lock si comporta come Super
-  },
-})
+#### Caps come Super *one-shot* (senza tenerlo premuto)
+
+Il comportamento desiderato e' una forma di **Sticky Keys**: premi e rilasci
+Caps, poi il prossimo tasto riceve Super e la modalita' si disarma. Esempio:
+`Caps`, poi `W` equivale a `Super+W`; `Caps`, poi `1` equivale a `Super+1`.
+Le scorciatoie Omarchy esistenti continuano quindi a funzionare senza copiarle
+in una tabella Lua.
+
+Hyprland/XKB non espone in questa configurazione un toggle Super generico e
+sicuro. E' stato percio' usato [keyd](https://github.com/rvaiya/keyd), che rimappa l'evento nel livello input
+prima che raggiunga Hyprland, anche per il dispositivo virtuale di Moonlight.
+Il file attivo e' di sistema, non in `~/.config/hypr/`:
+
+```ini
+# /etc/keyd/default.conf
+[ids]
+*
+
+[main]
+capslock = oneshot(meta)
 ```
 
-Questa proprieta' sostituisce altre eventuali opzioni tastiera personali: se
-servono piu' opzioni, scriverle nella stessa stringa separate da virgola, per
-esempio `"caps:super,compose:ralt"`. Nel setup corrente l'override e' stato
-aggiunto in `~/.config/hypr/input.lua`, lasciando intatti i default Omarchy.
+`meta` e' il nome di keyd per Super. `oneshot(meta)` invia Super per **un solo
+tasto seguente**; poi torna a scrivere normalmente. Non usare
+`toggle(meta)` per questo caso: lascerebbe Super bloccato finche' non lo si
+disattiva, cosi' anche digitare una lettera diventerebbe una scorciatoia.
 
-Un tasto **Super e' un modificatore**, non un comando visibile da solo: va
-tenuto premuto mentre si usa il secondo tasto. Per esempio `Caps+Space` apre il
-menu Omarchy, `Caps+Invio` un terminale e `Caps+1` passa al workspace 1. Se si
-rilascia Caps prima di premere la lettera, la lettera viene correttamente
-scritta nell'app attiva; e' lo stesso comportamento del tasto Windows.
+La precedente riga `kb_options = "caps:super"` in `input.lua` e il precedente
+bind Lua `SUPER + SUPER_L` in `bindings.lua` sono stati rimossi: mantenere due
+rimappature dello stesso tasto produce risultati ambigui. `keyd` e' abilitato
+come servizio di sistema, quindi vale al login e con Moonlight:
 
-Per avere anche un'azione quando si preme e rilascia **solo** Caps, il setup
-corrente aggiunge in `~/.config/hypr/bindings.lua`:
-
-```lua
--- Caps da solo: menu; Caps tenuto premuto: modificatore Super normale.
-hl.bind("SUPER + SUPER_L", hl.dsp.exec_cmd("omarchy-menu toggle"), {
-  release = true,
-  description = "Open Omarchy menu with Caps Lock",
-})
+```bash
+sudo systemctl status keyd.service
+sudo sed -n '1,80p' /etc/keyd/default.conf
 ```
 
-`SUPER_L` e' il tasto logico emesso dalla rimappatura XKB; `SUPER` a sinistra
-e' il modificatore richiesto. Il flag `release = true` evita l'apertura del
-menu al semplice key-down. Il bind e la mappatura sono stati verificati nella
-sessione attiva (`kb_options = caps:super`, nessun errore di configurazione).
-La sintassi per i modificatori da soli e' documentata nella [guida ufficiale
-ai bind Lua](https://wiki.hypr.land/Configuring/Basics/Binds/).
+Per annullare il comportamento, rimuovere o commentare la riga `capslock = ...`
+e riavviare il servizio con `sudo systemctl restart keyd.service`; per
+disinstallarlo completamente: `sudo systemctl disable --now keyd.service` e
+`sudo pacman -Rns keyd`. La configurazione Hyprland resta valida e puo' essere
+controllata con `hyprctl configerrors`.
 
 #### Perche' non un file `hyprland.conf` aggiuntivo?
 
