@@ -152,7 +152,24 @@ avviato conserva le preferenze in memoria. Il valore e' riproducibile con
 .\moonlight-windows-settings.ps1 -Show
 .\moonlight-windows-settings.ps1                         # default Moonlight per formato attuale
 .\moonlight-windows-settings.ps1 -Mode Fixed -BitrateMbps 40
+.\moonlight-windows-settings.ps1 -CloseMoonlight          # chiude gentilmente il client, poi applica il default
 ```
+
+`RequestedMbps` e `MoonlightDefaultMbps` possono essere diversi: il primo e'
+il valore `bitrate` effettivamente salvato nel profilo del client, il secondo
+e' il suggerimento ricalcolato dalla formula per larghezza, altezza, FPS e
+YUV 4:4:4 correnti. Per questo 23/46 significa semplicemente “il profilo aveva
+ancora 23 Mbps, mentre l'impostazione automatica per questo formato suggerisce
+46 Mbps”; non e' una misura della banda effettivamente transitata. Lo script
+non modifica un client Moonlight aperto senza `-CloseMoonlight`, evitando che
+il client riscriva un valore obsoleto quando termina.
+
+YUV 4:4:4 conserva l'informazione di colore di ogni pixel: testo e bordi del
+desktop risultano piu' nitidi rispetto al comune 4:2:0, ma il flusso richiede
+piu' bitrate. 46 Mbps e' molto sotto una LAN Gigabit, ma il target deve restare
+sotto la **banda sostenibile** del collegamento reale, non sotto il solo valore
+nominale. Su Wi-Fi o Ethernet a 100 Mbps con congestione, provare 35--40 Mbps
+fissi o disabilitare 4:4:4 se l'overlay Moonlight mostra perdita o latenza.
 
 Moonlight salva il bitrate in kbps e lo mostra come Mbps nell'interfaccia; il
 suo sorgente conferma conversione, formula e semantica del flag. [Moonlight

@@ -136,6 +136,22 @@ del tool calcola 46000 (46 Mbps) per 1920x1200/60 con YUV 4:4:4; `Fixed 40`
 resta disponibile. `autoadjustbitrate` ricalcola il default quando cambiano
 risoluzione/FPS, non misura ne' corregge il jitter ad ogni frame.
 
+`RequestedMbps` e' il valore davvero salvato; `MoonlightDefaultMbps` e' il
+risultato della formula per il formato corrente. Perciò vedere 23 e 46 insieme
+non segnala un errore o una banda da 23 Mbps: indica un profilo ancora a 23 e
+un default corrente di 46. Moonlight deve essere chiuso prima di aggiornare il
+profilo, altrimenti puo' riscrivere dalla memoria il valore che aveva caricato.
+
+### YUV 4:4:4
+
+**YUV** separa luminosita' (Y) e colore (U/V). Il comune 4:2:0 conserva meno
+informazione cromatica per ridurre banda; **4:4:4** conserva invece il colore
+per ogni pixel. Per un desktop remoto produce testo e bordi piu' netti, ma
+aumenta il bitrate necessario. Non cambia la GPU usata: agisce sul formato
+codificato e decodificato. Il target deve stare sotto la banda LAN realmente
+sostenibile, lasciando margine per overhead e altri flussi, non sotto il solo
+valore nominale della porta o del Wi-Fi.
+
 ### vGPU / vGPU Unlock
 
 **vGPU** divide una GPU fisica fra VM con un driver host e profili virtuali; e'

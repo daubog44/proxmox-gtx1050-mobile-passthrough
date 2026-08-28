@@ -175,7 +175,10 @@ predefinita Moonlight e riabilita `autoadjustbitrate`, che con
 di risoluzione/FPS, non e' un controllo del jitter di rete in tempo reale.
 Il file [`clients/moonlight-windows-settings.ps1`](../clients/moonlight-windows-settings.ps1)
 mostra o imposta `MoonlightDefault` o `Fixed` in modo riproducibile; Moonlight
-va chiuso e riaperto prima di riconnettersi.
+va chiuso e riaperto prima di riconnettersi. Lo script rifiuta ora di cambiare
+valori se trova Moonlight aperto, perche' il processo potrebbe riversare nel
+registro il vecchio stato in memoria all'uscita. Chiuderlo manualmente o usare
+esplicitamente `-CloseMoonlight` (chiusura gentile, mai `Stop-Process`).
 
 `enc > 0` in `nvidia-smi pmon` o NVTOP prova che Sunshine sta usando NVENC:
 e' la percentuale di occupazione del motore encoder nel suo intervallo di
@@ -211,6 +214,22 @@ un segreto, ma non serve inserirlo a mano se `kde-connect-windows-setup.ps1
 -Show` elenca `omarchy`. Per completare la prova, copiare una frase innocua su
 Windows e incollarla in un'app Omarchy, poi ripetere da Omarchy a Windows.
 
+KDE Connect scopre normalmente i dispositivi sulla stessa LAN tramite traffico
+locale; non e' un servizio Internet. Lo script Windows non indovina l'indirizzo
+di Omarchy: per installare il firewall deduce **la subnet locale** dalla route
+IPv4 predefinita. Se il PC ha VPN o piu' schede, indicare la route giusta con
+`-PeerAddress 192.168.0.28`; per controllo completo usare
+`-AllowedSubnet 192.168.0.0/24`. Il solo script
+`moonlight-windows-settings.ps1`, invece, modifica preferenze locali di
+Moonlight e non dipende da rete, IP o Omarchy.
+
+```powershell
+.\kde-connect-windows-setup.ps1 -Show
+.\kde-connect-windows-setup.ps1 -ConfigureFirewall
+.\kde-connect-windows-setup.ps1 -ConfigureFirewall -PeerAddress 192.168.0.28
+.\kde-connect-windows-setup.ps1 -ConfigureFirewall -AllowedSubnet 192.168.0.0/24
+```
+
 ### Personalizzare Hyprland per il tuo utente
 
 Le personalizzazioni vivono in `~/.config/hypr/` dell'utente `daubog44`, non
@@ -240,6 +259,25 @@ o.launch_on_start("mio-servizio")
 -- looknfeel.lua
 hl.config({ animations = { enabled = false } })
 ```
+
+Omarchy usa qui la configurazione **Lua**, non i tradizionali file
+`hyprland.conf`: `hyprland.lua` carica moduli Lua e questi invocano l'API di
+Hyprland. La forma equivalente alla sintassi `.conf`
+`input { kb_options = caps:super }` e' quindi:
+
+```lua
+-- input.lua
+hl.config({
+  input = {
+    kb_options = "caps:super", -- Caps Lock si comporta come Super
+  },
+})
+```
+
+Questa proprieta' sostituisce altre eventuali opzioni tastiera personali: se
+servono piu' opzioni, scriverle nella stessa stringa separate da virgola, per
+esempio `"caps:super,compose:ralt"`. Nel setup corrente l'override e' stato
+aggiunto in `~/.config/hypr/input.lua`, lasciando intatti i default Omarchy.
 
 Non modificare manualmente il blocco delimitato `omarchy-gtx` in
 `monitors.lua`: e' gestito idempotentemente da `omarchy-gtx-primary` e dalla

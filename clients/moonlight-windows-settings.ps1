@@ -4,7 +4,8 @@ param(
     [string] $Mode = 'MoonlightDefault',
     [ValidateRange(1, 150)]
     [Nullable[int]] $BitrateMbps,
-    [switch] $Show
+    [switch] $Show,
+    [switch] $CloseMoonlight
 )
 
 <#
@@ -24,6 +25,7 @@ param(
   .\moonlight-windows-settings.ps1 -Show
   .\moonlight-windows-settings.ps1
   .\moonlight-windows-settings.ps1 -Mode Fixed -BitrateMbps 40
+  .\moonlight-windows-settings.ps1 -CloseMoonlight
 #>
 
 Set-StrictMode -Version Latest
@@ -115,8 +117,44 @@ function Get-MoonlightSettings {
     }
 }
 
+function Stop-MoonlightForSettings {
+    $processes = @(Get-Process -Name 'Moonlight' -ErrorAction SilentlyContinue)
+    if ($processes.Count -eq 0) {
+        return $true
+    }
+
+    if (-not $CloseMoonlight) {
+        throw 'Moonlight e aperto. Chiudilo prima di cambiare preferenze oppure ripeti con -CloseMoonlight: il client potrebbe altrimenti riscrivere il vecchio valore dal proprio stato in memoria.'
+    }
+
+    if (-not $PSCmdlet.ShouldProcess('Moonlight', 'chiudere gentilmente prima di aggiornare le preferenze')) {
+        return $false
+    }
+
+    foreach ($process in $processes) {
+        if ($process.MainWindowHandle -ne 0) {
+            [void] $process.CloseMainWindow()
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 250
+        $processes = @(Get-Process -Name 'Moonlight' -ErrorAction SilentlyContinue)
+    } while ($processes.Count -gt 0 -and (Get-Date) -lt $deadline)
+
+    if ($processes.Count -gt 0) {
+        throw 'Moonlight non si e chiuso entro 10 secondi. Chiudilo manualmente e ripeti: lo script non forza la terminazione di uno stream attivo.'
+    }
+    return $true
+}
+
 if ($Show) {
     Get-MoonlightSettings | Format-List
+    exit 0
+}
+
+if (-not (Stop-MoonlightForSettings)) {
     exit 0
 }
 
