@@ -282,6 +282,27 @@ servono piu' opzioni, scriverle nella stessa stringa separate da virgola, per
 esempio `"caps:super,compose:ralt"`. Nel setup corrente l'override e' stato
 aggiunto in `~/.config/hypr/input.lua`, lasciando intatti i default Omarchy.
 
+#### Perche' non un file `hyprland.conf` aggiuntivo?
+
+Hyprland 0.56.2 supporta **due parser alternativi**: il formato classico
+Hyprlang (`hyprland.conf`) e Lua (`hyprland.lua`). Il formato classico offre
+`source = file.conf`, ma soltanto quando il parser classico e' quello primario.
+Questa sessione avvia `hyprland.lua`; il test reale di
+`hyprctl keyword source ~/.config/hypr/user.conf` e' stato rifiutato con
+“keyword can't work with non-legacy parsers. Use eval.” Il file `.conf` di
+prova e' stato quindi rimosso: lasciarlo avrebbe fatto credere di avere una
+configurazione attiva quando non lo era.
+
+Non e' corretto costruire un bridge che finga di ricaricare `.conf`: dopo un
+reload Lua perderebbe le modifiche o potrebbe applicarle all'istanza sbagliata.
+Per usare davvero `.conf` bisognerebbe cambiare il file di avvio a
+`hyprland.conf` e migrare **tutti** i moduli Omarchy e l'output GTX headless
+da Lua a Hyprlang; non e' una personalizzazione incrementale e non e' stato
+fatto per non rompere il desktop streaming verificato. Per il setup attuale la
+via supportata e' mantenere i file personali Lua elencati sopra. Il comportamento
+di `source` nel parser classico e' documentato nella [guida Hyprland sui
+keyword](https://wiki.hypr.land/0.52.0/Configuring/Keywords/).
+
 Non modificare manualmente il blocco delimitato `omarchy-gtx` in
 `monitors.lua`: e' gestito idempotentemente da `omarchy-gtx-primary` e dalla
 funzione `omarchy_stream_resolution`. Per modificare solo il fallback usare
