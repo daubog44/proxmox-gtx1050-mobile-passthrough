@@ -377,10 +377,10 @@ def build():
         PageBreak(),
         h("7b. Omarchy: desktop headless GTX e Moonlight"),
         p(
-            "Il 28 agosto 2026 e stato verificato un percorso distinto dal precedente desktop VirtIO: Hyprland usa AQ_DRM_DEVICES=/dev/dri/gtx1050 e AQ_NO_KMS_REQUIREMENT=1, crea l'uscita Wayland headless omarchy-gtx e Sunshine la cattura a 1920x1080/60, scala 1. nvidia-smi pmon ha mostrato Hyprland come processo grafico della GTX; durante il test Moonlight ha mostrato Sunshine con enc=12 e il log ha riportato richieste GBM 1920x1080 e h264_nvenc.",
+            "Il 28 agosto 2026 e stato verificato un percorso distinto dal precedente desktop VirtIO: Hyprland usa AQ_DRM_DEVICES=/dev/dri/gtx1050 e AQ_NO_KMS_REQUIREMENT=1, crea l'uscita Wayland headless omarchy-gtx e Sunshine la cattura a 1920x1200/60, scala 1. Il campione Moonlight HEVC ha mostrato 60.19 FPS, host processing latency 7.6/8.8/7.9 ms e 0% frame persi; nvidia-smi pmon ha mostrato Hyprland come processo grafico della GTX e Sunshine con enc=28. Il mismatch precedente era tra GBM 1920x1080 e il client 1920x1200, quindi la sorgente viene ora fissata e verificata a 1920x1200.",
         ),
         Preformatted(
-            "GTX -> Hyprland -> omarchy-gtx (1920x1080@60)\n"
+            "GTX -> Hyprland -> omarchy-gtx (1920x1200@60)\n"
             "                    -> Sunshine GBM/Wayland -> h264_nvenc o hevc_nvenc -> Moonlight\n"
             "prova: Hyprland nella tabella NVIDIA; Sunshine enc>0 durante lo stream",
             code,
@@ -392,7 +392,7 @@ def build():
             "Il build stabile precedente, compatibile con il driver Pascal 580, aveva SUNSHINE_ENABLE_CUDA=OFF e forzava frame NV12 in RAM per evitare un errore di scala: NVENC restava hardware ma la CPU non era zero. Nel test Sunshine era circa al 51% di una CPU logica, mentre Hyprland circa al 3-4%; htop puo mostrare i thread separati e non devono essere sommati. Il pacchetto Sunshine Arch ufficiale e stato provato e subito annullato: h264_nvenc ha fallito per reference frames non supportati sulla GTX 1050 ed e ricaduto a libx264 software.",
         ),
         p(
-            "Il 28 agosto 2026 e stato compilato in un percorso separato un canary Sunshine con CUDA 12.8 e GCC 14 isolati: compila cuda.cu con --generate-code per sm_61, ha SUNSHINE_ENABLE_CUDA=ON ed e installato in /opt/sunshine-cuda12. La drop-in 29-cuda12-canary.conf lo rende attivo soltanto se Sunshine trova h264_nvenc; puo essere ritirata in modo idempotente da omarchy-sunshine-cuda12-canary rollback. Il probe ha inoltre trovato hevc_nvenc: Sunshine ora rileva automaticamente HEVC e lascia H.264 come fallback, mentre AV1 resta disabilitato perche Pascal non lo codifica in hardware. CUDA non attiva NVENC, ma puo mantenere in VRAM la superficie catturata prima dell'encoder e ridurre copie CPU/RAM. La build e l'avvio sono verificati; zero-copy e la diminuzione di CPU non sono dichiarati finche un stream Moonlight non fornisce un campione runtime. CUDA 13 non puo compilare offline per Pascal compute capability 6.1. Il risultato documentato e quindi: desktop GTX, Full HD/60, NVENC verificato; CPU nulla e 2K nativo non sono dichiarati ottenuti.",
+            "Il 28 agosto 2026 e stato compilato in un percorso separato un canary Sunshine con CUDA 12.8 e GCC 14 isolati: compila cuda.cu con --generate-code per sm_61, ha SUNSHINE_ENABLE_CUDA=ON ed e installato in /opt/sunshine-cuda12. La drop-in 29-cuda12-canary.conf lo rende attivo soltanto se Sunshine trova h264_nvenc; puo essere ritirata in modo idempotente da omarchy-sunshine-cuda12-canary rollback. Il probe ha inoltre trovato hevc_nvenc: Sunshine ora rileva automaticamente HEVC e lascia H.264 come fallback, mentre AV1 resta disabilitato perche Pascal non lo codifica in hardware. CUDA non attiva NVENC, ma puo mantenere in VRAM la superficie catturata prima dell'encoder e ridurre copie CPU/RAM. Il campione runtime prova HEVC/NVENC; non dichiara zero-copy o una riduzione CPU finche non viene confrontato con un campione equivalente. Il preset P3 e mantenuto: 7.9 ms host e zero drop non richiedono P2/P1. CUDA 13 non puo compilare offline per Pascal compute capability 6.1.",
         ),
     ]
     story += [h("8. Estrazione della VBIOS OEM")]

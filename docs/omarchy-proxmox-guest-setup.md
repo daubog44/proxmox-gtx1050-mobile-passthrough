@@ -17,8 +17,8 @@ GTX PCI passthrough
     -> Hyprland renderizza su /dev/dri/gtx1050
     -> output Wayland virtuale omarchy-gtx
     -> Sunshine cattura l'output
-    -> NVENC H.264 della GTX codifica
-    -> Moonlight riceve 1920x1080 a 60 Hz
+    -> NVENC H.264/HEVC della GTX codifica
+    -> Moonlight riceve 1920x1200 a 60 Hz
 ```
 
 La console noVNC e il desktop sono distinti: VirtIO puo' restare come recupero,
@@ -100,6 +100,7 @@ encoder = nvenc
 hevc_mode = 0
 av1_mode = 1
 adapter_name = /dev/dri/gtx1050
+nvenc_preset = 3
 ```
 
 `wlr` cattura Wayland; `adapter_name` seleziona la GTX; `encoder = nvenc`
@@ -112,13 +113,17 @@ questo probe ha trovato `hevc_nvenc`, quindi Moonlight puo' usare HEVC per una
 qualita' migliore allo stesso bitrate. H.264 rimane il fallback piu'
 compatibile. `av1_mode = 1` disabilita AV1: la GTX 1050 Pascal non possiede
 un encoder AV1 hardware; pubblicizzarlo causerebbe un fallback software.
+`nvenc_preset = 3` mantiene qualita' a pari bitrate senza penalizzare il
+campione misurato: HEVC ha mostrato 7.9 ms di latenza host media e 0% drop.
+P1/P2 sono opzioni per un problema reale di encoding, non una cura per bande
+nere dovute a una risoluzione diversa dalla superficie catturata.
 
 `~/.config/hypr/monitors.lua` riceve un blocco gestito unico:
 
 ```lua
 -- BEGIN sunshine-virtual-display (managed locally)
 -- GTX-only Wayland output for Sunshine/Moonlight; no VirtIO display ownership.
-hl.monitor({ output = "omarchy-gtx", mode = "1920x1080@60", position = "0x0", scale = 1 })
+hl.monitor({ output = "omarchy-gtx", mode = "1920x1200@60", position = "0x0", scale = 1 })
 -- END sunshine-virtual-display
 ```
 
@@ -135,6 +140,25 @@ L'helper attende la sessione Hyprland, ricava la firma dinamica della sessione,
 crea `omarchy-gtx` solo se assente, ricarica le regole e verifica l'output
 prima di permettere a Sunshine di partire. Questo evita la gara di avvio che
 causava catture nere/corrotte dopo boot o restart.
+
+`prepare-headless` installa anche due funzioni nel blocco gestito di
+`~/.bashrc` e i rispettivi eseguibili in `~/.local/bin`:
+
+```bash
+# Cambio persistente/idempotente: aggiorna omarchy-gtx e riavvia Sunshine.
+# Il Desktop Moonlight corrente viene chiuso e va riaperto.
+omarchy_stream_resolution 1920x1200@60
+
+# Durante Desktop Moonlight: rende visibili NVENC, GBM e fallback.
+omarchy_stream_health watch
+```
+
+La funzione riscrive soltanto il blocco delimitato in `monitors.lua`, ricarica
+Hyprland e non forza un connettore HDMI. Eseguire di nuovo lo stesso comando
+non duplica regole; per usare il comando con trattini senza riaprire la shell:
+`omarchy-stream-resolution 1920x1200@60`. Anche un successivo
+`prepare-headless` conserva una modalita' valida gia' scelta: 1920x1200@60 e'
+il default solo della prima installazione.
 
 ## 4. Applicazione, verifica e rollback
 
@@ -169,21 +193,22 @@ SSDT e `fw_cfg` della sorgente prima della destinazione.
 
 ## 5. Prova end-to-end riproducibile
 
-Aprire `Desktop` da Moonlight a 1080p/60 e muovere finestre per alcuni secondi.
-Quindi nel guest:
+Impostare Moonlight a 1920x1200/60, aprire `Desktop` e muovere finestre per
+alcuni secondi. Dopo un cambio modalita' lo stream viene chiuso
+intenzionalmente: riaprire Desktop prima della verifica. Quindi nel guest:
 
 ```bash
 sudo /usr/local/sbin/omarchy-gtx-primary status-runtime
 journalctl --user -u app-dev.lizardbyte.app.Sunshine.service --since '2 minutes ago' --no-pager \
-  | grep -E 'GBM request|h264_nvenc|CLIENT CONNECTED'
-nvidia-smi pmon -c 1
+  | grep -E 'GBM request|h264_nvenc|hevc_nvenc|CLIENT CONNECTED|libx264|scale frame'
+omarchy_stream_health watch
 ps -eo pid,nlwp,pcpu,pmem,rss,comm,args --sort=-pcpu | head -n 15
 ```
 
 Atteso:
 
 ```text
-Monitor omarchy-gtx ... 1920x1080@60 ... scale 1
+Monitor omarchy-gtx ... 1920x1200@60 ... scale 1
 Hyprland ... G                   # compositor sulla GPU 0
 sunshine  ... C+G ... enc > 0    # cattura e NVENC durante stream
 Found H.264 encoder: h264_nvenc [nvenc]
@@ -244,7 +269,7 @@ diventa attivo o non rileva `h264_nvenc`. Anche con il canary attivo, la prova
 del vero percorso CUDA e della CPU inferiore richiede un stream Moonlight
 reale; build e avvio da soli non la dimostrano.
 
-Per la storia dei frame corrotti VirtIO--NVIDIA, dello stream Full HD e dei
+Per la storia dei frame corrotti VirtIO--NVIDIA, dello stream 1920x1200/HEVC e dei
 limiti verificati, vedere [Sunshine/Moonlight su Omarchy](sunshine-moonlight-omarchy.md).
 Le modifiche di codice, una per una, sono in
 [patch Sunshine e CUDA](sunshine-patch-breakdown.md).

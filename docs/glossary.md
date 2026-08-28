@@ -90,6 +90,31 @@ Questo glossario separa termini che spesso vengono confusi. I riferimenti nel te
 | **SAM FreeRDP** | Database NTLM interno della libreria FreeRDP, non `/etc/passwd` Linux. L'errore SAM durante il secondo tratto segnala una negoziazione NLA errata, non un problema NVIDIA. |
 | **`gsd-sharing` / `system_service_running`** | Plugin di GNOME Settings Daemon che avvia/ferma servizi della sessione. Il flag e' vero quando il daemon RDP di sistema e' attivo; il backport lo controlla prima di fermare il daemon di hand-over. |
 
+## Streaming Wayland, Sunshine e Moonlight su Omarchy
+
+| Termine | Significato pratico nel setup Omarchy |
+| --- | --- |
+| **Hyprland** | Compositor Wayland: compone finestre e desktop in un'immagine finale. Non e' un server RDP e non codifica video; nel setup renderizza sulla GTX grazie a `AQ_DRM_DEVICES`. |
+| **Aquamarine / `AQ_DRM_DEVICES`** | Aquamarine e' il backend grafico usato da Hyprland. La variabile indica quale DRM device usare come renderer. Qui `/dev/dri/gtx1050` impedisce che Hyprland scelga VirtIO. |
+| **`AQ_NO_KMS_REQUIREMENT=1`** | Permette a Hyprland di iniziare senza un connettore fisico NVIDIA collegato. Non crea HDMI e non rende VirtIO una GTX: permette un compositor render-only/headless, dal quale poi viene creato un output virtuale. |
+| **headless** | Letteralmente "senza schermo fisico". In questo progetto Hyprland crea un display virtuale Wayland chiamato `omarchy-gtx`; Moonlight visualizza quel display attraverso Sunshine. Non ci si collega direttamente al display con RDP. |
+| **`omarchy-gtx`** | Nome dell'output Wayland virtuale creato da `hyprctl output create headless omarchy-gtx`. La regola in `monitors.lua` gli assegna risoluzione, refresh e scala. Deve esistere prima dell'avvio di Sunshine. |
+| **DRM node / render node** | File in `/dev/dri/` che identifica una GPU per programmi grafici. L'alias `/dev/dri/gtx1050` punta alla GTX passata alla VM; selezionarlo evita il salto VirtIO -> NVIDIA. |
+| **KMS** | *Kernel Mode Setting*: configura un connettore fisico, una risoluzione e un refresh. La GTX MUXless non ha un connettore guest utile; per questo non si forza HDMI con un EDID finto e si usa un output headless. |
+| **DMA-BUF** | Descrittore Linux con cui due processi/driver possono condividere un buffer grafico. Non e' garanzia universale: inizialmente VirtIO produceva il buffer e NVIDIA tentava di importarlo, causando `Couldn't import RGB Image: 0000300C`. |
+| **GBM** | *Generic Buffer Management*: API DRM per allocare buffer grafici sulla GPU scelta. Sunshine la usa nella cattura Wayland; il log `GBM request: 1920x1200` prova la dimensione della superficie richiesta, non da solo il codec. |
+| **EGL** | API che collega un contesto grafico a un sistema di buffer nativo come GBM. Nella patch Sunshine, EGL viene creato sul render node risolto della GTX anziche' su un display Wayland implicito che poteva appartenere a VirtIO. |
+| **`wlr`** | Backend di Sunshine per cattura Wayland tramite il protocollo `wlr-screencopy`. E' idoneo agli output virtuali di Hyprland; non significa che si stia usando X11, RDP o NVFBC. |
+| **Sunshine** | Server che cattura il desktop Wayland, prepara i frame e li invia a Moonlight. In questa VM usa `capture = wlr`, `adapter_name = /dev/dri/gtx1050` ed `encoder = nvenc`. |
+| **Moonlight** | Client Windows che richiede uno stream a Sunshine, decodifica HEVC/H.264 e presenta l'immagine. Il suo overlay (`Ctrl+Alt+Shift+S`) misura FPS, codec, drop e latenza end-to-end. |
+| **NVENC** | Blocco hardware NVIDIA che comprime H.264 o HEVC. E' distinto dai core CUDA. `nvidia-smi pmon` con `sunshine` e `enc > 0` prova che il blocco NVENC sta lavorando nel campione corrente. |
+| **`enc`** | Colonna di `nvidia-smi pmon`: percentuale istantanea del motore encoder. Un numero positivo durante `Desktop` Moonlight prova NVENC; `-` o zero con nessun client non prova alcun fallback, puo' significare semplicemente inattivita'. |
+| **H.264 / HEVC (H.265)** | Codec video. H.264 e' il fallback piu' compatibile; HEVC offre in genere piu' qualita' a pari bitrate. Sulla GTX 1050 il probe ha trovato `h264_nvenc` e `hevc_nvenc`; AV1 resta disabilitato perche' Pascal non lo codifica in hardware. |
+| **CUDA / `sm_61`** | CUDA e' l'API di calcolo NVIDIA. `sm_61` e' la compute capability Pascal della GTX 1050. Il canary Sunshine CUDA 12.8 compila `cuda.cu` per `sm_61` per provare a evitare la copia intermedia in RAM; CUDA non e' cio' che attiva NVENC. |
+| **fallback RAM** | Percorso compatibile storico: `GTX -> RAM di sistema -> upload FFmpeg -> NVENC GTX`. NVENC rimane hardware (`enc > 0`) ma copie e conversioni impegnano piu' CPU. E' diverso da `libx264`, dove la CPU codifica il video. |
+| **`libx264` fallback** | Vera codifica software H.264 sulla CPU. E' un problema se appare nel journal di uno stream: il comando `omarchy_stream_health watch` lo segnala esplicitamente insieme agli errori di import/scala. |
+| **P1/P2/P3** | Preset NVENC: P1 e' il piu' veloce, P3 sacrifica una piccola parte della latenza per migliore compressione/qualita'. Nel campione HEVC P3 documentato la latenza host media era 7.9 ms e i drop rete erano 0%, quindi non e' giustificato abbassarlo solo per le bande nere. |
+
 ## Secure Boot e chiavi
 
 | Termine | Significato pratico |
@@ -118,6 +143,7 @@ Il glossario non è una lista copiata da una guida generica. Ogni famiglia di te
 | Q35, `hostpci`, `rombar`, OVMF e QGA | Configurazione Proxmox e comportamento dello script `gpu-vm-switch` |
 | SSDT, ASL, AML, `_ROM` e `fw_cfg` | ASL generata, compilazione/disassemblaggio `iasl` e documentazione QEMU/ACPI |
 | Optimus, driver, VRAM e benchmark | `nvidia-smi`, Xorg `:2`, `nvtop` e `nvidia-glxgears` |
+| Hyprland headless, EGL/GBM, NVENC e HEVC | `AQ_DRM_DEVICES`, `monitors.lua`, journal `GBM request`, `nvidia-smi pmon`, overlay Moonlight e documentazione Sunshine |
 | Secure Boot e MOK | `mokutil` sul guest, codice OVMF/Proxmox analizzato e documentazione NVIDIA/Proxmox |
 
 ~~~bash

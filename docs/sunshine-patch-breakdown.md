@@ -59,6 +59,22 @@ egl_display = egl::make_display(gbm.get());
 Questa patch risolve robustezza e attribuzione del device; non e' una promessa
 che tutti i buffer di ogni coppia di driver possano essere condivisi.
 
+### Quali file C++ sono stati modificati davvero
+
+Le modifiche di codice applicativo Sunshine sono limitate a questi file della
+sorgente Sunshine usata per il build:
+
+| File | Modifica | Perche' |
+| --- | --- | --- |
+| `src/platform/linux/wayland.cpp` | Log della richiesta GBM e retry `GBM_BO_USE_LINEAR`. | Rende misurabile la superficie catturata e gestisce l'allocazione che rifiuta il primo flag. |
+| `src/platform/linux/wlgrab.cpp` | Apre il render node, crea GBM su quel FD e crea EGL su GBM. | Impedisce che EGL/GBM venga associato implicitamente a VirtIO invece che alla GTX. |
+| `src/video.cpp` | Solo nella patch storica RAM: disabilita input CUDA e usa NV12/P010 in RAM. | Stabilizza il vecchio build, ma aumenta copie CPU/RAM. Il canary CUDA non applica questa modifica. |
+
+`src/platform/linux/cuda.cu` viene compilato nel canary CUDA ma non e' stato
+riscritto da una patch del laboratorio. La patch `sm_61` modifica CMake, non
+codice C++ runtime; la patch `noexcept` modifica intestazioni CUDA estratte,
+non i sorgenti Sunshine.
+
 ## 3. Patch storica che usa la RAM - e perche' il canary NON la usa
 
 File: [`sunshine-linux-nvenc-system-memory-input.patch`](../patches/sunshine-linux-nvenc-system-memory-input.patch).

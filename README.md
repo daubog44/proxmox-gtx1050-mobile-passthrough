@@ -195,9 +195,9 @@ Per il PCI ID di questo progetto (`10de:1c8d`) lo script cerca esplicitamente il
 
 ### Omarchy: desktop Wayland e Moonlight sulla GTX, senza assumere un monitor fisico
 
-La GTX mobile di questa VM non ha un connettore HDMI/DP guest collegato. Non forzare un EDID sul connettore disconnesso: il test ha lasciato il guest non raggiungibile e i parametri sono stati rimossi. La soluzione verificata usa invece Hyprland in modalita' headless sulla GTX e un'uscita Wayland virtuale `omarchy-gtx` a 1920x1080/60. Durante Moonlight `nvidia-smi pmon` mostra sia `Hyprland` sia `sunshine` sulla GTX e `enc>0` per NVENC. I file PVE e guest, il loro significato e la prova riproducibile sono in [setup Omarchy PVE/guest](docs/omarchy-proxmox-guest-setup.md).
+La GTX mobile di questa VM non ha un connettore HDMI/DP guest collegato. Non forzare un EDID sul connettore disconnesso: il test ha lasciato il guest non raggiungibile e i parametri sono stati rimossi. La soluzione verificata usa invece Hyprland in modalita' headless sulla GTX e un'uscita Wayland virtuale `omarchy-gtx` a 1920x1200/60. Durante Moonlight il campione HEVC ha mostrato 60.19 FPS, 7.9 ms di latenza host media, 0% drop e `sunshine enc=28` in `nvidia-smi pmon`: NVENC e' quindi attivo. I file PVE e guest, il loro significato, il comando idempotente di risoluzione e la prova riproducibile sono in [setup Omarchy PVE/guest](docs/omarchy-proxmox-guest-setup.md).
 
-Lo strumento guest idempotente e' [scripts/omarchy-gtx-primary](scripts/omarchy-gtx-primary): crea l'uscita prima di Sunshine, conserva i backup e offre verifica e rollback. Non cambia VFIO, VBIOS, SSDT, kernel o Limine. La guida completa, inclusa la spiegazione della CPU residua (`GPU -> RAM -> GPU` nel build compatibile), la prova del fallimento del pacchetto Sunshine ufficiale e i comandi riproducibili e' in [Sunshine/Moonlight su Omarchy](docs/sunshine-moonlight-omarchy.md).
+Lo strumento guest idempotente e' [scripts/omarchy-gtx-primary](scripts/omarchy-gtx-primary): crea l'uscita prima di Sunshine, conserva i backup, installa le funzioni Bash `omarchy_stream_resolution` e `omarchy_stream_health` e offre verifica, controllo fallback e rollback. Non cambia VFIO, VBIOS, SSDT, kernel o Limine. La guida completa, inclusa la cronologia RDP -> Sunshine -> HEVC, la spiegazione della CPU residua (`GPU -> RAM -> GPU` nel build compatibile), la prova del fallimento del pacchetto Sunshine ufficiale e i comandi riproducibili e' in [Sunshine/Moonlight su Omarchy](docs/sunshine-moonlight-omarchy.md).
 
 ## Uso quotidiano dello switch
 
@@ -466,7 +466,7 @@ docs/glossary.md                  glossario esteso di tutti i termini
 docs/attempts-and-outcomes.md     tentativi falliti, causa e correzione
 docs/rdp-wayland.md               diagnostica RDP: xrdp/X11 e Remote Login GNOME/Wayland
 docs/wayland-nvidia-kms.md        fix KMS, renderer Wayland, VSync, Xorg :2, APT e audio RDP
-docs/sunshine-moonlight-omarchy.md  desktop GTX headless, Moonlight Full HD/NVENC, CPU residua e rollback su Omarchy
+docs/sunshine-moonlight-omarchy.md  desktop GTX headless, Moonlight 1920x1200/HEVC/NVENC, CPU residua e rollback su Omarchy
 docs/omarchy-proxmox-guest-setup.md configurazione PVE/guest Omarchy, file effettivi, verifica e limiti CUDA
 docs/sunshine-patch-breakdown.md    patch Sunshine/CUDA riga per riga, motivazione e confini
 scripts/omarchy-sunshine-cuda12-canary  attivazione/rollback idempotente del build CUDA separato di Sunshine
