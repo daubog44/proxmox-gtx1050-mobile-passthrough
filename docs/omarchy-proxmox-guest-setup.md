@@ -270,13 +270,15 @@ Hyprland. Una rimappatura come `kb_options = "caps:super"` in
 scorciatoia bisogna tenerlo premuto. Non e' il comportamento richiesto in
 questo setup.
 
-#### Caps come toggle Super (senza tenerlo premuto)
+#### Caps come toggle Super, con combinazioni anche a pressione tenuta
 
 Il comportamento desiderato e' un **toggle di Super**: premi e rilasci Caps
 una prima volta per bloccare Super; premi e rilasci Caps una seconda volta per
 disattivarlo. Mentre e' attivo, `W` equivale a `Super+W`, `1` a `Super+1` e
-cosi' via. Le scorciatoie Omarchy esistenti continuano quindi a funzionare
-senza copiarle in una tabella Lua.
+cosi' via. Se invece Caps e' tenuto premuto insieme a un tasto, si comporta
+come Super normale solo per quella combinazione e **non cambia** lo stato del
+toggle gia' attivo. Le scorciatoie Omarchy esistenti continuano quindi a
+funzionare senza copiarle in una tabella Lua.
 
 Hyprland/XKB non espone in questa configurazione un toggle Super generico e
 sicuro. E' stato percio' usato [keyd](https://github.com/rvaiya/keyd), che rimappa l'evento nel livello input
@@ -285,26 +287,39 @@ Il file attivo e' di sistema, non in `~/.config/hypr/`:
 
 ```ini
 # /etc/keyd/default.conf
-[global]
-layer_indicator = 1
-
 [ids]
 *
 
 [main]
-capslock = toggle(meta)
+capslock = overload(meta, toggle(meta))
 ```
 
-`meta` e' il nome di keyd per Super. `toggle(meta)` rende il modificatore
-persistente: un primo tap lo attiva, un secondo lo disattiva. Il parametro
-`layer_indicator = 1` accende il LED Caps Lock finche' il layer keyd e' attivo;
-e' un indicatore utile ma tramite Moonlight/Wayland il LED resta best-effort,
-quindi il gesto affidabile per uscire e' sempre un altro tap Caps.
+`meta` e' il nome di keyd per Super. `overload(layer, action)` e' la primitiva
+di keyd che distingue tap e pressione tenuta:
 
-Questa scelta e' diversa da `oneshot(meta)`: quest'ultimo disarmerebbe Super
-dopo il primo tasto seguente. Con il toggle bisogna ricordare di spegnere Super
-prima di scrivere testo normale, altrimenti le lettere successive possono
-attivare scorciatoie anziche' essere digitate.
+```text
+Caps premuto + rilasciato, senza altro tasto
+  -> esegue action: toggle(meta)
+  -> Super persistente cambia stato (on/off)
+
+Caps tenuto + W (o qualunque altro tasto)
+  -> attiva temporaneamente layer: meta
+  -> Hyprland riceve Super+W solo per la combinazione
+  -> non esegue toggle(meta), quindi il latch resta nello stato precedente
+```
+
+Questa configurazione risolve il conflitto del semplice `toggle(meta)`, che
+non sapeva distinguere il tap da una combinazione tenuta. E' diversa da
+`oneshot(meta)`: quest'ultimo disarmerebbe Super dopo il primo tasto seguente.
+Con il toggle persistente bisogna comunque spegnere Super prima di digitare
+testo normale, altrimenti le lettere successive possono attivare scorciatoie
+anziche' essere digitate.
+
+Non e' stato mantenuto `layer_indicator = 1`. Quella opzione keyd modifica il
+LED Caps Lock per indicare il layer attivo; Omarchy usa Caps come Compose e
+avvia Fcitx5, quindi il cambiamento LED puo' produrre un OSD di input/layout
+fastidioso nel client. Non serve al funzionamento del toggle ed e' stato
+rimosso.
 
 La precedente riga `kb_options = "caps:super"` in `input.lua` e il precedente
 bind Lua `SUPER + SUPER_L` in `bindings.lua` sono stati rimossi: mantenere due

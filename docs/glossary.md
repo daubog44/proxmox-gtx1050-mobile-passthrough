@@ -97,12 +97,13 @@ Questo glossario separa termini che spesso vengono confusi. I riferimenti nel te
 **keyd** e' un demone di rimappatura del keyboard input: legge gli eventi
 prima del compositor e presenta una tastiera virtuale rimappata a Hyprland. Nel
 guest Omarchy il file `/etc/keyd/default.conf` contiene
-`capslock = toggle(meta)`. Il primo tap di Caps blocca **Super**, il secondo
-tap lo sblocca; mentre e' attivo, `W` equivale a `Super+W` senza dover tenere
-Caps premuto. `layer_indicator = 1` prova ad accendere il LED Caps Lock mentre
-il layer e' attivo. Prima di digitare testo bisogna spegnerlo con un altro tap
-Caps, altrimenti le lettere possono diventare scorciatoie. Questo e' diverso
-sia da `oneshot(meta)`, che si disarma dopo un tasto, sia da
+`capslock = overload(meta, toggle(meta))`. Al tap Caps esegue
+`toggle(meta)`: primo tap blocca **Super**, secondo tap lo sblocca. Se pero'
+Caps e' tenuto mentre si preme un altro tasto, `overload` attiva il layer
+`meta` solo per quella combinazione e lascia invariato il toggle persistente.
+Prima di digitare testo bisogna spegnere Super con un altro tap Caps, altrimenti
+le lettere possono diventare scorciatoie. Questo e' diverso sia da
+`oneshot(meta)`, che si disarma dopo un tasto, sia da
 `kb_options = "caps:super"`, che crea un modificatore Super classico da tenere
 premuto.
 
