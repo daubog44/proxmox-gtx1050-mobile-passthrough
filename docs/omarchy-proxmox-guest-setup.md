@@ -282,6 +282,30 @@ servono piu' opzioni, scriverle nella stessa stringa separate da virgola, per
 esempio `"caps:super,compose:ralt"`. Nel setup corrente l'override e' stato
 aggiunto in `~/.config/hypr/input.lua`, lasciando intatti i default Omarchy.
 
+Un tasto **Super e' un modificatore**, non un comando visibile da solo: va
+tenuto premuto mentre si usa il secondo tasto. Per esempio `Caps+Space` apre il
+menu Omarchy, `Caps+Invio` un terminale e `Caps+1` passa al workspace 1. Se si
+rilascia Caps prima di premere la lettera, la lettera viene correttamente
+scritta nell'app attiva; e' lo stesso comportamento del tasto Windows.
+
+Per avere anche un'azione quando si preme e rilascia **solo** Caps, il setup
+corrente aggiunge in `~/.config/hypr/bindings.lua`:
+
+```lua
+-- Caps da solo: menu; Caps tenuto premuto: modificatore Super normale.
+hl.bind("SUPER + SUPER_L", hl.dsp.exec_cmd("omarchy-menu toggle"), {
+  release = true,
+  description = "Open Omarchy menu with Caps Lock",
+})
+```
+
+`SUPER_L` e' il tasto logico emesso dalla rimappatura XKB; `SUPER` a sinistra
+e' il modificatore richiesto. Il flag `release = true` evita l'apertura del
+menu al semplice key-down. Il bind e la mappatura sono stati verificati nella
+sessione attiva (`kb_options = caps:super`, nessun errore di configurazione).
+La sintassi per i modificatori da soli e' documentata nella [guida ufficiale
+ai bind Lua](https://wiki.hypr.land/Configuring/Basics/Binds/).
+
 #### Perche' non un file `hyprland.conf` aggiuntivo?
 
 Hyprland 0.56.2 supporta **due parser alternativi**: il formato classico
