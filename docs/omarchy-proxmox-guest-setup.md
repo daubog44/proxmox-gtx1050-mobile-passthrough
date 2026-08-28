@@ -318,51 +318,13 @@ Con il toggle persistente bisogna comunque spegnere Super prima di digitare
 testo normale, altrimenti le lettere successive possono attivare scorciatoie
 anziche' essere digitate.
 
-`layer_indicator = 1` viene mantenuto: invia lo stato del LED Caps Lock al
-client, cosi' il LED fisico del laptop Windows indica che il Super persistente
-e' attivo. La semantica standard di keyd pero' accende il LED per **ogni**
-layer attivo, compreso il layer temporaneo di `Caps+W`; sarebbe fuorviante.
-
-Per questo guest e' in uso una micro-patch riproducibile di keyd 2.6.0:
-[`keyd-layer-indicator-latched-only.patch`](../patches/keyd-layer-indicator-latched-only.patch).
-Nel file sorgente `src/daemon.c` sostituisce il controllo:
-
-```c
-/* upstream: il LED segue qualsiasi layer attivo */
-kbd->layer_state[i].active
-
-/* patch locale: il LED segue solo un layer bloccato dal toggle */
-kbd->layer_state[i].toggled
-```
-
-Il binario patchato e' `/usr/local/lib/keyd-latched-led/keyd`; l'override
-`/etc/systemd/system/keyd.service.d/10-latched-led.conf` lo seleziona senza
-sostituire `/usr/bin/keyd` gestito da Pacman. Risultato previsto: tap Caps
-accende/spegne il LED; `Caps` tenuto con una scorciatoia non lo accende se il
-toggle non era gia' attivo. Verifica riproducibile:
-
-```bash
-systemctl cat keyd.service
-ps -C keyd -o pid,args
-sudo /usr/local/lib/keyd-latched-led/keyd check /etc/keyd/default.conf
-```
-
-Per tornare al binario Pacman, rimuovere il solo override e riavviare il
-servizio:
-
-```bash
-sudo rm /etc/systemd/system/keyd.service.d/10-latched-led.conf
-sudo systemctl daemon-reload
-sudo systemctl restart keyd.service
-```
-
-L'OSD centrale non viene da Windows in generale ne' dal guest: sul client
-esegue `FnHotkeyCapsLKNumLK.exe`, figlio del servizio **Lenovo Fn and function
-keys service**. Reagisce ai cambi LED Caps che qui sono intenzionali. Se
-Lenovo Vantage e' disponibile, disattivare soltanto *CapsLk OSD* in *Device >
-Media > Input & Accessories*; in alternativa disabilitare quel servizio
-elimina l'OSD ma puo' togliere anche funzioni Fn Lenovo. Il servizio non e'
-stato disabilitato automaticamente.
+`layer_indicator = 1` inoltra lo stato del LED Caps Lock al client. Il keyd
+standard accende il LED per **ogni** layer attivo, incluso quello temporaneo di
+`Caps+W`: non puo' distinguere nativamente un Super mantenuto dal semplice uso
+di una scorciatoia. Non viene quindi applicata alcuna patch locale a keyd: il
+guest usa il binario Pacman `/usr/bin/keyd`. L'OSD visuale e il LED del laptop
+sono invece gestiti dal client Windows/Lenovo e vanno risolti lato client,
+separatamente dalla configurazione del guest.
 
 La precedente riga `kb_options = "caps:super"` in `input.lua` e il precedente
 bind Lua `SUPER + SUPER_L` in `bindings.lua` sono stati rimossi: mantenere due

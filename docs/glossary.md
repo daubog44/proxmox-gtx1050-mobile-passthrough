@@ -101,9 +101,6 @@ guest Omarchy il file `/etc/keyd/default.conf` contiene
 `toggle(meta)`: primo tap blocca **Super**, secondo tap lo sblocca. Se pero'
 Caps e' tenuto mentre si preme un altro tasto, `overload` attiva il layer
 `meta` solo per quella combinazione e lascia invariato il toggle persistente.
-La patch locale `keyd-layer-indicator-latched-only.patch` fa seguire il LED
-Caps soltanto a un layer `toggled`, non al layer temporaneo: Caps tenuto per
-una scorciatoia non deve accendere il LED se il Super persistente era spento.
 Prima di digitare testo bisogna spegnere Super con un altro tap Caps, altrimenti
 le lettere possono diventare scorciatoie. Questo e' diverso sia da
 `oneshot(meta)`, che si disarma dopo un tasto, sia da

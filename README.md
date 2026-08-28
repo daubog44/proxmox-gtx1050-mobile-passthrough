@@ -16,6 +16,10 @@ Questa guida usa sempre tre contesti. Leggerli evita l'errore piu comune: lancia
 
 Un blocco che inizia con `# [NODO]` va eseguito come `root` sul server Proxmox. Uno che inizia con `# [VM]` va eseguito dentro la VM indicata, tramite console noVNC o SSH alla VM. `noVNC` e la console grafica nel pannello Proxmox: serve quando devi vedere schermate prima dell'avvio di Linux, come MOK Manager.
 
+> Il popup `abc` di Caps Lock del laptop Lenovo Windows non appartiene a questi
+> tre contesti: e' gestito dal driver locale Lenovo. La diagnosi e la correzione
+> mirata sono in [Caps Lock sul client Lenovo Windows](docs/lenovo-windows-caps.md).
+
 ## Dizionario essenziale: nessun gergo sottinteso
 
 | Termine | Significato semplice | Perche compare qui |
