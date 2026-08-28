@@ -113,6 +113,22 @@ ha un'opzione che lo renda bidirezionale. Per una clipboard reale serve un
 canale indipendente, per esempio KDE Connect dopo pairing manuale dei due
 device.
 
+### NVENC `enc`
+
+`enc` e' l'occupazione percentuale del motore hardware **NVENC** nel campione
+esposto da `nvidia-smi pmon` o NVTOP. Un valore positivo, per esempio 28, 30 o
+38%, prova che Sunshine sta codificando con la GTX. Non e' una velocita' in
+Mbps e non e' l'utilizzo generale della GPU: per quello vanno letti anche
+`sm`, `mem`, FPS, drop e latenza del client.
+
+### Bitrate richiesto
+
+Il **bitrate richiesto** e' il tetto che Moonlight invia all'host nella
+negoziazione, espresso internamente in kbps (40000 = 40 Mbps). Non equivale
+sempre al traffico esatto osservato sulla LAN: encoder e protocollo hanno rate
+control e overhead. In questo progetto il target e' 40 Mbps fissi; si applica
+alla nuova connessione dopo il riavvio del client Moonlight.
+
 ### DLNA e Moonlight
 
 **DLNA** e' un protocollo per riprodurre file multimediali su una TV. Non e'

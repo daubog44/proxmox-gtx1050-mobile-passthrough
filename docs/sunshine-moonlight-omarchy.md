@@ -133,9 +133,27 @@ o un difetto della GPU. Il canary e' reversibile con
   hardware. Forzarlo porterebbe a software encoding o al fallimento.
 
 In Moonlight scegliere HEVC/preferire HEVC, **1920x1200**, 60 FPS e un bitrate
-LAN iniziale di 30--50 Mbit/s. Non forzare HEVC se un client specifico non lo
-decodifica bene: H.264 e' il fallback deliberato. Sunshine raccomanda il
-rilevamento automatico per HEVC/AV1 e documenta i compromessi dei preset NVENC.
+LAN iniziale di 30--50 Mbit/s. Il profilo Windows verificato il 2026-08-28 era
+inizialmente a **23 Mbps** (`bitrate = 23000` in kilobit/s); e' stato portato a
+**40 Mbps fissi** (`40000`, con `autoadjustbitrate = false`). Questo e' il
+bitrate *richiesto* nella successiva negoziazione, non un contatore esatto dei
+byte sul cavo: rate control e overhead possono far variare il traffico reale.
+Chiudere e riaprire Moonlight dopo la modifica, perche' il processo gia'
+avviato conserva le preferenze in memoria. Il valore e' riproducibile con
+[`clients/moonlight-windows-settings.ps1`](../clients/moonlight-windows-settings.ps1):
+
+```powershell
+.\moonlight-windows-settings.ps1 -Show
+.\moonlight-windows-settings.ps1 -BitrateMbps 40
+```
+
+Moonlight salva il bitrate in kbps e lo mostra come Mbps nell'interfaccia; il
+suo sorgente conferma questa conversione e il fatto che l'auto-adjust puo'
+modificare il target. [Moonlight streaming preferences](https://github.com/moonlight-stream/moonlight-qt/blob/master/app/settings/streamingpreferences.cpp),
+[interfaccia bitrate](https://github.com/moonlight-stream/moonlight-qt/blob/master/app/gui/SettingsView.qml).
+Non forzare HEVC se un client specifico non lo decodifica bene: H.264 e' il
+fallback deliberato. Sunshine raccomanda il rilevamento automatico per HEVC/AV1
+e documenta i compromessi dei preset NVENC.
 [Configurazione Sunshine](https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2configuration.html)
 
 ### P3: misurazione e decisione
@@ -151,6 +169,27 @@ risultato LAN a 60 Hz. Per questo la configurazione gestita esplicita
 Provare P2, poi P1, ha senso solo se una nuova misura mostra latenza host
 stabilmente alta o frame persi **dopo** avere corretto risoluzione e rete. Non
 risolve bande nere, schermata corrotta, client in finestra o latenza di rete.
+
+### `enc`: il motore di codifica, non banda e non utilizzo GPU generale
+
+La colonna `enc` di `nvidia-smi pmon` e NVTOP misura la percentuale di tempo
+in cui e' occupato il blocco hardware **NVENC** nell'intervallo di
+campionamento. Esempi osservati durante lo stream HEVC:
+
+```text
+sunshine ... enc=28      # primo campione pmon valido
+sunshine ... enc=30      # campione successivo durante cattura 1920x1200
+NVTOP enc=38%            # stessa metrica, finestra di campionamento diversa
+```
+
+`enc=28` e `enc=38%` non significano 28/38 Mbps, non sono FPS e non sono la
+percentuale globale della GTX. Dicono invece che NVENC ha effettivamente
+codificato frame nel campione: `enc > 0` e' una prova di hardware encoding.
+Il valore varia con scena, codec, bitrate, frame rate e finestra di misura;
+non deve essere 100% per avere uno stream corretto. `sm` e' il motore shader,
+`mem` la memoria GPU e `enc` il blocco encoder dedicato. La qualita' e la
+latenza vanno giudicate insieme all'overlay Moonlight (FPS, drop, host latency),
+non da `enc` isolatamente.
 
 ### Risoluzione dinamica: Moonlight sceglie il formato del nuovo stream
 
@@ -238,12 +277,21 @@ e' confermato dal progetto Moonlight: supporta input text dal client verso host,
 non clipboard host-verso-client. [Moonlight setup guide](https://github.com/moonlight-stream/moonlight-docs/wiki/Setup-Guide),
 [limite GameStream discusso dal progetto](https://github.com/moonlight-stream/moonlight-qt/issues/554).
 
-Per un clipboard bidirezionale reale servono un secondo canale e l'accettazione
-su entrambi i dispositivi: ad esempio KDE Connect (app Windows + pacchetto
-guest + pairing manuale) oppure un servizio di note/file condiviso. Non viene
-installato automaticamente: aggiunge un device fidato e un servizio di rete,
-quindi richiede una scelta esplicita dell'utente. Per file grandi usare una
-cartella condivisa/SFTP: non abusare della clipboard.
+Per un clipboard bidirezionale reale serve un secondo canale. Il setup scelto
+e' **KDE Connect**: `kdeconnect` 26.08.0 e' installato su Omarchy e
+`kdeconnectd` ascolta TCP/UDP 1716; l'installer Windows richiede elevazione e
+deve essere completato/accettato localmente. Poi avvia KDE Connect su Windows,
+seleziona `omarchy`, invia la richiesta di pairing e accettala anche nel guest.
+Abilita il plugin **Clipboard** su entrambi: da quel momento il testo copiato
+in Windows arriva in Omarchy e viceversa, indipendentemente da Moonlight.
+
+Il pairing e' deliberatamente manuale: equivale a fidare un dispositivo con
+accesso agli appunti e richiede la conferma di entrambi i lati. KDE Connect usa
+le porte TCP e UDP 1714--1764 per discovery e comunicazione; se Windows non
+vede Omarchy, consentire l'app sulla rete privata nel firewall. Per file grandi
+usare comunque cartella condivisa/SFTP: la clipboard e' per testo, non per
+trasferimenti. [Download KDE Connect](https://kdeconnect.kde.org/download.html),
+[clipboard e porte](https://userbase.kde.org/KDEConnect/en).
 
 ### TV: Moonlight, non DLNA
 

@@ -165,6 +165,27 @@ comando con trattini senza riaprire la shell:
 `source ~/.bashrc`, non eseguita con `bash ~/.bashrc`: il suo `return` per le
 shell non interattive e' previsto.
 
+### Bitrate, NVENC e clipboard nel client Windows
+
+Il bitrate e' deciso dal **client Moonlight**, non da `sunshine.conf`. Nel
+profilo Windows di questo laboratorio il valore iniziale era 23 Mbps e il
+target e' stato impostato a 40 Mbps fissi per 1920x1200/60 HEVC. Il file
+[`clients/moonlight-windows-settings.ps1`](../clients/moonlight-windows-settings.ps1)
+mostra o imposta il valore in modo riproducibile; Moonlight va chiuso e
+riaperto prima di riconnettersi.
+
+`enc > 0` in `nvidia-smi pmon` o NVTOP prova che Sunshine sta usando NVENC:
+e' la percentuale di occupazione del motore encoder nel suo intervallo di
+misura, non Mbps e non l'utilizzo totale della GTX. In questo setup sono stati
+osservati `enc=28`, `enc=30` e `NVTOP enc=38%`, valori compatibili tra loro.
+
+Moonlight non possiede clipboard bidirezionale; KDE Connect e' il canale
+separato scelto. Il lato Omarchy e' installato e in ascolto sulla porta 1716.
+Completare l'installazione elevata di KDE Connect su Windows, fare pairing
+reciproco e abilitare il plugin Clipboard. La guida con le considerazioni di
+fiducia, firewall e privacy e' in
+[Sunshine/Moonlight su Omarchy](sunshine-moonlight-omarchy.md).
+
 ## 4. Applicazione, verifica e rollback
 
 ```bash

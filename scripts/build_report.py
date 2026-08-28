@@ -395,6 +395,9 @@ def build():
             "Il comando dinamico non usa hyprctl keyword: Omarchy/Hyprland 0.56 usa la configurazione Lua e keyword e un parser legacy che non modifica il monitor. Il test reale di hyprctl eval hl.monitor(...) ha cambiato omarchy-gtx da 1920x1200 a 1920x1080@60 e lo ha ripristinato senza riavvio. Una sola uscita resta condivisa: due client contemporanei non ricevono due risoluzioni indipendenti. GameStream non prevede clipboard guest-verso-client: Ctrl+Alt+Shift+V invia testo dal client al guest; una clipboard bidirezionale richiede un secondo canale fidato. Per TV si usa Moonlight (mirror interattivo/NVENC), non DLNA che serve solo file multimediali.",
         ),
         p(
+            "Il profilo Moonlight Windows era 1920x1200/60 a 23000 kbps; e stato impostato a 40000 kbps (40 Mbps) con auto-adjust disabilitato e va riaperto prima della nuova connessione. E un target di negoziazione, non una misura precisa dei byte sul cavo. NVENC enc=28, enc=30 in nvidia-smi pmon e 38% in NVTOP significano occupazione del motore encoder nelle rispettive finestre di campionamento: enc positivo prova codifica hardware, non Mbps o utilizzo totale della GPU. Per clipboard reale e stato installato KDE Connect 26.08.0 su Omarchy (daemon TCP/UDP 1716); il lato Windows richiede installazione elevata e pairing manuale, indispensabili per autorizzare reciprocamente l'accesso agli appunti.",
+        ),
+        p(
             "Il 28 agosto 2026 e stato compilato in un percorso separato un canary Sunshine con CUDA 12.8 e GCC 14 isolati: compila cuda.cu con --generate-code per sm_61, ha SUNSHINE_ENABLE_CUDA=ON ed e installato in /opt/sunshine-cuda12. La drop-in 29-cuda12-canary.conf lo rende attivo soltanto se Sunshine trova h264_nvenc; puo essere ritirata in modo idempotente da omarchy-sunshine-cuda12-canary rollback. Il probe ha inoltre trovato hevc_nvenc: Sunshine ora rileva automaticamente HEVC e lascia H.264 come fallback, mentre AV1 resta disabilitato perche Pascal non lo codifica in hardware. CUDA non attiva NVENC, ma puo mantenere in VRAM la superficie catturata prima dell'encoder e ridurre copie CPU/RAM. Il campione runtime prova HEVC/NVENC; non dichiara zero-copy o una riduzione CPU finche non viene confrontato con un campione equivalente. Il preset P3 e mantenuto: 7.9 ms host e zero drop non richiedono P2/P1. CUDA 13 non puo compilare offline per Pascal compute capability 6.1.",
         ),
     ]
@@ -460,7 +463,6 @@ def build():
         p("Sunshine app prep commands / client resolution variables: https://github.com/LizardByte/Sunshine/blob/master/docs/app_examples.md", styles["Reference"]),
         p("Hyprland monitors Lua API: https://wiki.hypr.land/Configuring/Basics/Monitors/", styles["Reference"]),
         p("Moonlight setup and text input: https://github.com/moonlight-stream/moonlight-docs/wiki/Setup-Guide", styles["Reference"]),
-        p("GNOME Remote Login: https://teams.pages.gitlab.gnome.org/Websites/help.gnome.org/gnome-help/remote-login.html", styles["Reference"]),
     ]
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     print(OUT)
