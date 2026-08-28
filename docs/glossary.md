@@ -92,17 +92,19 @@ Questo glossario separa termini che spesso vengono confusi. I riferimenti nel te
 
 ## Streaming Wayland, Sunshine e Moonlight su Omarchy
 
-### Keyd e Super one-shot
+### Keyd e Super toggle
 
 **keyd** e' un demone di rimappatura del keyboard input: legge gli eventi
 prima del compositor e presenta una tastiera virtuale rimappata a Hyprland. Nel
 guest Omarchy il file `/etc/keyd/default.conf` contiene
-`capslock = oneshot(meta)`. Un tap di Caps arma **Super** solo per il tasto
-successivo, quindi `Caps`, poi `W` e' `Super+W` senza dover tenere Caps
-premuto. Non e' un Super permanentemente bloccato: dopo quel tasto viene
-automaticamente disarmato, cosi' la digitazione normale non viene trasformata
-in scorciatoie. Questo e' diverso da `kb_options = "caps:super"`, che crea un
-modificatore Super classico da tenere premuto.
+`capslock = toggle(meta)`. Il primo tap di Caps blocca **Super**, il secondo
+tap lo sblocca; mentre e' attivo, `W` equivale a `Super+W` senza dover tenere
+Caps premuto. `layer_indicator = 1` prova ad accendere il LED Caps Lock mentre
+il layer e' attivo. Prima di digitare testo bisogna spegnerlo con un altro tap
+Caps, altrimenti le lettere possono diventare scorciatoie. Questo e' diverso
+sia da `oneshot(meta)`, che si disarma dopo un tasto, sia da
+`kb_options = "caps:super"`, che crea un modificatore Super classico da tenere
+premuto.
 
 ### Risoluzione dinamica di Moonlight
 

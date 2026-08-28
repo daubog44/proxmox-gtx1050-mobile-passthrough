@@ -270,13 +270,13 @@ Hyprland. Una rimappatura come `kb_options = "caps:super"` in
 scorciatoia bisogna tenerlo premuto. Non e' il comportamento richiesto in
 questo setup.
 
-#### Caps come Super *one-shot* (senza tenerlo premuto)
+#### Caps come toggle Super (senza tenerlo premuto)
 
-Il comportamento desiderato e' una forma di **Sticky Keys**: premi e rilasci
-Caps, poi il prossimo tasto riceve Super e la modalita' si disarma. Esempio:
-`Caps`, poi `W` equivale a `Super+W`; `Caps`, poi `1` equivale a `Super+1`.
-Le scorciatoie Omarchy esistenti continuano quindi a funzionare senza copiarle
-in una tabella Lua.
+Il comportamento desiderato e' un **toggle di Super**: premi e rilasci Caps
+una prima volta per bloccare Super; premi e rilasci Caps una seconda volta per
+disattivarlo. Mentre e' attivo, `W` equivale a `Super+W`, `1` a `Super+1` e
+cosi' via. Le scorciatoie Omarchy esistenti continuano quindi a funzionare
+senza copiarle in una tabella Lua.
 
 Hyprland/XKB non espone in questa configurazione un toggle Super generico e
 sicuro. E' stato percio' usato [keyd](https://github.com/rvaiya/keyd), che rimappa l'evento nel livello input
@@ -285,17 +285,26 @@ Il file attivo e' di sistema, non in `~/.config/hypr/`:
 
 ```ini
 # /etc/keyd/default.conf
+[global]
+layer_indicator = 1
+
 [ids]
 *
 
 [main]
-capslock = oneshot(meta)
+capslock = toggle(meta)
 ```
 
-`meta` e' il nome di keyd per Super. `oneshot(meta)` invia Super per **un solo
-tasto seguente**; poi torna a scrivere normalmente. Non usare
-`toggle(meta)` per questo caso: lascerebbe Super bloccato finche' non lo si
-disattiva, cosi' anche digitare una lettera diventerebbe una scorciatoia.
+`meta` e' il nome di keyd per Super. `toggle(meta)` rende il modificatore
+persistente: un primo tap lo attiva, un secondo lo disattiva. Il parametro
+`layer_indicator = 1` accende il LED Caps Lock finche' il layer keyd e' attivo;
+e' un indicatore utile ma tramite Moonlight/Wayland il LED resta best-effort,
+quindi il gesto affidabile per uscire e' sempre un altro tap Caps.
+
+Questa scelta e' diversa da `oneshot(meta)`: quest'ultimo disarmerebbe Super
+dopo il primo tasto seguente. Con il toggle bisogna ricordare di spegnere Super
+prima di scrivere testo normale, altrimenti le lettere successive possono
+attivare scorciatoie anziche' essere digitate.
 
 La precedente riga `kb_options = "caps:super"` in `input.lua` e il precedente
 bind Lua `SUPER + SUPER_L` in `bindings.lua` sono stati rimossi: mantenere due
