@@ -1,35 +1,35 @@
 --- crt/math_functions.h
 +++ crt/math_functions.h
 @@ -5987,9 +5987,9 @@
- 
+
  __func__(double rcbrt(double a));
- 
+
 -__func__(double sinpi(double a));
 +__func__(double sinpi(double a) noexcept (true));
- 
+
 -__func__(double cospi(double a));
 +__func__(double cospi(double a) noexcept (true));
- 
+
  __func__(void sincospi(double a, double *sptr, double *cptr));
- 
+
 @@ -6007,9 +6007,9 @@
- 
+
  __func__(float rcbrtf(float a));
- 
+
 -__func__(float sinpif(float a));
 +__func__(float sinpif(float a) noexcept (true));
- 
+
 -__func__(float cospif(float a));
 +__func__(float cospif(float a) noexcept (true));
- 
+
  __func__(void sincospif(float a, float *sptr, float *cptr));
- 
+
 --- crt/math_functions.hpp
 +++ crt/math_functions.hpp
 @@ -2950,7 +2950,7 @@
   *                                                                              *
   *******************************************************************************/
- 
+
 -__func__(double rsqrt(const double a))
 +__func__(double rsqrt(const double a) noexcept (true))
  {
@@ -38,25 +38,25 @@
 @@ -2979,7 +2979,7 @@
    return t;
  }
- 
+
 -__func__(double sinpi(double a))
 +__func__(double sinpi(double a) noexcept (true))
  {
    int n;
- 
+
 @@ -3009,7 +3009,7 @@
    return a;
  }
- 
+
 -__func__(double cospi(double a))
 +__func__(double cospi(double a) noexcept (true))
  {
    int n;
- 
+
 @@ -3330,7 +3330,7 @@
    return t1;
  }
- 
+
 -__func__(float rsqrtf(const float a))
 +__func__(float rsqrtf(const float a) noexcept (true))
  {
@@ -65,13 +65,13 @@
 @@ -3340,12 +3340,12 @@
    return static_cast<float>(rcbrt(static_cast<double>(a)));
  }
- 
+
 -__func__(float sinpif(const float a))
 +__func__(float sinpif(const float a) noexcept (true))
  {
    return static_cast<float>(sinpi(static_cast<double>(a)));
  }
- 
+
 -__func__(float cospif(const float a))
 +__func__(float cospif(const float a) noexcept (true))
  {

@@ -7,7 +7,7 @@
 -            list(APPEND CMAKE_CUDA_ARCHITECTURES 50 52 53 60 61 62 70 72)
 +            list(APPEND CMAKE_CUDA_ARCHITECTURES 61)
          endif()
- 
+
 +        # Experimental VM build: GTX 1050 Mobile is Pascal SM 6.1. Avoid compiling
 +        # unrelated architectures, which neither this guest nor its driver can execute.
 +        set(CMAKE_CUDA_ARCHITECTURES 61)
