@@ -139,7 +139,7 @@ cattura GTX -> RAM di sistema -> upload FFmpeg -> NVENC GTX
 
 NVENC resta hardware, come prova `enc`, ma la copia/conversione richiede CPU. Questa e' la spiegazione esatta della CPU residua e della differenza fra “la GTX codifica” e “ogni pixel resta sempre in VRAM”.
 
-### Alternative CUDA provate e limite attuale
+### CUDA: cosa elimina il giro RAM e come e' stata affrontata la build
 
 Il pacchetto Sunshine Arch ufficiale `2026.516.143833-4` e' stato provato con la stessa uscita GTX. Ha rifiutato `h264_nvenc` sulla GTX 1050 con:
 
@@ -149,9 +149,75 @@ Provided device doesn't support required NVENC features
 Found H.264 encoder: libx264 [software]
 ```
 
-E' stato immediatamente rimosso il solo override `26-official-sunshine.conf` e ripristinato il build compatibile: non rimane un fallback software attivo.
+E' stato rimosso il solo override temporaneo `26-official-sunshine.conf` e ripristinato il build compatibile: non rimane un fallback software attivo.
 
-Ricompilare il build locale con CUDA eliminerebbe potenzialmente il passaggio RAM, ma non e' una semplice opzione da attivare qui. La sorgente richiede `nvcc`; il repository Arch offre CUDA 13.3 (2.20 GiB da scaricare, 4.71 GiB installati), mentre NVIDIA ha rimosso da CUDA 13 il supporto di compilazione offline per Pascal/compute capability 6.1. Per una GTX 1050 servirebbe una toolchain CUDA **12.x** conservata separatamente, una build sperimentale e una nuova prova di compatibilita'. Non e' stata installata: sarebbe una modifica grande e non verificata. [NVIDIA CUDA 13 release notes](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-toolkit-release-notes/index.html) e [CUDA/driver/architecture matrix](https://docs.nvidia.com/datacenter/tesla/drivers/cuda-toolkit-driver-and-architecture-matrix.html).
+**CUDA non attiva NVENC.** NVENC e' gia' un blocco hardware della GTX e
+`enc > 0` lo dimostra. CUDA offre invece a Sunshine una API per rappresentare
+il frame catturato come superficie GPU: il percorso cercato e'
+
+```text
+cattura GTX -> superficie CUDA in VRAM -> NVENC GTX
+```
+
+invece del percorso stabile `GTX -> RAM -> upload -> NVENC`. Quindi CUDA puo'
+ridurre copie, CPU e latenza, ma la sola compilazione non e' una prova: bisogna
+misurare un vero stream Moonlight.
+
+Il problema e' la generazione della GPU. La GTX 1050 e' Pascal, compute
+capability `sm_61`; CUDA 13 ha rimosso la compilazione offline per Pascal. Per
+questo canary e' stata estratta, senza installarla globalmente, **CUDA 12.8**
+in `/var/tmp/cuda12-8-toolchain`. La build e' limitata a `sm_61`: non spreca
+tempo/spazio per architetture che questa GTX non puo' eseguire.
+
+La guest Arch/Omarchy attuale aggiunge tre incompatibilita' di build che non
+riguardano il passthrough:
+
+1. il GCC di sistema e' 16, oltre il range supportato da CUDA 12.8;
+2. Clang 18 e' supportato da CUDA 12.8, ma con le intestazioni `libstdc++` di
+   GCC 16 fallisce mentre Sunshine compila Boost; `libc++` non e' supportata da
+   CUDA su x86 in questo toolkit;
+3. glibc 2.44 e le intestazioni CUDA 12.8 non concordano sulla specifica
+   `noexcept` di alcune funzioni matematiche.
+
+La soluzione canary e' un GCC 14 estratto in `/var/tmp/gcc14-toolchain` (non
+installato al posto del compilatore di sistema), CUDA 12.8 e il sottoinsieme
+applicabile della patch CUDA 12 di LizardByte, solo alle intestazioni della
+copia temporanea. Non e' stato alterato `/usr/local/cuda`, il driver 580 o il
+binario Sunshine in produzione. Il build ha completato `cuda.cu`, include
+`SUNSHINE_ENABLE_CUDA=ON` e ha linkato un binario di 39 MiB.
+
+Il binario e gli asset del canary sono in `/opt/sunshine-cuda12`. La drop-in
+gestita `29-cuda12-canary.conf` lo seleziona in modo reversibile; al boot
+Sunshine e' `active` e il journal ha confermato:
+
+```text
+Found H.264 encoder: h264_nvenc [nvenc]
+```
+
+Durante il probe degli encoder possono apparire `Multiple reference frames are
+not supported` e `Provided device doesn't support required NVENC features`:
+sono profili di test che Pascal non supporta; Sunshine prosegue al profilo H.264
+compatibile e stampa esplicitamente che quegli errori di test possono essere
+ignorati. Non sono `libx264` e non fanno cadere il servizio.
+
+Per gestire soltanto l'attivazione, senza un download/compilazione non
+riproducibile automatica, esiste
+[`omarchy-sunshine-cuda12-canary`](../scripts/omarchy-sunshine-cuda12-canary):
+
+```bash
+# [GUEST] come root, dopo aver installato il file in /usr/local/sbin
+sudo omarchy-sunshine-cuda12-canary status
+sudo omarchy-sunshine-cuda12-canary activate
+
+# se il test Moonlight non e' valido:
+sudo omarchy-sunshine-cuda12-canary rollback
+```
+
+`activate` e' idempotente: aggiorna solo la propria drop-in, riavvia Sunshine,
+pretende `h264_nvenc` nel journal e altrimenti rimuove la drop-in e ripristina
+automaticamente l'eseguibile precedente. Non cambia PVE, VFIO, VBIOS, SSDT,
+kernel, Limine o la configurazione Moonlight. Le fonti dei limiti Pascal sono
+le [note CUDA 13](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-toolkit-release-notes/index.html), la [matrice CUDA/driver/architettura](https://docs.nvidia.com/datacenter/tesla/drivers/cuda-toolkit-driver-and-architecture-matrix.html) e le [istruzioni di build Sunshine](https://github.com/LizardByte/Sunshine/blob/master/docs/building.md).
 
 Quindi il risultato onesto e':
 
@@ -160,8 +226,9 @@ Quindi il risultato onesto e':
 | Desktop Hyprland renderizzato dalla GTX | verificato (`Hyprland` in `nvidia-smi pmon`) |
 | Output e stream Full HD 60 | verificato (`omarchy-gtx`, richieste GBM 1920x1080) |
 | Codifica NVIDIA | verificata (`h264_nvenc`, `enc>0`) |
-| Zero-copy GTX -> NVENC | non ottenuto; CUDA e' disabilitato nel build compatibile |
-| CPU nulla durante lo stream | non ottenuta; resta la copia RAM del build compatibile |
+| Canary CUDA 12.8 compilato e avviato | verificato (`cuda.cu`, servizio active, `h264_nvenc`) |
+| Zero-copy GTX -> NVENC | da provare end-to-end: il canary contiene CUDA ma serve il test Moonlight/CPU |
+| CPU nulla durante lo stream | non promessa; la misura va fatta durante lo stesso stream |
 | 2K nativo | non supportato dall'output headless attuale |
 
 ## Verifica end-to-end dopo ogni aggiornamento
@@ -184,7 +251,7 @@ Atteso: `Hyprland` e `sunshine` sulla GPU 0; `sunshine` con `enc` non nullo ment
 
 - Questa soluzione e' specifica a questa GTX 1050 Mobile, al driver 580, alla versione Omarchy/Hyprland e al build Sunshine indicato. Non e' una ricetta universale per tutte le GPU mobile.
 - `vga: virtio` ancora presente in QEMU non prova che il desktop la usi; `AQ_DRM_DEVICES` e `nvidia-smi pmon` sono la prova del renderer reale.
-- Non e' stato dichiarato un fix “magico” per CUDA. Il percorso zero-copy resta un lavoro futuro, che richiede CUDA 12.x e test separati; CUDA 13 non e' compatibile con Pascal per la compilazione offline.
+- Il canary CUDA ha superato build e avvio, ma non si dichiara zero-copy finche' Moonlight non produce un campione runtime con `enc > 0`, log CUDA e CPU misurata. CUDA 13 resta incompatibile con Pascal per la compilazione offline.
 - Il passthrough resta esclusivo: la GTX non puo' essere usata contemporaneamente da Omarchy e da un'altra VM.
 
 Vedi anche [tentativi ed esiti](attempts-and-outcomes.md), [architettura VFIO/ACPI](architecture.md) e [runbook riproducibile](reproducible-runbook.md).

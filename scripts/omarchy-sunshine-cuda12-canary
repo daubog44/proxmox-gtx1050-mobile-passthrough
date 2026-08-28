@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Activate or roll back an already-built CUDA Sunshine canary on Omarchy.
+# It intentionally does not download/compile CUDA: that operation is large,
+# version-pinned, and must be validated separately before activation.
+set -Eeuo pipefail
+
+readonly USER_NAME="${SUNSHINE_USER:-daubog44}"
+readonly USER_HOME="/home/$USER_NAME"
+readonly SERVICE='app-dev.lizardbyte.app.Sunshine.service'
+readonly CANDIDATE_BIN="${SUNSHINE_CUDA12_BIN:-/opt/sunshine-cuda12/bin/sunshine}"
+readonly DROPIN_DIR="$USER_HOME/.config/systemd/user/$SERVICE.d"
+readonly DROPIN="$DROPIN_DIR/29-cuda12-canary.conf"
+readonly MARKER='# Managed by omarchy-sunshine-cuda12-canary.'
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+require_root() { (( EUID == 0 )) || die 'eseguire come root'; }
+
+user_systemctl() {
+  local uid
+  uid="$(id -u "$USER_NAME")"
+  runuser -u "$USER_NAME" -- env \
+    XDG_RUNTIME_DIR="/run/user/$uid" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+    systemctl --user "$@"
+}
+
+recent_log() {
+  local uid
+  uid="$(id -u "$USER_NAME")"
+  runuser -u "$USER_NAME" -- env \
+    XDG_RUNTIME_DIR="/run/user/$uid" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+    journalctl --user -u "$SERVICE" --since '2 minutes ago' --no-pager
+}
+
+is_managed_dropin() {
+  [[ -e "$DROPIN" ]] && grep -Fxq "$MARKER" "$DROPIN"
+}
+
+rollback() {
+  require_root
+  if [[ -e "$DROPIN" ]] && ! is_managed_dropin; then
+    die "rifiuto di cancellare una drop-in non gestita: $DROPIN"
+  fi
+  rm -f "$DROPIN"
+  user_systemctl daemon-reload
+  user_systemctl restart "$SERVICE"
+  note 'canary CUDA disattivato: Sunshine usa di nuovo il suo ExecStart precedente'
+}
+
+activate() {
+  require_root
+  [[ -x "$CANDIDATE_BIN" ]] || die "binario CUDA non trovato/eseguibile: $CANDIDATE_BIN"
+  if [[ -e "$DROPIN" ]] && ! is_managed_dropin; then
+    die "drop-in esistente non gestita: $DROPIN"
+  fi
+
+  install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "$DROPIN_DIR"
+  cat >"$DROPIN" <<EOF
+$MARKER
+[Service]
+ExecStart=
+ExecStart=$CANDIDATE_BIN
+EOF
+  chown "$USER_NAME:$USER_NAME" "$DROPIN"
+
+  user_systemctl daemon-reload
+  if ! user_systemctl restart "$SERVICE"; then
+    rollback || true
+    die 'il restart del canary e fallito; ripristinato il servizio precedente'
+  fi
+  sleep 5
+  if ! user_systemctl is-active --quiet "$SERVICE"; then
+    rollback || true
+    die 'canary non active; ripristinato il servizio precedente'
+  fi
+  if ! recent_log | grep -q 'Found H.264 encoder: h264_nvenc \[nvenc\]'; then
+    rollback || true
+    die 'canary avviato ma NVENC non verificato; ripristinato il servizio precedente'
+  fi
+  note 'canary CUDA attivo e h264_nvenc rilevato; verificare un vero stream con status'
+}
+
+status() {
+  require_root
+  printf 'canary drop-in: %s\n' "$(is_managed_dropin && echo active || echo inactive)"
+  printf 'candidate binary: %s\n' "$CANDIDATE_BIN"
+  user_systemctl is-active "$SERVICE"
+  user_systemctl show "$SERVICE" -p ExecStart --value
+  recent_log | grep -Ei 'h264_nvenc|cuda|encoder|GBM request' | tail -n 40 || true
+  nvidia-smi pmon -c 1 || true
+}
+
+usage() {
+  cat <<'EOF'
+Uso: omarchy-sunshine-cuda12-canary <activate|status|rollback>
+
+  activate  seleziona /opt/sunshine-cuda12/bin/sunshine tramite una drop-in
+            systemd utente, riavvia Sunshine e richiede la prova h264_nvenc.
+            Se il servizio o NVENC non sono validi, rimuove la drop-in e
+            ripristina automaticamente l'eseguibile precedente.
+  status    mostra drop-in, eseguibile, log encoder e processi NVIDIA.
+  rollback  rimuove soltanto la drop-in gestita e riavvia Sunshine stabile.
+
+Il programma e' idempotente: activate aggiorna una sola drop-in e rollback
+rimuove solo il proprio file. Non compila, non scarica CUDA e non modifica
+Proxmox, VFIO, VBIOS, SSDT, kernel o configurazione Moonlight.
+
+Prima di activate serve un build CUDA gia installato in
+/opt/sunshine-cuda12/bin/sunshine. Dopo activate aprire Moonlight Desktop e
+usare status durante lo stream: cercare h264_nvenc e enc > 0.
+EOF
+}
+
+case "${1:-}" in
+  activate) activate ;;
+  status) status ;;
+  rollback) rollback ;;
+  -h|--help|'') usage ;;
+  *) die "azione sconosciuta: $1" ;;
+esac

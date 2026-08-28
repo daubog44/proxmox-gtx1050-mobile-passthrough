@@ -182,6 +182,19 @@ def main() -> None:
         ),
         "Sunshine/Moonlight Omarchy",
     )
+    require(
+        (ROOT / "docs" / "omarchy-proxmox-guest-setup.md").read_text(encoding="utf-8"),
+        (
+            "hostpci0",
+            "fw_cfg",
+            "AQ_DRM_DEVICES",
+            "AQ_NO_KMS_REQUIREMENT",
+            "omarchy-sunshine-cuda12-canary",
+            "CUDA 12.8",
+            "superfici di cattura CUDA",
+        ),
+        "setup PVE/guest Omarchy",
+    )
 
     for local_path in (
         ROOT / "evidence" / "nvtop-glxgears-proof.png",
@@ -194,7 +207,9 @@ def main() -> None:
         ROOT / "docs" / "rdp-wayland.md",
         ROOT / "docs" / "wayland-nvidia-kms.md",
         ROOT / "docs" / "sunshine-moonlight-omarchy.md",
+        ROOT / "docs" / "omarchy-proxmox-guest-setup.md",
         ROOT / "scripts" / "omarchy-gtx-primary",
+        ROOT / "scripts" / "omarchy-sunshine-cuda12-canary",
         ROOT / "clients" / "windows-rdstls-template.rdp",
         ROOT / "patches" / "gnome-settings-daemon-50.0-rdp-handover.patch",
         ROOT / "patches" / "sunshine-linux-nvenc-system-memory-input.patch",
