@@ -78,8 +78,9 @@ configure_moonlight_boot() {
   [[ -n "$home" && -d "$home" ]] || die "home non trovata per $OMARCHY_USER"
 
   # Sunshine captures the user Wayland session, therefore the session must
-  # exist after a VM boot. Keep this in a final SDDM drop-in rather than
-  # modifying Omarchy's package-owned configuration.
+  # exist after a VM boot. This happens after any encrypted root volume has
+  # been unlocked. Keep this in a final SDDM drop-in rather than modifying
+  # Omarchy's package-owned configuration.
   sddm_file='/etc/sddm.conf.d/zz-omarchy-moonlight-autologin.conf'
   install -d -m 0755 /etc/sddm.conf.d
   cat >"$sddm_file" <<EOF
@@ -95,7 +96,7 @@ EOF
   stay_awake="$home/.local/state/omarchy/indicators/stay-awake"
   install -d -o "$OMARCHY_USER" -g "$OMARCHY_USER" -m 0700 "$(dirname "$stay_awake")"
   install -o "$OMARCHY_USER" -g "$OMARCHY_USER" -m 0600 /dev/null "$stay_awake"
-  note "boot Moonlight pronto: autologin SDDM per $OMARCHY_USER e idle lock disabilitato"
+  note "sessione Moonlight pronta dopo lo sblocco LUKS: autologin SDDM per $OMARCHY_USER e idle lock disabilitato"
 }
 
 verify_moonlight_boot() {

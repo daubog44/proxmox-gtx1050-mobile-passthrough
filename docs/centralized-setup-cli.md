@@ -102,9 +102,16 @@ Hyprland e' pronto. Lo stesso modulo abilita lo stato Omarchy persistente
 `stay-awake`: non compare il lock screen per inattivita' mentre la VM attende
 Moonlight. Il lock prima della sospensione resta attivo.
 
-Non e' necessario fare login da noVNC dopo ogni riavvio. Attendere circa
-15 secondi dal boot, poi Moonlight puo' raggiungere Sunshine. Per verificare
-la configurazione nella VM:
+Questo automatizza la sessione grafica **dopo** che il sistema ha montato il
+root filesystem. Se la VM usa LUKS, il prompt Plymouth per la passphrase appare
+prima di SDDM e non puo' essere risolto dall'autologin: finche' LUKS non viene
+sbloccato, SSH e Moonlight non possono essere raggiungibili. Per un boot davvero
+non presidiato occorre prima aggiungere un vTPM alla VM e iscrivere un token
+TPM2 nel volume LUKS (oppure accettare consapevolmente un keyfile non cifrato,
+che questa guida non usa).
+
+Dopo lo sblocco LUKS, attendere circa 15 secondi: Moonlight puo' raggiungere
+Sunshine senza login noVNC. Per verificare la configurazione nella VM:
 
 ```bash
 scripts/omarchy-setup --config config/omarchy.env guest sunshine verify
