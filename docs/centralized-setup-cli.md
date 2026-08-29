@@ -70,6 +70,11 @@ scripts/omarchy-setup --config config/omarchy.env plan
 Sul nodo Proxmox, come root:
 
 ```bash
+# Simulazione reale: usa qm ma non scrive, non spegne VM e non riavvia.
+scripts/omarchy-setup --config config/omarchy.env proxmox gpu-prepare --dry-run
+scripts/omarchy-setup --config config/omarchy.env proxmox gpu-switch --dry-run
+
+# Applicazione esplicita.
 scripts/omarchy-setup --config config/omarchy.env proxmox gpu-prepare --apply
 scripts/omarchy-setup --config config/omarchy.env proxmox gpu-switch --apply
 ```
@@ -96,8 +101,10 @@ Sul PC Windows, da PowerShell:
 .\clients\omarchy-client-setup.ps1 -ConfigPath .\config\omarchy.env -Module All
 ```
 
-`--apply` e' necessario per le mutazioni Linux. Senza di esso, la CLI mostra
-la sequenza prevista o delega esclusivamente controlli non distruttivi.
+`--apply` e' necessario per le mutazioni Linux. Senza opzioni mutanti, la CLI
+stampa la sequenza prevista e funziona anche fuori da PVE/Omarchy. `--dry-run`
+esegue invece la simulazione reale di `gpu-vm-switch`: non scrive, ma va
+lanciata come root sul nodo PVE perche' deve interrogare `qm` e l'hardware.
 
 ## Aggiungere un secondo PC Windows
 

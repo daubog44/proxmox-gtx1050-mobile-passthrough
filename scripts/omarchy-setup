@@ -7,6 +7,7 @@ set -Eeuo pipefail
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 config_file="$repo_root/config/omarchy.env"
 apply=0
+dry_run=0
 
 die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
 note() { printf '==> %s\n' "$*"; }
@@ -16,8 +17,8 @@ usage() {
   cat <<'EOF'
 Uso:
   scripts/omarchy-setup [--config FILE] plan
-  scripts/omarchy-setup [--config FILE] proxmox gpu-prepare [--apply]
-  scripts/omarchy-setup [--config FILE] proxmox gpu-switch [--apply]
+  scripts/omarchy-setup [--config FILE] proxmox gpu-prepare [--apply|--dry-run]
+  scripts/omarchy-setup [--config FILE] proxmox gpu-switch [--apply|--dry-run]
   scripts/omarchy-setup [--config FILE] guest sunshine <prepare|verify|status|rollback> [--apply]
   scripts/omarchy-setup [--config FILE] guest microphone <install|verify|add-client> [--apply]
   scripts/omarchy-setup [--config FILE] guest all [--apply]
@@ -27,8 +28,10 @@ Prima esecuzione:
   # modifica indirizzi, utente, VMID, GPU e microfono nel file locale
 
 `proxmox` va eseguito come root sul nodo PVE. `guest` va eseguito come root
-nella VM Omarchy. Senza --apply non scrive nulla: mostra la sequenza o esegue
-solo controlli. Il comando non effettua SSH remoto e non contiene password.
+nella VM Omarchy. Senza opzioni mutanti la CLI stampa soltanto la sequenza e
+non richiede root. `--dry-run` usa la simulazione reale di `gpu-vm-switch`
+sul nodo PVE: non scrive, ma richiede comunque root e `qm`. Il comando non
+effettua SSH remoto e non contiene password.
 
 Il modulo microfono configura un solo flusso vocale attivo alla volta. Puoi
 registrare piu' PC, ma non lasciare due client Moonlight con il watcher audio
@@ -145,22 +148,28 @@ verify_microphone() {
 }
 
 proxmox_gpu_prepare() {
-  require_root
   local args=(--prepare-host --gpu "$OMARCHY_GPU_BDF" --rom-source "$OMARCHY_ROM_SOURCE")
   if (( apply )); then
+    require_root
     "$repo_root/scripts/gpu-vm-switch" "${args[@]}"
-  else
+  elif (( dry_run )); then
+    require_root
     "$repo_root/scripts/gpu-vm-switch" "${args[@]}" --dry-run --yes
+  else
+    note "anteprima: $repo_root/scripts/gpu-vm-switch --prepare-host --gpu $OMARCHY_GPU_BDF --rom-source $OMARCHY_ROM_SOURCE --dry-run --yes"
   fi
 }
 
 proxmox_gpu_switch() {
-  require_root
   local args=(--vm "$OMARCHY_VM_ID" --gpu "$OMARCHY_GPU_BDF")
   if (( apply )); then
+    require_root
     "$repo_root/scripts/gpu-vm-switch" "${args[@]}"
-  else
+  elif (( dry_run )); then
+    require_root
     "$repo_root/scripts/gpu-vm-switch" "${args[@]}" --dry-run --yes
+  else
+    note "anteprima: $repo_root/scripts/gpu-vm-switch --vm $OMARCHY_VM_ID --gpu $OMARCHY_GPU_BDF --dry-run --yes"
   fi
 }
 
@@ -187,15 +196,19 @@ show_plan() {
 EOF
 }
 
+positionals=()
 while (( $# )); do
   case "$1" in
     --config) (( $# >= 2 )) || die '--config richiede un file'; config_file=$2; shift 2 ;;
     --apply) apply=1; shift ;;
+    --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) break ;;
+    *) positionals+=("$1"); shift ;;
   esac
 done
+set -- "${positionals[@]}"
 (( $# >= 1 )) || { usage >&2; exit 2; }
+(( ! (apply && dry_run) )) || die '--apply e --dry-run sono alternativi'
 load_config
 
 case "$1" in
