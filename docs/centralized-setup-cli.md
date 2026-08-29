@@ -102,14 +102,16 @@ con il driver `580xx` presente nella VM. L'hook
 un upgrade del pacchetto `omarchy`.
 
 Se l'installazione si ferma con un `404` da un mirror (un database Pacman
-vecchio punta a una versione gia' rimossa), eseguire nella VM un aggiornamento
-completo e coerente, poi riaprire il menu:
+vecchio punta a una versione gia' rimossa), eseguire nella VM l'aggiornamento
+completo gestito da Omarchy, poi riaprire il menu:
 
 ```bash
-sudo pacman -Syu
+omarchy update
 ```
 
-Non usare `pacman -Sy` da solo: su Arch crea uno stato di aggiornamento parziale.
+Non usare `pacman -Syu` direttamente (ne' `pacman -Sy`): Omarchy lo blocca
+intenzionalmente per eseguire snapshot, keyring, migrazioni e hook attraverso
+il proprio update manager.
 
 Sul PC Windows, da PowerShell:
 
