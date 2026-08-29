@@ -93,6 +93,29 @@ scripts/omarchy-setup --config config/omarchy.env guest steam fix --apply
 scripts/omarchy-setup --config config/omarchy.env guest steam verify
 ```
 
+### Avvio Moonlight dopo un reboot
+
+`guest sunshine prepare --apply` configura il guest dedicato allo streaming
+per avviare automaticamente `omarchy.desktop` con SDDM. Sunshine resta un
+servizio della sessione Wayland (non un daemon di sistema), quindi parte quando
+Hyprland e' pronto. Lo stesso modulo abilita lo stato Omarchy persistente
+`stay-awake`: non compare il lock screen per inattivita' mentre la VM attende
+Moonlight. Il lock prima della sospensione resta attivo.
+
+Non e' necessario fare login da noVNC dopo ogni riavvio. Attendere circa
+15 secondi dal boot, poi Moonlight puo' raggiungere Sunshine. Per verificare
+la configurazione nella VM:
+
+```bash
+scripts/omarchy-setup --config config/omarchy.env guest sunshine verify
+```
+
+Questa scelta e' adatta a una VM dedicata e raggiungibile solo dalla LAN:
+la sessione desktop resta sbloccata al boot. Per tornare al comportamento
+interattivo, rimuovere il drop-in
+`/etc/sddm.conf.d/zz-omarchy-moonlight-autologin.conf` e il file
+`~/.local/state/omarchy/indicators/stay-awake`, quindi riavviare.
+
 `guest steam fix` modifica esclusivamente l'ordine della transazione avviata dal
 menu **Gaming -> Steam**: per una GPU Pascal non-GSP installa prima il provider
 `lib32-nvidia-580xx-utils` assieme a `steam`. Questo evita la scelta automatica

@@ -71,6 +71,45 @@ user_systemctl() {
     systemctl --user "$@"
 }
 
+configure_moonlight_boot() {
+  local home sddm_file stay_awake
+  require_root
+  home="$(getent passwd "$OMARCHY_USER" | cut -d: -f6)"
+  [[ -n "$home" && -d "$home" ]] || die "home non trovata per $OMARCHY_USER"
+
+  # Sunshine captures the user Wayland session, therefore the session must
+  # exist after a VM boot. Keep this in a final SDDM drop-in rather than
+  # modifying Omarchy's package-owned configuration.
+  sddm_file='/etc/sddm.conf.d/zz-omarchy-moonlight-autologin.conf'
+  install -d -m 0755 /etc/sddm.conf.d
+  cat >"$sddm_file" <<EOF
+# Managed by omarchy-setup for a dedicated Moonlight guest.
+[Autologin]
+User=$OMARCHY_USER
+Session=omarchy.desktop
+EOF
+  chmod 0644 "$sddm_file"
+
+  # Omarchy's supported persistent "stay awake" state disables only idle
+  # screensaver/lock. Its separate sleep hook still locks before suspend.
+  stay_awake="$home/.local/state/omarchy/indicators/stay-awake"
+  install -d -o "$OMARCHY_USER" -g "$OMARCHY_USER" -m 0700 "$(dirname "$stay_awake")"
+  install -o "$OMARCHY_USER" -g "$OMARCHY_USER" -m 0600 /dev/null "$stay_awake"
+  note "boot Moonlight pronto: autologin SDDM per $OMARCHY_USER e idle lock disabilitato"
+}
+
+verify_moonlight_boot() {
+  local home sddm_file stay_awake
+  require_root
+  home="$(getent passwd "$OMARCHY_USER" | cut -d: -f6)"
+  sddm_file='/etc/sddm.conf.d/zz-omarchy-moonlight-autologin.conf'
+  stay_awake="$home/.local/state/omarchy/indicators/stay-awake"
+  grep -Fxq "User=$OMARCHY_USER" "$sddm_file" || die 'autologin SDDM non configurato per l’utente Omarchy'
+  grep -Fxq 'Session=omarchy.desktop' "$sddm_file" || die 'sessione SDDM Omarchy non configurata'
+  [[ -f "$stay_awake" ]] || die 'stay awake persistente non configurato'
+  note 'boot Moonlight verificato: SDDM autologin e stay awake persistente'
+}
+
 write_ptt_bindings() {
   local home bindings backup
   home="$(getent passwd "$OMARCHY_USER" | cut -d: -f6)"
@@ -178,10 +217,15 @@ guest_sunshine() {
   local action=$1
   if (( ! apply )) && [[ "$action" != verify && "$action" != status ]]; then
     note "anteprima: OMARCHY_USER=$OMARCHY_USER $repo_root/scripts/omarchy-gtx-primary $action"
+    [[ "$action" != prepare ]] || note "anteprima: configuro autologin SDDM e stay awake persistente per $OMARCHY_USER"
     return 0
   fi
   require_root
   OMARCHY_USER="$OMARCHY_USER" "$repo_root/scripts/omarchy-gtx-primary" "$action"
+  case "$action" in
+    prepare) configure_moonlight_boot; verify_moonlight_boot ;;
+    verify) verify_moonlight_boot ;;
+  esac
 }
 
 guest_steam() {
