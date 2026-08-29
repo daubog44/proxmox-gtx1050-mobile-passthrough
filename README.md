@@ -207,6 +207,8 @@ Moonlight/Sunshine inviano tastiera, mouse e l'audio del guest, ma non trasforma
 
 Per applicare o ripetere il setup senza IP fissati nel codice, usare la CLI [omarchy-setup](scripts/omarchy-setup) con il file locale ignorato `config/omarchy.env`; il lato Windows usa [omarchy-client-setup.ps1](clients/omarchy-client-setup.ps1). I moduli separano correttamente nodo PVE (GPU/VFIO), guest Omarchy (Sunshine e ricevitore microfono) e client Windows (Moonlight, chiave e autostart). La [guida CLI centralizzata](docs/centralized-setup-cli.md) contiene percorsi effettivi, comunicazione tra processi, comandi per un secondo PC e le prove versionate di HEVC/NVENC, trascrizione e VRAM VoxType.
 
+Per una GTX Pascal con il ramo NVIDIA `580xx`, l'azione Omarchy **Gaming → Steam** e' corretta localmente dal modulo `guest steam fix`: fa risolvere a Pacman `lib32-nvidia-580xx-utils` nella stessa transazione di Steam, invece del provider generico che dipende da NVIDIA 610 e va in conflitto. Un hook Pacman riapplica la correzione dopo ogni aggiornamento di Omarchy. Se un mirror restituisce un `404`, la soluzione e' un aggiornamento completo della VM con `sudo pacman -Syu`, mai `pacman -Sy` isolato, poi si riapre l'azione Gaming → Steam.
+
 | Prova Omarchy | Evidenza versionata | Cosa dimostra |
 | --- | --- | --- |
 | Stream Moonlight | [HEVC 1920x1200 ~60 FPS, zero drop e NVENC](evidence/moonlight-hevc-nvtop-idle-model-unloaded.png) | Il desktop headless viene catturato e codificato dalla GTX; nel fermo immagine idle il modello VoxType non resta residente. |

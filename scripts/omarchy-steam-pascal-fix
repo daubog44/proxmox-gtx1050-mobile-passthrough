@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Keep Omarchy's Steam installer compatible with the proprietary 580xx NVIDIA
+# driver required by Pascal (non-GSP) GPUs.
+set -Eeuo pipefail
+
+readonly TARGET='/usr/bin/omarchy-install-gaming-steam'
+readonly HOOK_DIR='/etc/pacman.d/hooks'
+readonly HOOK="$HOOK_DIR/99-omarchy-steam-pascal-nvidia.hook"
+readonly MARKER='# Local Pascal/580xx Steam compatibility patch.'
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+require_root() { (( EUID == 0 )) || die 'eseguire come root nella VM Omarchy'; }
+
+patch_installer() {
+  [[ -x "$TARGET" ]] || die "installer Steam Omarchy mancante: $TARGET"
+  if grep -Fq "$MARKER" "$TARGET"; then
+    note 'installer Steam Omarchy gia corretto'
+    return
+  fi
+  python3 - "$TARGET" "$MARKER" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+marker = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+needle = "omarchy-pkg-add steam\nomarchy-install-gaming-gpu-lib32"
+replacement = f'''{marker}
+# Steam must resolve the matching 32-bit driver in the same Pacman transaction.
+# Otherwise Pacman chooses the generic provider first and tries nvidia-utils 610,
+# which conflicts with the installed proprietary 580xx Pascal stack.
+if omarchy-hw-nvidia-without-gsp; then
+  omarchy-pkg-add lib32-nvidia-580xx-utils steam
+else
+  omarchy-pkg-add steam
+fi
+omarchy-install-gaming-gpu-lib32'''
+if text.count(needle) != 1:
+    raise SystemExit("struttura inattesa dell'installer Steam Omarchy; patch non applicata")
+path.write_text(text.replace(needle, replacement), encoding="utf-8")
+PY
+  chmod 0755 "$TARGET"
+  note 'installer Steam corretto: Pascal usa lib32-nvidia-580xx-utils'
+}
+
+install_hook() {
+  install -d -m 0755 "$HOOK_DIR"
+  cat >"$HOOK" <<EOF
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = omarchy
+
+[Action]
+Description = Reapply local Steam Pascal/580xx compatibility patch
+When = PostTransaction
+Exec = /usr/local/sbin/omarchy-steam-pascal-fix --apply-only
+EOF
+  chmod 0644 "$HOOK"
+  note "hook Pacman installato: $HOOK"
+}
+
+verify() {
+  local plan
+  grep -Fq "$MARKER" "$TARGET" || die 'patch Steam non presente'
+  grep -Fq 'lib32-nvidia-580xx-utils steam' "$TARGET" || die 'provider 580xx non presente'
+  [[ -r "$HOOK" ]] || die 'hook Pacman non presente'
+  grep -Fxq 'Target = omarchy' "$HOOK" || die 'hook non riferito al pacchetto omarchy'
+  plan="$(pacman -S --print --noconfirm steam lib32-nvidia-580xx-utils 2>&1)"
+  grep -q 'lib32-nvidia-580xx-utils' <<<"$plan" || die 'Pacman non pianifica il provider 580xx'
+  ! grep -q 'nvidia-utils-610' <<<"$plan" || die 'Pacman tenta ancora il ramo NVIDIA 610'
+  note 'Steam Pascal/580xx: patch, hook e transazione simulata coerenti'
+}
+
+case "${1:-apply}" in
+  apply) require_root; patch_installer; install_hook; verify ;;
+  --apply-only) require_root; patch_installer ;;
+  verify) verify ;;
+  -h|--help)
+    cat <<'EOF'
+Uso: omarchy-steam-pascal-fix [apply|verify]
+
+apply   corregge l'installer Steam di Omarchy e installa un hook Pacman che
+        riapplica la correzione dopo un upgrade di Omarchy.
+verify  controlla patch/hook e simula la transazione Steam+driver 32-bit.
+EOF
+    ;;
+  *) die "azione sconosciuta: $1" ;;
+esac

@@ -87,7 +87,29 @@ scripts/omarchy-setup --config config/omarchy.env guest microphone install --app
 
 scripts/omarchy-setup --config config/omarchy.env guest sunshine status
 scripts/omarchy-setup --config config/omarchy.env guest microphone verify
+
+# Corregge l'installer Gaming -> Steam di Omarchy per la GTX Pascal/580xx.
+scripts/omarchy-setup --config config/omarchy.env guest steam fix --apply
+scripts/omarchy-setup --config config/omarchy.env guest steam verify
 ```
+
+`guest steam fix` modifica esclusivamente l'ordine della transazione avviata dal
+menu **Gaming -> Steam**: per una GPU Pascal non-GSP installa prima il provider
+`lib32-nvidia-580xx-utils` assieme a `steam`. Questo evita la scelta automatica
+del provider `lib32-nvidia-utils`, che porta al pacchetto NVIDIA 610 e confligge
+con il driver `580xx` presente nella VM. L'hook
+`/etc/pacman.d/hooks/99-omarchy-steam-pascal-nvidia.hook` riapplica il fix dopo
+un upgrade del pacchetto `omarchy`.
+
+Se l'installazione si ferma con un `404` da un mirror (un database Pacman
+vecchio punta a una versione gia' rimossa), eseguire nella VM un aggiornamento
+completo e coerente, poi riaprire il menu:
+
+```bash
+sudo pacman -Syu
+```
+
+Non usare `pacman -Sy` da solo: su Arch crea uno stato di aggiornamento parziale.
 
 Sul PC Windows, da PowerShell:
 

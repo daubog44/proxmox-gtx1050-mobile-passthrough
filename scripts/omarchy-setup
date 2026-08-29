@@ -21,6 +21,7 @@ Uso:
   scripts/omarchy-setup [--config FILE] proxmox gpu-switch [--apply|--dry-run]
   scripts/omarchy-setup [--config FILE] guest sunshine <prepare|verify|status|rollback> [--apply]
   scripts/omarchy-setup [--config FILE] guest microphone <install|verify|add-client> [--apply]
+  scripts/omarchy-setup [--config FILE] guest steam <fix|verify> [--apply]
   scripts/omarchy-setup [--config FILE] guest all [--apply]
 
 Prima esecuzione:
@@ -183,6 +184,17 @@ guest_sunshine() {
   OMARCHY_USER="$OMARCHY_USER" "$repo_root/scripts/omarchy-gtx-primary" "$action"
 }
 
+guest_steam() {
+  local action=$1
+  case "$action" in
+    fix)
+      if (( apply )); then require_root; "$repo_root/scripts/omarchy-steam-pascal-fix" apply
+      else note "anteprima: sudo $repo_root/scripts/omarchy-steam-pascal-fix apply"; fi ;;
+    verify) "$repo_root/scripts/omarchy-steam-pascal-fix" verify ;;
+    *) die 'azione Steam: fix oppure verify' ;;
+  esac
+}
+
 show_plan() {
   cat <<EOF
 1. [NODO PVE]  scripts/omarchy-setup --config $config_file proxmox gpu-prepare --apply
@@ -230,9 +242,10 @@ case "$1" in
             if (( apply )); then require_root; ufw allow from "$OMARCHY_CLIENT_ADDRESS" to any port "$OMARCHY_RTP_PORT" proto udp comment 'Omarchy Voxtype RTP microphone'; else note "anteprima: abilito $OMARCHY_CLIENT_ADDRESS -> UDP $OMARCHY_RTP_PORT"; fi ;;
           *) die 'azione microfono: install, verify oppure add-client' ;;
         esac ;;
+      steam) guest_steam "${3:-}" ;;
       all)
         if (( apply )); then guest_sunshine prepare; install_microphone; else note 'anteprima: Sunshine headless + ricevitore microfono/pipewire/PTT'; fi ;;
-      *) die 'modulo guest: sunshine, microphone oppure all' ;;
+      *) die 'modulo guest: sunshine, microphone, steam oppure all' ;;
     esac ;;
   *) usage >&2; exit 2 ;;
 esac
