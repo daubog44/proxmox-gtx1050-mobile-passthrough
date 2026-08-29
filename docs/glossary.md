@@ -32,6 +32,12 @@ Questo glossario separa termini che spesso vengono confusi. I riferimenti nel te
 | **Q35** | Chipset virtuale moderno di QEMU con root port PCIe. In questo progetto è obbligatorio perché la discovery PCI/ACPI e il passthrough sono basati su quella topologia. |
 | **QEMU Guest Agent (QGA)** | Servizio nel guest che consente a Proxmox di eseguire controlli come `lspci`, `mokutil` e `nvidia-smi` senza dipendere dalla rete SSH. |
 | **QEMU** | Emulatore/virtualizzatore che esegue la VM. Proxmox genera per QEMU la configurazione scelta con `qm set`. |
+| **SDDM** | *Simple Desktop Display Manager*: mostra il login grafico e, quando configurato con `[Autologin]`, avvia `omarchy.desktop` come utente indicato. Entra in gioco solo dopo l'avvio del sistema operativo: non puo' sbloccare il disco cifrato prima del mount di `/`. |
+| **LUKS** | Formato Linux per cifrare un dispositivo a blocchi. Nella VM `sda2` e' LUKS e contiene il volume `root`; il prompt Plymouth appare prima di rete, SSH, SDDM e Sunshine. La passphrase resta sempre un metodo di recupero manuale. |
+| **Plymouth** | Schermata grafica dell'avvio Linux. Qui visualizza la richiesta della passphrase LUKS; puo' somigliare al lock screen Omarchy, ma avviene prima che Hyprland o la sessione utente esistano. |
+| **TPM 2.0** | Modulo fidato che conserva chiavi e le rilascia solo nel contesto previsto. In una VM il dispositivo puo' essere emulato: non e' la GPU e non richiede un TPM fisico nel guest. |
+| **vTPM / `tpmstate0`** | TPM virtuale aggiunto da Proxmox alla VM. Il suo stato persistente e' gestito dal nodo PVE; serve al guest come `/dev/tpmrm0` e puo' custodire il segreto per sbloccare LUKS. Chi controlla sia il disco VM sia lo stato vTPM sul nodo ha il potere di avviare il guest. |
+| **`systemd-cryptenroll`** | Strumento che aggiunge un token, per esempio TPM2, ai metadati LUKS senza rimuovere la passphrase esistente. All'avvio l'initramfs prova prima il token TPM2 e richiede la passphrase solo se non puo' sbloccarlo. |
 | **`hostpci`** | Chiave della configurazione Proxmox che collega una funzione PCI fisica alla VM. |
 | **`romfile`** | Opzione `hostpci` che indica un file ROM a QEMU. In questo caso viene mantenuta per la configurazione PCI, ma da sola non basta per il driver Optimus. |
 | **`rombar`** | Opzione che espone (`1`) o nasconde (`0`) la finestra ROM PCI al guest. Qui è volutamente `0`: il percorso affidabile è ACPI `_ROM`, non la ROM BAR PCI. |

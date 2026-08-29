@@ -307,6 +307,11 @@ Se il nuovo EFI non completa il primo boot fino al Guest Agent, lo script ripris
 automaticamente efidisk0 originale; prima dell'uso e comunque consigliato uno snapshot.
 ~~~
 
+Per il guest Omarchy dedicato, questo vincolo pre-boot e' stato risolto senza
+inserire una passphrase negli script: [vTPM Proxmox + token LUKS2
+`systemd-cryptenroll`](docs/centralized-setup-cli.md#luks-auto-unlock-con-vtpm-configurazione-effettiva-e-modello-di-sicurezza).
+La passphrase LUKS resta comunque il recupero manuale.
+
 
 ## Perché il solo passthrough PCI non basta in Optimus
 

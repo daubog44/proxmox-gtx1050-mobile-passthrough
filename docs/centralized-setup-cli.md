@@ -103,12 +103,72 @@ Hyprland e' pronto. Lo stesso modulo abilita lo stato Omarchy persistente
 Moonlight. Il lock prima della sospensione resta attivo.
 
 Questo automatizza la sessione grafica **dopo** che il sistema ha montato il
-root filesystem. Se la VM usa LUKS, il prompt Plymouth per la passphrase appare
-prima di SDDM e non puo' essere risolto dall'autologin: finche' LUKS non viene
-sbloccato, SSH e Moonlight non possono essere raggiungibili. Per un boot davvero
-non presidiato occorre prima aggiungere un vTPM alla VM e iscrivere un token
-TPM2 nel volume LUKS (oppure accettare consapevolmente un keyfile non cifrato,
-che questa guida non usa).
+root filesystem. Il prompt Plymouth per LUKS appare prima di SDDM e non puo'
+essere risolto dall'autologin. Nel guest Omarchy documentato e' ora configurato
+anche il passaggio che mancava: **vTPM Proxmox + token LUKS2 con
+`systemd-cryptenroll`**. Di conseguenza il boot arriva a SSH e Sunshine senza
+noVNC e senza memorizzare un keyfile in chiaro nel guest.
+
+### LUKS auto-unlock con vTPM: configurazione effettiva e modello di sicurezza
+
+Il nodo PVE conserva lo stato TPM persistente della VM come `tpmstate0`; il
+guest lo vede come `/dev/tpmrm0`. Dentro l'header LUKS2 e' presente un token
+`systemd-tpm2` in un keyslot aggiuntivo. La passphrase originaria resta nello
+slot iniziale, quindi e' il recupero manuale se il token non e' disponibile.
+
+```text
+Proxmox tpmstate0 -> /dev/tpmrm0 nel guest
+  -> token systemd-tpm2 nell'header di /dev/sda2
+  -> initramfs Limine: systemd + sd-encrypt + /etc/crypttab.initramfs
+  -> /dev/mapper/root -> SDDM autologin -> Hyprland -> Sunshine
+```
+
+Per una VM nuova, prima creare il TPM persistente sullo storage PVE scelto (il
+nome dello storage non va fissato nel repository):
+
+```bash
+# Nodo PVE, VM spenta. Sostituire <storage> e <vmid>.
+qm set <vmid> --tpmstate0 <storage>:1,version=v2.0
+```
+
+Nel guest LUKS2, il percorso supportato da Arch/Omarchy e' `systemd` +
+`sd-encrypt`, non il vecchio hook `encrypt`. La configurazione locale deve
+essere un drop-in ordinato dopo `omarchy_hooks.conf`, deve convertire
+`udev/encrypt/keymap/consolefont` in `systemd/sd-encrypt/sd-vconsole`, e deve
+conservare gli hook Omarchy come `btrfs-overlayfs` e `resume`. Per il volume
+root usare quindi:
+
+```text
+# /etc/crypttab.initramfs
+root UUID=<UUID-LUKS> none tpm2-device=auto
+
+# /etc/kernel/cmdline (estratto)
+rd.luks.name=<UUID-LUKS>=root root=/dev/mapper/root ...
+```
+
+Rigenerare poi con `sudo limine-mkinitcpio` (non con un path generico
+`/boot/initramfs-linux.img`: questa Omarchy usa Limine in un percorso UUID) e
+iscrivere il token, senza cancellare la passphrase esistente:
+
+```bash
+sudo systemd-cryptenroll --tpm2-device=auto /dev/sda2
+sudo cryptsetup luksDump /dev/sda2 # deve mostrare systemd-tpm2
+```
+
+Nel caso verificato non sono stati vincolati PCR: e' piu' affidabile per una
+VM SeaBIOS priva di Secure Boot, ma significa che chi controlla **sia** disco
+VM **sia** `tpmstate0` sul nodo PVE puo' avviarla. Non e' quindi equivalente a
+un TPM fisico che difende dall'amministratore dell'hypervisor; elimina invece
+il blocco operativo del primo login mantenendo il disco cifrato a riposo fuori
+da quel confine. Per un vincolo di integrita' piu' forte servono OVMF, Secure
+Boot e una policy PCR pianificata e testata separatamente.
+
+Rollback: avviare una volta con la passphrase LUKS, rimuovere il token con
+`sudo systemd-cryptenroll --wipe-slot=tpm2 /dev/sda2`, rimuovere
+`/etc/crypttab.initramfs` e il drop-in locale `zz-vtpm-luks.conf`, ripristinare
+il precedente `cryptdevice=...` nel cmdline, quindi `sudo limine-mkinitcpio`.
+Non rimuovere `tpmstate0` finche' il guest non e' stato riavviato e verificato
+con la passphrase.
 
 Dopo lo sblocco LUKS, attendere circa 15 secondi: Moonlight puo' raggiungere
 Sunshine senza login noVNC. Per verificare la configurazione nella VM:
