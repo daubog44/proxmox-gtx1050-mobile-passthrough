@@ -124,6 +124,11 @@ mostrera' VAD su `yes`.
 
 ## Automazione Windows
 
+Per una nuova installazione o un secondo PC, il percorso consigliato e' la
+[CLI centralizzata](centralized-setup-cli.md): legge IP, porta, utente e nome
+del microfono da `config/omarchy.env`, file locale ignorato da Git. I comandi
+manuali seguenti restano documentazione avanzata del trasporto sottostante.
+
 ### RTP/Opus realtime (installazione attiva)
 
 Nella VM installare ricevitore e unita' utente, poi autorizzare **solo** l'IP

@@ -4,7 +4,7 @@
 # version-pinned, and must be validated separately before activation.
 set -Eeuo pipefail
 
-readonly USER_NAME="${SUNSHINE_USER:-daubog44}"
+readonly USER_NAME="${OMARCHY_USER:-${SUNSHINE_USER:-${SUDO_USER:-daubog44}}}"
 readonly USER_HOME="/home/$USER_NAME"
 readonly SERVICE='app-dev.lizardbyte.app.Sunshine.service'
 readonly CANDIDATE_BIN="${SUNSHINE_CUDA12_BIN:-/opt/sunshine-cuda12/bin/sunshine}"

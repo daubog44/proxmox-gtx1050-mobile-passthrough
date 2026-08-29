@@ -3,10 +3,11 @@
 param(
     [System.Net.IPAddress] $VmAddress,
     [string] $VmHost,
-    [string] $User = 'daubog44',
+    [string] $User,
     [string] $Device,
     [ValidateRange(1024, 65535)] [int] $RtpPort = 40100,
     [switch] $ListDevices,
+    [switch] $InstallKey,
     [switch] $Watch,
     [switch] $InstallAutostart,
     [string] $DeviceBase64,
@@ -72,9 +73,29 @@ if ($DeviceBase64) {
 }
 $devices = @(Get-DirectShowAudioDevices -Ffmpeg $ffmpeg)
 if ($ListDevices) { $devices; exit 0 }
+if (-not $VmHost -and $VmAddress) { $VmHost = $VmAddress.IPAddressToString }
+if (-not $VmHost) { throw '-VmHost e obbligatorio per la chiave o il controllo RTP.' }
+if (-not $User) { throw '-User e obbligatorio. Usa il valore OMARCHY_USER della configurazione.' }
+if ($InstallKey) {
+    $sshKeygen = Require-Command ssh-keygen
+    $keyDirectory = Split-Path -Parent $KeyPath
+    if (-not (Test-Path -LiteralPath $KeyPath)) {
+        New-Item -ItemType Directory -Force -Path $keyDirectory | Out-Null
+        & $sshKeygen -t ed25519 -f $KeyPath -N '' -C 'voxtype-windows-mic-rtp'
+        if ($LASTEXITCODE -ne 0) { throw 'ssh-keygen non ha creato la chiave di controllo.' }
+    }
+    $publicKey = (Get-Content -LiteralPath "$KeyPath.pub" -Raw).Trim()
+    $remoteKey = "restrict,command=`"/home/$User/.local/bin/voxtype-remote-mic-ssh-dispatch`" $publicKey"
+    $encodedAuthorizedKey = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remoteKey))
+    $remoteCommand = "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; line=`$(printf %s '$encodedAuthorizedKey' | base64 -d); grep -qxF `"`$line`" ~/.ssh/authorized_keys || printf '%s\n' `"`$line`" >> ~/.ssh/authorized_keys"
+    Write-Host 'Inserisci una sola volta la password SSH della VM per autorizzare la chiave dedicata di questo PC.' -ForegroundColor Yellow
+    & $ssh -tt "$User@$VmHost" $remoteCommand
+    if ($LASTEXITCODE -ne 0) { throw 'La chiave RTP non e stata autorizzata nella VM.' }
+    Write-Host 'Chiave installata: puo solo ricevere active/idle dal dispatcher del microfono.' -ForegroundColor Green
+    exit 0
+}
 if (-not $VmAddress) { throw '-VmAddress e obbligatorio per inviare audio RTP.' }
-if (-not $VmHost) { $VmHost = $VmAddress.IPAddressToString }
-if (-not (Test-Path -LiteralPath $KeyPath)) { throw "Chiave controllo mancante: $KeyPath" }
+if (-not (Test-Path -LiteralPath $KeyPath)) { throw "Chiave controllo mancante: $KeyPath. Esegui prima -InstallKey." }
 if (-not $Device) {
     if ($devices.Count -eq 1) { $Device = $devices[0] }
     else { throw 'Specifica -Device. Usa -ListDevices per l''elenco.' }

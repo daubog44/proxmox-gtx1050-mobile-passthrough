@@ -205,6 +205,14 @@ Lo strumento guest idempotente e' [scripts/omarchy-gtx-primary](scripts/omarchy-
 
 Moonlight/Sunshine inviano tastiera, mouse e l'audio del guest, ma non trasformano il microfono del PC client in una sorgente PipeWire della VM. Per il dettato realtime nella VM esiste [voxtype-windows-mic-rtp.ps1](clients/voxtype-windows-mic-rtp.ps1): FFmpeg cattura il microfono DirectShow Windows e invia Opus/RTP a pacchetti da 20 ms; [voxtype-remote-mic-rtp-receive](scripts/voxtype-remote-mic-rtp-receive) lo pubblica nella VM come `voxtype_remote_mic.monitor`. Il launcher Windows parte al login ma apre FFmpeg soltanto quando Moonlight e la VM richiedono il microfono: PTT VoxType oppure un client PipeWire come Discord. La porta UDP e' limitata nel firewall all'IP del PC client; il controllo `active/idle` viaggia in una SSH dedicata e ristretta. Il precedente tunnel SSH cifrato resta come fallback. Vedi la guida completa [Microfono Windows in VoxType via Moonlight](docs/voxtype-moonlight-microphone.md), inclusi IP/porta configurabili, configurazione di un secondo PC, VAD e verifiche.
 
+Per applicare o ripetere il setup senza IP fissati nel codice, usare la CLI [omarchy-setup](scripts/omarchy-setup) con il file locale ignorato `config/omarchy.env`; il lato Windows usa [omarchy-client-setup.ps1](clients/omarchy-client-setup.ps1). I moduli separano correttamente nodo PVE (GPU/VFIO), guest Omarchy (Sunshine e ricevitore microfono) e client Windows (Moonlight, chiave e autostart). La [guida CLI centralizzata](docs/centralized-setup-cli.md) contiene percorsi effettivi, comunicazione tra processi, comandi per un secondo PC e le prove versionate di HEVC/NVENC, trascrizione e VRAM VoxType.
+
+| Prova Omarchy | Evidenza versionata | Cosa dimostra |
+| --- | --- | --- |
+| Stream Moonlight | [HEVC 1920x1200 ~60 FPS, zero drop e NVENC](evidence/moonlight-hevc-nvtop-idle-model-unloaded.png) | Il desktop headless viene catturato e codificato dalla GTX; nel fermo immagine idle il modello VoxType non resta residente. |
+| Dettatura | [Notifica `Ciao, come stai?` e grafico NVTOP](evidence/voxtype-transcription-nvtop-on-demand.png) | Il percorso microfono Windows -> RTP/Opus -> PipeWire -> VoxType completa una trascrizione nella VM. |
+| VRAM VoxType | [Worker VoxType in elaborazione](evidence/voxtype-model-vram-during-transcription.png) | Il modello usa GPU quando trascrive (circa 469 MiB osservati), mentre l'OSD resta leggero a riposo. |
+
 ## Uso quotidiano dello switch
 
 ```bash

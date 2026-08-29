@@ -6,3 +6,6 @@
 *.py text eol=lf
 gpu-vm-switch text eol=lf
 *.md text eol=lf
+scripts/* text eol=lf
+systemd/* text eol=lf
+*.ps1 text eol=crlf

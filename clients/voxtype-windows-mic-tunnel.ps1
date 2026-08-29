@@ -1,8 +1,8 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string] $VmHost = 'omarchy',
-    [string] $User = 'daubog44',
+    [string] $VmHost,
+    [string] $User,
     [string] $Device,
     [ValidateSet(8000, 16000, 24000, 48000)]
     [int] $SampleRate = 16000,
@@ -46,8 +46,8 @@ param(
   .\voxtype-windows-mic-tunnel.ps1 -TestInput -TestSeconds 8
   .\voxtype-windows-mic-tunnel.ps1 -TestTone -TestSeconds 8
   .\voxtype-windows-mic-tunnel.ps1 -TestTunnel -TestSeconds 12
-  .\voxtype-windows-mic-tunnel.ps1 -InstallKey -VmHost 192.168.0.28
-  .\voxtype-windows-mic-tunnel.ps1 -InstallAutostart -VmHost 192.168.0.28 -VmAddress 192.168.0.28
+  .\voxtype-windows-mic-tunnel.ps1 -InstallKey -VmHost <host-vm> -User <utente-vm>
+  .\voxtype-windows-mic-tunnel.ps1 -InstallAutostart -VmHost <host-vm> -VmAddress <ip-vm> -User <utente-vm>
   .\voxtype-windows-mic-tunnel.ps1
   .\voxtype-windows-mic-tunnel.ps1 -Device 'Microphone (USB Audio Device)'
 ##>
@@ -167,6 +167,8 @@ function Test-MicrophoneInput {
 }
 
 if ($InstallKey) {
+    if (-not $VmHost) { throw '-InstallKey richiede -VmHost.' }
+    if (-not $User) { throw '-InstallKey richiede -User.' }
     $sshKeygen = Require-Command 'ssh-keygen'
     $keyDirectory = Split-Path -Parent $KeyPath
     if (-not (Test-Path -LiteralPath $KeyPath)) {
@@ -203,6 +205,8 @@ if ($TestInput) {
     Test-MicrophoneInput
     exit 0
 }
+if (-not $VmHost) { throw '-VmHost e obbligatorio per il tunnel SSH.' }
+if (-not $User) { throw '-User e obbligatorio per il tunnel SSH.' }
 
 function Start-MicrophoneTunnel {
     param([scriptblock] $KeepRunning)

@@ -1,0 +1,141 @@
+# CLI riproducibile: Proxmox, Omarchy e PC Windows
+
+Questa CLI raccoglie i moduli gia' verificati senza far finta che un nodo
+Proxmox, una VM Linux e un PC Windows siano la stessa macchina. Ogni comando
+si esegue nel contesto che possiede la modifica: niente password nel repository,
+niente SSH nascosto e nessun reboot o switch GPU implicito.
+
+## Configurazione unica, senza IP nel codice
+
+Creare un file locale, ignorato da Git:
+
+```bash
+cp config/omarchy.env.example config/omarchy.env
+```
+
+Compilare almeno questi valori:
+
+```dotenv
+OMARCHY_USER=your-linux-user
+OMARCHY_VM_HOST=omarchy.local
+OMARCHY_VM_ADDRESS=192.168.1.50
+OMARCHY_CLIENT_ADDRESS=192.168.1.60
+OMARCHY_RTP_PORT=40100
+OMARCHY_MIC_DEVICE=Microphone (USB Audio Device)
+OMARCHY_VM_ID=1002
+OMARCHY_GPU_BDF=0000:02:00
+OMARCHY_ROM_SOURCE=./firmware/gtx1050_hp_native.rom
+```
+
+Non inserire password, chiavi private o token. Il file contiene la topologia
+locale e il nome del dispositivo DirectShow; puo' essere copiato sul nodo PVE,
+sulla VM e su ogni PC Windows, con i valori appropriati a ciascun PC.
+
+## Dove vivono i componenti e come comunicano
+
+| Luogo | File/processo | Ruolo |
+| --- | --- | --- |
+| Repository | `config/omarchy.env` | Unica sorgente locale di IP, porta, utente, VM e GPU. E' ignorato da Git. |
+| Nodo PVE | `scripts/gpu-vm-switch` | IOMMU/VFIO, VBIOS/SSDT e assegnazione GPU alla VM. |
+| VM | `~/.local/bin/voxtype-remote-mic-*` | Ricevitore RTP, controllo domanda, PTT e dispatcher SSH ristretto. |
+| VM | `~/.config/voxtype/remote-mic.env` | Porta RTP scelta dalla configurazione centrale. |
+| VM | `~/.config/systemd/user/voxtype-remote-mic-rtp.service` | Ricevitore sempre pronto; il linger dell'utente lo riporta dopo reboot. |
+| VM | `/run/user/<uid>/voxtype/{state,remote-mic-demand,remote-mic-control-connected}` | Stato effimero: registrazione, PTT e sessione Windows. Sparisce al logout/reboot. |
+| VM | `~/.config/hypr/bindings.lua` | Blocco gestito PTT `SUPER + H` / `HOME`; ne viene salvato un backup una sola volta. |
+| Windows | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Omarchy VoxType realtime microphone.cmd` | Avvia il watcher al login Windows. |
+| Windows | `%USERPROFILE%\.ssh\voxtype-omarchy_ed25519` | Chiave per quel PC; autorizzata soltanto al dispatcher microfono VM. |
+| Rete | SSH ristretto + UDP RTP | SSH invia solo `active`/`idle`; RTP/Opus invia l'audio. UFW ammette UDP solo dall'IP del PC configurato. |
+
+Il flusso e' quindi:
+
+```text
+Moonlight connesso -> watcher Windows apre SSH di controllo
+VM: PTT VoxType o source-output Discord -> active
+Windows: FFmpeg apre il microfono configurato -> Opus/RTP UDP
+VM: FFmpeg riceve -> pw-cat -> voxtype_remote_mic.monitor
+VM non richiede piu' audio -> idle -> Windows chiude FFmpeg /T
+```
+
+Il ricevitore VM e' sempre pronto, ma non puo' aprire il microfono fisico del
+PC: solo FFmpeg sul PC Windows lo apre, e soltanto dopo `active`.
+
+## Comandi
+
+Prima vedere la sequenza completa, senza modifiche:
+
+```bash
+scripts/omarchy-setup --config config/omarchy.env plan
+```
+
+Sul nodo Proxmox, come root:
+
+```bash
+scripts/omarchy-setup --config config/omarchy.env proxmox gpu-prepare --apply
+scripts/omarchy-setup --config config/omarchy.env proxmox gpu-switch --apply
+```
+
+Nella VM Omarchy, come root:
+
+```bash
+scripts/omarchy-setup --config config/omarchy.env guest sunshine prepare --apply
+scripts/omarchy-setup --config config/omarchy.env guest microphone install --apply
+
+scripts/omarchy-setup --config config/omarchy.env guest sunshine status
+scripts/omarchy-setup --config config/omarchy.env guest microphone verify
+```
+
+Sul PC Windows, da PowerShell:
+
+```powershell
+# Prima volta su questo PC: crea/installa la chiave limitata, poi l'autostart.
+.\clients\omarchy-client-setup.ps1 -ConfigPath .\config\omarchy.env `
+  -Module Microphone -InstallKey
+
+# Configura solo le preferenze Moonlight, oppure tutto il lato Windows.
+.\clients\omarchy-client-setup.ps1 -ConfigPath .\config\omarchy.env -Module Moonlight
+.\clients\omarchy-client-setup.ps1 -ConfigPath .\config\omarchy.env -Module All
+```
+
+`--apply` e' necessario per le mutazioni Linux. Senza di esso, la CLI mostra
+la sequenza prevista o delega esclusivamente controlli non distruttivi.
+
+## Aggiungere un secondo PC Windows
+
+1. Copiare il repository e `config/omarchy.env.example` nel nuovo PC.
+2. Creare `config/omarchy.env` con lo stesso host/porta/utente VM, ma con
+   `OMARCHY_CLIENT_ADDRESS` e `OMARCHY_MIC_DEVICE` del nuovo PC.
+3. Nella VM, con quel file di configurazione, aggiungere la regola UFW:
+
+   ```bash
+   scripts/omarchy-setup --config config/omarchy.env guest microphone add-client --apply
+   ```
+
+4. Sul nuovo PC eseguire il modulo `Microphone -InstallKey`.
+
+Ogni PC ha la propria chiave SSH e il proprio launcher. Il progetto supporta
+piu' PC autorizzati, ma **una sola sorgente vocale Moonlight alla volta**: una
+singola richiesta PipeWire di Discord/VoxType non identifica quale client
+remoto dovrebbe rispondere. Se due watcher restano connessi insieme, entrambi
+potrebbero ricevere `active` e inviare audio; non farlo.
+
+## Prove versionate
+
+![Moonlight HEVC a circa 60 FPS e NVENC attivo; il worker pesante VoxType non e' residente nello scatto idle.](../evidence/moonlight-hevc-nvtop-idle-model-unloaded.png)
+
+Questo screenshot mostra Moonlight a `1920x1200`, circa `59.88 FPS`, codec
+HEVC, zero drop rete nell'overlay e Sunshine/NVENC visibile in NVTOP. Nel
+fermo immagine l'OSD VoxType occupa pochi MiB: e' il comportamento atteso a
+riposo con `on_demand_loading = true`, non il modello Whisper pre-caricato.
+
+![Trascrizione riuscita con notifica e picchi di calcolo NVTOP durante il lavoro on-demand.](../evidence/voxtype-transcription-nvtop-on-demand.png)
+
+Qui la notifica mostra `Ciao, come stai?`; il grafico NVTOP registra i picchi
+di calcolo del transcriber. Lo screenshot e' successivo alla risposta, quindi
+il processo pesante puo' essere gia' stato scaricato: non va interpretato come
+una misura del picco massimo di VRAM.
+
+![Worker VoxType presente in VRAM durante l'elaborazione.](../evidence/voxtype-model-vram-during-transcription.png)
+
+Questa prova mostra il worker `voxtype` mentre occupa circa `469 MiB` di VRAM,
+oltre ai pochi MiB dell'OSD. Dimostra il caricamento GPU durante l'uso; il
+comportamento a riposo e' documentato nello screenshot precedente.

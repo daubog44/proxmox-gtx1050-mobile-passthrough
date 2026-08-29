@@ -6,7 +6,7 @@ set -Eeuo pipefail
 
 readonly SINK_NAME='voxtype_remote_mic'
 readonly SOURCE_NAME="${SINK_NAME}.monitor"
-port="${1:-40100}"
+port="${VOXTYPE_RTP_PORT:-${1:-40100}}"
 [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) || {
   echo 'Uso: voxtype-remote-mic-rtp-receive [porta-udp]' >&2
   exit 2

@@ -3,7 +3,7 @@
 # This deliberately uses Hyprland's headless output instead of faking a DRM connector.
 set -Eeuo pipefail
 
-readonly USER_NAME='daubog44'
+readonly USER_NAME="${OMARCHY_USER:-${SUDO_USER:-daubog44}}"
 readonly USER_HOME="/home/$USER_NAME"
 readonly ENV_FILE="$USER_HOME/.config/uwsm/env-hyprland"
 readonly SUNSHINE_FILE="$USER_HOME/.config/sunshine/sunshine.conf"

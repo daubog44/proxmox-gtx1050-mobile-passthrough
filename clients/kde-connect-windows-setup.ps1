@@ -25,8 +25,8 @@ param(
 .EXAMPLE
   .\kde-connect-windows-setup.ps1 -Show
   .\kde-connect-windows-setup.ps1 -ConfigureFirewall
-  .\kde-connect-windows-setup.ps1 -ConfigureFirewall -PeerAddress 192.168.0.28
-  .\kde-connect-windows-setup.ps1 -ConfigureFirewall -AllowedSubnet 192.168.0.0/24
+  .\kde-connect-windows-setup.ps1 -ConfigureFirewall -PeerAddress <ip-vm>
+  .\kde-connect-windows-setup.ps1 -ConfigureFirewall -AllowedSubnet <subnet-lan>
   .\kde-connect-windows-setup.ps1 -PairDeviceId <ID-mostrato-da-Show>
 #>
 

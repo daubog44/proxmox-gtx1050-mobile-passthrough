@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# One reproducible entry point for the Proxmox node and the Omarchy guest.
+# It deliberately runs in the context that owns the change; it never hides
+# remote SSH, passwords, VM shutdowns, or reboots behind a "complete" button.
+set -Eeuo pipefail
+
+repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+config_file="$repo_root/config/omarchy.env"
+apply=0
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+require_root() { (( EUID == 0 )) || die 'eseguire come root nel contesto indicato'; }
+
+usage() {
+  cat <<'EOF'
+Uso:
+  scripts/omarchy-setup [--config FILE] plan
+  scripts/omarchy-setup [--config FILE] proxmox gpu-prepare [--apply]
+  scripts/omarchy-setup [--config FILE] proxmox gpu-switch [--apply]
+  scripts/omarchy-setup [--config FILE] guest sunshine <prepare|verify|status|rollback> [--apply]
+  scripts/omarchy-setup [--config FILE] guest microphone <install|verify|add-client> [--apply]
+  scripts/omarchy-setup [--config FILE] guest all [--apply]
+
+Prima esecuzione:
+  cp config/omarchy.env.example config/omarchy.env
+  # modifica indirizzi, utente, VMID, GPU e microfono nel file locale
+
+`proxmox` va eseguito come root sul nodo PVE. `guest` va eseguito come root
+nella VM Omarchy. Senza --apply non scrive nulla: mostra la sequenza o esegue
+solo controlli. Il comando non effettua SSH remoto e non contiene password.
+
+Il modulo microfono configura un solo flusso vocale attivo alla volta. Puoi
+registrare piu' PC, ma non lasciare due client Moonlight con il watcher audio
+attivo contemporaneamente: la VM non puo' dedurre quale microfono remoto debba
+rispondere a una singola richiesta PipeWire.
+EOF
+}
+
+load_config() {
+  [[ -f "$config_file" ]] || die "configurazione mancante: $config_file (copia config/omarchy.env.example)"
+  # Il file e' locale e amministrato dall'utente; non versionarlo e non usare
+  # configurazioni ricevute da fonti non fidate.
+  # shellcheck disable=SC1090
+  source "$config_file"
+  : "${OMARCHY_USER:?OMARCHY_USER mancante}"
+  : "${OMARCHY_VM_ADDRESS:?OMARCHY_VM_ADDRESS mancante}"
+  : "${OMARCHY_VM_HOST:?OMARCHY_VM_HOST mancante}"
+  : "${OMARCHY_CLIENT_ADDRESS:?OMARCHY_CLIENT_ADDRESS mancante}"
+  : "${OMARCHY_RTP_PORT:?OMARCHY_RTP_PORT mancante}"
+  : "${OMARCHY_VM_ID:?OMARCHY_VM_ID mancante}"
+  : "${OMARCHY_GPU_BDF:?OMARCHY_GPU_BDF mancante}"
+  : "${OMARCHY_ROM_SOURCE:?OMARCHY_ROM_SOURCE mancante}"
+  if [[ "$OMARCHY_ROM_SOURCE" != /* ]]; then
+    OMARCHY_ROM_SOURCE="$repo_root/${OMARCHY_ROM_SOURCE#./}"
+  fi
+  [[ "$OMARCHY_RTP_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && (( OMARCHY_RTP_PORT <= 65535 )) || die 'OMARCHY_RTP_PORT non valida'
+  [[ "$OMARCHY_CLIENT_ADDRESS" =~ ^[0-9a-fA-F:.]+$ ]] || die 'OMARCHY_CLIENT_ADDRESS non valida'
+}
+
+user_systemctl() {
+  local uid
+  uid="$(id -u "$OMARCHY_USER")"
+  runuser -u "$OMARCHY_USER" -- env \
+    XDG_RUNTIME_DIR="/run/user/$uid" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+    systemctl --user "$@"
+}
+
+write_ptt_bindings() {
+  local home bindings backup
+  home="$(getent passwd "$OMARCHY_USER" | cut -d: -f6)"
+  [[ -n "$home" && -d "$home" ]] || die "home non trovata per $OMARCHY_USER"
+  bindings="$home/.config/hypr/bindings.lua"
+  [[ -f "$bindings" ]] || die "bindings Hyprland non trovato: $bindings"
+  backup="$home/.config/omarchy-setup-backups/bindings.lua.before-voxtype"
+  if [[ ! -e "$backup" ]]; then
+    install -d -o "$OMARCHY_USER" -g "$OMARCHY_USER" -m 0700 "$(dirname "$backup")"
+    cp -a "$bindings" "$backup"
+  fi
+  sed -i '/-- BEGIN omarchy-setup voxtype microphone/,/-- END omarchy-setup voxtype microphone/d' "$bindings"
+  # Replace precisely the earlier manual copies made for the same PTT. Leave
+  # unrelated personal bindings untouched.
+  sed -i '/o\.bind("SUPER + H", "Voxtype PTT /d; /o\.bind("HOME", "Voxtype PTT /d' "$bindings"
+  cat >>"$bindings" <<'EOF'
+
+-- BEGIN omarchy-setup voxtype microphone
+-- Windows microphone is armed first, then VoxType records after a short
+-- DirectShow/RTP pre-roll. Caps Lock is mapped to Super on this client.
+o.bind("SUPER + H", "Voxtype PTT start (Caps Lock + H)", "bash -c 'voxtype-remote-mic-demand arm; sleep 0.18; test -e /run/user/$(id -u)/voxtype/remote-mic-demand && voxtype record start'")
+o.bind("SUPER + H", "Voxtype PTT stop (Caps Lock + H)", "bash -c 'voxtype record stop; voxtype-remote-mic-demand disarm'", { release = true })
+o.bind("HOME", "Voxtype PTT start (Home)", "bash -c 'voxtype-remote-mic-demand arm; sleep 0.18; test -e /run/user/$(id -u)/voxtype/remote-mic-demand && voxtype record start'")
+o.bind("HOME", "Voxtype PTT stop (Home)", "bash -c 'voxtype record stop; voxtype-remote-mic-demand disarm'", { release = true })
+-- END omarchy-setup voxtype microphone
+EOF
+  chown "$OMARCHY_USER:$OMARCHY_USER" "$bindings"
+}
+
+install_microphone() {
+  require_root
+  local home bin_dir unit_dir env_file service_file
+  home="$(getent passwd "$OMARCHY_USER" | cut -d: -f6)"
+  [[ -n "$home" && -d "$home" ]] || die "home non trovata per $OMARCHY_USER"
+  command -v ffmpeg >/dev/null || die 'ffmpeg mancante nella VM'
+  command -v pactl >/dev/null || die 'pactl/PipeWire Pulse mancante nella VM'
+  command -v pw-cat >/dev/null || die 'pw-cat mancante nella VM'
+  command -v voxtype >/dev/null || die 'VoxType non installato nella VM'
+  bin_dir="$home/.local/bin"
+  unit_dir="$home/.config/systemd/user"
+  env_file="$home/.config/voxtype/remote-mic.env"
+  service_file="$unit_dir/voxtype-remote-mic-rtp.service"
+  install -d -o "$OMARCHY_USER" -g "$OMARCHY_USER" -m 0755 "$bin_dir" "$unit_dir" "$(dirname "$env_file")"
+  install -o "$OMARCHY_USER" -g "$OMARCHY_USER" -m 0755 \
+    "$repo_root/scripts/voxtype-remote-mic-rtp-receive" \
+    "$repo_root/scripts/voxtype-remote-mic-control-follow" \
+    "$repo_root/scripts/voxtype-remote-mic-demand" \
+    "$repo_root/scripts/voxtype-remote-mic-ssh-dispatch" \
+    -t "$bin_dir"
+  printf 'VOXTYPE_RTP_PORT=%s\n' "$OMARCHY_RTP_PORT" >"$env_file"
+  chown "$OMARCHY_USER:$OMARCHY_USER" "$env_file"
+  install -o "$OMARCHY_USER" -g "$OMARCHY_USER" -m 0644 \
+    "$repo_root/systemd/voxtype-remote-mic-rtp.service" "$service_file"
+  loginctl enable-linger "$OMARCHY_USER"
+  user_systemctl daemon-reload
+  user_systemctl enable --now voxtype-remote-mic-rtp.service
+  ufw allow from "$OMARCHY_CLIENT_ADDRESS" to any port "$OMARCHY_RTP_PORT" proto udp \
+    comment "Omarchy Voxtype RTP microphone"
+  write_ptt_bindings
+  note "microfono VM pronto: UDP $OMARCHY_RTP_PORT ammessa solo da $OMARCHY_CLIENT_ADDRESS"
+  note 'installa poi la chiave e l’autostart dal PC Windows con clients/omarchy-client-setup.ps1'
+}
+
+verify_microphone() {
+  require_root
+  local home env_file
+  home="$(getent passwd "$OMARCHY_USER" | cut -d: -f6)"
+  env_file="$home/.config/voxtype/remote-mic.env"
+  [[ -r "$env_file" ]] || die "configurazione microfono mancante: $env_file"
+  grep -Fxq "VOXTYPE_RTP_PORT=$OMARCHY_RTP_PORT" "$env_file" || die 'porta del servizio diversa dalla configurazione locale'
+  user_systemctl is-enabled voxtype-remote-mic-rtp.service
+  user_systemctl is-active voxtype-remote-mic-rtp.service
+  loginctl show-user "$OMARCHY_USER" -p Linger
+  pactl list short sources | grep -F 'voxtype_remote_mic.monitor'
+  note 'controllo completato; l’assenza di un processo FFmpeg Windows a riposo e normale e desiderata'
+}
+
+proxmox_gpu_prepare() {
+  require_root
+  local args=(--prepare-host --gpu "$OMARCHY_GPU_BDF" --rom-source "$OMARCHY_ROM_SOURCE")
+  if (( apply )); then
+    "$repo_root/scripts/gpu-vm-switch" "${args[@]}"
+  else
+    "$repo_root/scripts/gpu-vm-switch" "${args[@]}" --dry-run --yes
+  fi
+}
+
+proxmox_gpu_switch() {
+  require_root
+  local args=(--vm "$OMARCHY_VM_ID" --gpu "$OMARCHY_GPU_BDF")
+  if (( apply )); then
+    "$repo_root/scripts/gpu-vm-switch" "${args[@]}"
+  else
+    "$repo_root/scripts/gpu-vm-switch" "${args[@]}" --dry-run --yes
+  fi
+}
+
+guest_sunshine() {
+  local action=$1
+  if (( ! apply )) && [[ "$action" != verify && "$action" != status ]]; then
+    note "anteprima: OMARCHY_USER=$OMARCHY_USER $repo_root/scripts/omarchy-gtx-primary $action"
+    return 0
+  fi
+  require_root
+  OMARCHY_USER="$OMARCHY_USER" "$repo_root/scripts/omarchy-gtx-primary" "$action"
+}
+
+show_plan() {
+  cat <<EOF
+1. [NODO PVE]  scripts/omarchy-setup --config $config_file proxmox gpu-prepare --apply
+2. [NODO PVE]  scripts/omarchy-setup --config $config_file proxmox gpu-switch --apply
+3. [VM]        scripts/omarchy-setup --config $config_file guest sunshine prepare --apply
+4. [VM]        scripts/omarchy-setup --config $config_file guest microphone install --apply
+5. [WINDOWS]   .\\clients\\omarchy-client-setup.ps1 -ConfigPath .\\config\\omarchy.env -Module Microphone -InstallKey
+6. [WINDOWS]   .\\clients\\omarchy-client-setup.ps1 -ConfigPath .\\config\\omarchy.env -Module Microphone
+7. [VM]        scripts/omarchy-setup --config $config_file guest sunshine status
+8. [VM]        scripts/omarchy-setup --config $config_file guest microphone verify
+EOF
+}
+
+while (( $# )); do
+  case "$1" in
+    --config) (( $# >= 2 )) || die '--config richiede un file'; config_file=$2; shift 2 ;;
+    --apply) apply=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) break ;;
+  esac
+done
+(( $# >= 1 )) || { usage >&2; exit 2; }
+load_config
+
+case "$1" in
+  plan) [[ $# -eq 1 ]] || die 'plan non accetta altri argomenti'; show_plan ;;
+  proxmox)
+    case "${2:-}" in
+      gpu-prepare) proxmox_gpu_prepare ;;
+      gpu-switch) proxmox_gpu_switch ;;
+      *) die 'modulo Proxmox: gpu-prepare oppure gpu-switch' ;;
+    esac ;;
+  guest)
+    case "${2:-}" in
+      sunshine) case "${3:-}" in prepare|verify|status|rollback) guest_sunshine "$3" ;; *) die 'azione Sunshine non valida' ;; esac ;;
+      microphone)
+        case "${3:-}" in
+          install) if (( apply )); then install_microphone; else note 'anteprima: installazione file, servizio utente, linger, UFW e binding PTT'; fi ;;
+          verify) verify_microphone ;;
+          add-client)
+            if (( apply )); then require_root; ufw allow from "$OMARCHY_CLIENT_ADDRESS" to any port "$OMARCHY_RTP_PORT" proto udp comment 'Omarchy Voxtype RTP microphone'; else note "anteprima: abilito $OMARCHY_CLIENT_ADDRESS -> UDP $OMARCHY_RTP_PORT"; fi ;;
+          *) die 'azione microfono: install, verify oppure add-client' ;;
+        esac ;;
+      all)
+        if (( apply )); then guest_sunshine prepare; install_microphone; else note 'anteprima: Sunshine headless + ricevitore microfono/pipewire/PTT'; fi ;;
+      *) die 'modulo guest: sunshine, microphone oppure all' ;;
+    esac ;;
+  *) usage >&2; exit 2 ;;
+esac
