@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Receive low-latency RTP/Opus microphone audio from a trusted Windows client
+# and expose it to VoxType through PipeWire. The UDP firewall rule must be
+# restricted to the client IP; this process intentionally has no SSH shell.
+set -Eeuo pipefail
+
+readonly SINK_NAME='voxtype_remote_mic'
+readonly SOURCE_NAME="${SINK_NAME}.monitor"
+port="${1:-40100}"
+[[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) || {
+  echo 'Uso: voxtype-remote-mic-rtp-receive [porta-udp]' >&2
+  exit 2
+}
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
+command -v ffmpeg >/dev/null || { echo 'ffmpeg non disponibile' >&2; exit 1; }
+command -v pactl >/dev/null || { echo 'pactl non disponibile' >&2; exit 1; }
+command -v pw-cat >/dev/null || { echo 'pw-cat non disponibile' >&2; exit 1; }
+
+if ! pactl list short sinks | awk '{print $2}' | grep -Fxq "$SINK_NAME"; then
+  pactl load-module module-null-sink \
+    "sink_name=$SINK_NAME" \
+    'sink_properties=device.description=Voxtype Remote Microphone' >/dev/null
+fi
+pactl list short sources | awk '{print $2}' | grep -Fxq "$SOURCE_NAME" || {
+  echo "sorgente PipeWire non disponibile: $SOURCE_NAME" >&2
+  exit 1
+}
+pactl set-default-source "$SOURCE_NAME"
+
+sdp="$(mktemp --tmpdir voxtype-rtp-XXXXXX.sdp)"
+trap 'rm -f "$sdp"' EXIT
+cat >"$sdp" <<EOF
+v=0
+o=- 0 0 IN IP4 0.0.0.0
+s=Voxtype Windows microphone
+c=IN IP4 0.0.0.0
+t=0 0
+m=audio $port RTP/AVP 111
+a=rtpmap:111 opus/48000/2
+EOF
+
+# A bounded UDP FIFO and no RTP reordering prevent delayed packets from being
+# transcribed later. Small fixed Opus frames keep bandwidth and latency low.
+ffmpeg -nostdin -hide_banner -loglevel warning \
+  -protocol_whitelist file,udp,rtp -fflags nobuffer -flags low_delay \
+  -analyzeduration 0 -probesize 32 -max_delay 0 \
+  -i "$sdp" -ac 1 -ar 16000 -f s16le - | \
+  pw-cat --playback --raw --format s16 --rate 16000 --channels 1 \
+    --target "$SINK_NAME" -

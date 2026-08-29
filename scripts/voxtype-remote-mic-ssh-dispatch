@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Forced command for the dedicated Windows microphone key. It exposes exactly
+# the two expected operations and never a shell, forwarding or arbitrary SSH
+# command.
+set -Eeuo pipefail
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  voxtype-remote-mic-receive)
+    exec "$HOME/.local/bin/voxtype-remote-mic-receive"
+    ;;
+  voxtype-remote-mic-control-follow)
+    exec "$HOME/.local/bin/voxtype-remote-mic-control-follow"
+    ;;
+  *)
+    echo 'Comando microfono non autorizzato.' >&2
+    exit 126
+    ;;
+esac

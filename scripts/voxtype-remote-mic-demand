@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Arm the Windows microphone before VoxType begins recording. The short delay
+# in the Hyprland bind lets DirectShow/RTP start without capturing a permanent
+# microphone stream when no application needs it.
+set -Eeuo pipefail
+
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+demand_file="$runtime_dir/voxtype/remote-mic-demand"
+mkdir -p "$(dirname "$demand_file")"
+
+case "${1:-}" in
+  arm) : >"$demand_file" ;;
+  disarm) rm -f "$demand_file" ;;
+  *) echo 'Uso: voxtype-remote-mic-demand arm|disarm' >&2; exit 2 ;;
+esac

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Receive signed 16-bit mono PCM over SSH and expose it to VoxType as a
+# PipeWire source. This program is deliberately stdin-only: SSH provides the
+# authenticated, encrypted transport and no extra listening port is opened.
+set -Eeuo pipefail
+
+readonly SINK_NAME='voxtype_remote_mic'
+readonly SOURCE_NAME="${SINK_NAME}.monitor"
+
+rate=16000
+if [[ "${1:-}" == '--rate' ]]; then
+  rate="${2:-}"
+  shift 2
+fi
+[[ $# -eq 0 && "$rate" =~ ^(8000|16000|24000|48000)$ ]] || {
+  echo 'Uso: voxtype-remote-mic-receive [--rate 8000|16000|24000|48000]' >&2
+  exit 2
+}
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
+command -v pactl >/dev/null || { echo 'pactl non disponibile' >&2; exit 1; }
+command -v pw-cat >/dev/null || { echo 'pw-cat non disponibile' >&2; exit 1; }
+
+if ! pactl list short sinks | awk '{print $2}' | grep -Fxq "$SINK_NAME"; then
+  pactl load-module module-null-sink \
+    "sink_name=$SINK_NAME" \
+    'sink_properties=device.description=Voxtype Remote Microphone' >/dev/null
+fi
+
+pactl list short sources | awk '{print $2}' | grep -Fxq "$SOURCE_NAME" || {
+  echo "sorgente PipeWire non disponibile: $SOURCE_NAME" >&2
+  exit 1
+}
+
+# VoxType's PipeWire backend expects the backend name, not a Pulse source
+# name. Make this monitor the session default every time the tunnel connects,
+# so VoxType can simply use `device = "pipewire"` after a reboot as well.
+pactl set-default-source "$SOURCE_NAME"
+
+# `pw-cat` creates an input stream on the null sink. Its monitor is therefore
+# the microphone source read by VoxType. When the Windows client closes SSH,
+# stdin ends and this command exits without leaving a listener.
+exec pw-cat --playback --raw --format s16 --rate "$rate" --channels 1 \
+  --target "$SINK_NAME" -

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Emit the current microphone demand for the Windows RTP sender. A persistent
+# SSH connection carries only `active` / `idle`; it receives no audio and can
+# neither run a shell nor accept arbitrary input.
+set -Eeuo pipefail
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
+readonly state_file="$XDG_RUNTIME_DIR/voxtype/state"
+readonly demand_file="$XDG_RUNTIME_DIR/voxtype/remote-mic-demand"
+readonly connection_file="$XDG_RUNTIME_DIR/voxtype/remote-mic-control-connected"
+readonly source_name='voxtype_remote_mic.monitor'
+
+command -v pactl >/dev/null || { echo 'pactl non disponibile' >&2; exit 1; }
+
+mkdir -p "$(dirname "$connection_file")"
+: >"$connection_file"
+trap 'rm -f "$connection_file"' EXIT HUP INT TERM
+
+last=''
+heartbeat=0
+while true; do
+  wanted=idle
+  if [[ ( -e "$demand_file" && -e "$connection_file" ) || "$(<"$state_file" 2>/dev/null || true)" == recording ]]; then
+    wanted=active
+  else
+    source_id="$(pactl list short sources | awk -v n="$source_name" '$2 == n { print $1; exit }')"
+    if [[ -n "$source_id" ]] && pactl list short source-outputs | awk -v id="$source_id" '$2 == id { found=1 } END { exit !found }'; then
+      wanted=active
+    fi
+  fi
+  # Send transitions immediately and a slow heartbeat. A line every 100 ms
+  # could build an SSH stdout backlog and delay a subsequent `idle` command.
+  if [[ "$wanted" != "$last" || "$heartbeat" -ge 10 ]]; then
+    printf '%s\n' "$wanted"
+    last="$wanted"
+    heartbeat=0
+  else
+    heartbeat=$((heartbeat + 1))
+  fi
+  sleep 0.1
+done
