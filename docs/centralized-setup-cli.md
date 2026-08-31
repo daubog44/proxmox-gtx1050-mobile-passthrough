@@ -325,13 +325,13 @@ Sul PC Windows, da PowerShell:
 .\clients\omarchy-client-setup.ps1 -ConfigPath .\config\omarchy.env -Module All
 ```
 
-Sul PC Fedora Workstation, dal clone del repository e come **utente desktop**:
+Sul PC Fedora Workstation, come **utente desktop**:
 
 ```bash
-# Senza clonare la repository: installa l'ultimo RPM pubblicato su GitHub,
-# poi esegui il solo comando necessario. DNF installa anche le dipendenze RPM;
-# Moonlight Flatpak viene aggiunto dal wizard.
-sudo dnf install -y https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/latest/download/omarchy-fedora-client-latest.noarch.rpm
+# Senza clonare la repository: installa l'RPM versionato online, poi esegui
+# il solo comando necessario. DNF installa anche le dipendenze RPM; Moonlight
+# Flatpak viene aggiunto dal wizard.
+sudo dnf install -y https://raw.githubusercontent.com/daubog44/proxmox-gtx1050-mobile-passthrough/main/releases/omarchy-fedora-client-latest.noarch.rpm
 omarchy-onboard --apply
 
 # Unico comando per un nuovo client: se manca, apre il wizard per il file .env;
@@ -371,6 +371,11 @@ entrambi i lati. Il servizio microfono parte dopo il login grafico Fedora e
 non usa `sudo` a ogni avvio: l'unico `sudo` possibile e' quello esplicito per
 installare pacchetti o, se richiesto, le due regole firewall.
 
+L'RPM `latest` e' costruito su Fedora 44; l'hash SHA-256 della copia corrente
+e' pubblicato in [`releases/SHA256SUMS`](../releases/SHA256SUMS). Il pacchetto
+non include password o indirizzi: il wizard li salva localmente con permessi
+`0600` in `~/.config/omarchy/omarchy.env`.
+
 `--apply` e' necessario per le mutazioni Linux. Senza opzioni mutanti, la CLI
 stampa la sequenza prevista e funziona anche fuori da PVE/Omarchy. `--dry-run`
 esegue invece la simulazione reale di `gpu-vm-switch`: non scrive, ma va
@@ -378,11 +383,13 @@ lanciata come root sul nodo PVE perche' deve interrogare `qm` e l'hardware.
 
 ## Aggiungere un secondo PC Windows o Fedora
 
-1. Copiare il repository e `config/omarchy.env.example` nel nuovo PC.
-2. Creare `config/omarchy.env` con lo stesso host/porta/utente VM, ma con
-   `OMARCHY_CLIENT_ADDRESS` e `OMARCHY_MIC_DEVICE` (Windows) oppure
-   `OMARCHY_FEDORA_MIC_SOURCE` (Fedora) del nuovo PC.
-3. Nella VM, con quel file di configurazione, aggiungere la regola UFW:
+1. Su Fedora installare l'RPM e avviare `omarchy-onboard --apply`; il wizard
+   crea il file locale. Su Windows copiare `config/omarchy.env.example` nel
+   nuovo PC e creare `config/omarchy.env`.
+2. Usare stesso host/porta/utente VM, ma un diverso `OMARCHY_CLIENT_ADDRESS` e
+   `OMARCHY_MIC_DEVICE` (Windows) oppure `OMARCHY_FEDORA_MIC_SOURCE` (Fedora).
+3. Il wizard Fedora aggiunge la regola UFW via SSH; su Windows o in caso di
+   configurazione manuale, nella VM aggiungere la regola UFW:
 
    ```bash
    scripts/omarchy-setup --config config/omarchy.env guest microphone add-client --apply
