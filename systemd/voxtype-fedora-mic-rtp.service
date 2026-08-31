@@ -1,0 +1,13 @@
+[Unit]
+Description=Omarchy Fedora client on-demand RTP microphone sender
+After=graphical-session.target pipewire-pulse.service
+Wants=pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/voxtype-fedora-mic-rtp --config %h/.config/omarchy/omarchy.env --watch
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

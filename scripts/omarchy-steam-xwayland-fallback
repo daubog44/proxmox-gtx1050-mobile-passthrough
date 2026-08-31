@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# Apply XWayland only to a Steam app that has demonstrated a native-Wayland
+# failure. It never changes Chromium, Electron globally, or other Steam apps.
+set -Eeuo pipefail
+
+user="${OMARCHY_USER:-}"
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+require_root() { (( EUID == 0 )) || die 'eseguire come root nella VM Omarchy'; }
+
+usage() {
+  cat <<'EOF'
+Uso:
+  OMARCHY_USER=<utente> omarchy-steam-xwayland-fallback enable <app-id|nome-esatto>
+  OMARCHY_USER=<utente> omarchy-steam-xwayland-fallback disable <app-id|nome-esatto>
+  OMARCHY_USER=<utente> omarchy-steam-xwayland-fallback status <app-id|nome-esatto>
+  OMARCHY_USER=<utente> omarchy-steam-xwayland-fallback list
+
+Il nome e' cercato fra i giochi Steam installati, senza distinzione tra
+maiuscole/minuscole. Se il nome non e' univoco, il comando si ferma.
+
+enable  salva l'opzione Steam corrente dell'app e aggiunge solo
+        --ozone-platform=x11 a quell'AppID.
+disable ripristina esattamente l'opzione salvata.
+
+Steam deve essere chiuso prima di enable/disable: altrimenti potrebbe
+riscrivere localconfig.vdf e annullare la modifica.
+EOF
+}
+
+[[ -n "$user" ]] || die 'OMARCHY_USER mancante'
+getent passwd "$user" >/dev/null || die "utente inesistente: $user"
+home="$(getent passwd "$user" | cut -d: -f6)"
+state_dir="$home/.config/omarchy/steam-xwayland-fallback"
+
+app_selector="${2:-}"
+case "${1:-}" in
+  enable|disable|status) [[ -n "$app_selector" ]] || die 'indica un AppID o il nome esatto del gioco Steam' ;;
+  list|-h|--help) ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+if [[ "${1:-}" == list ]]; then
+  if [[ -d "$state_dir" ]]; then
+    find "$state_dir" -maxdepth 1 -type f -name '*.json' -printf '%f\n' | sed 's/\.json$//' | sort
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then usage; exit 0; fi
+
+steam_root=''
+for candidate in "$home/.local/share/Steam" "$home/.steam/steam"; do
+  if [[ -d "$candidate/userdata" ]]; then steam_root="$candidate"; break; fi
+done
+[[ -n "$steam_root" ]] || die "profilo Steam non trovato per $user"
+
+if [[ "$app_selector" =~ ^[0-9]+$ ]]; then
+  app_id="$app_selector"
+else
+  app_id="$(python3 - "$steam_root/steamapps" "$app_selector" <<'PY'
+import pathlib
+import re
+import sys
+
+steamapps = pathlib.Path(sys.argv[1])
+selector = sys.argv[2].casefold()
+matches = []
+for manifest in steamapps.glob("appmanifest_*.acf"):
+    text = manifest.read_text(encoding="utf-8", errors="replace")
+    app_id = re.search(r'^\s*"appid"\s+"([0-9]+)"\s*$', text, re.MULTILINE)
+    name = re.search(r'^\s*"name"\s+"(.*)"\s*$', text, re.MULTILINE)
+    if app_id and name and name.group(1).casefold() == selector:
+        matches.append((app_id.group(1), name.group(1)))
+if len(matches) == 1:
+    print(matches[0][0])
+elif not matches:
+    raise SystemExit(f"nessun gioco Steam installato si chiama {sys.argv[2]!r}; usa il nome esatto visibile in Libreria")
+else:
+    options = ", ".join(f"{name} ({app_id})" for app_id, name in matches)
+    raise SystemExit(f"nome Steam ambiguo: {options}; usa l'AppID")
+PY
+)"
+fi
+
+mapfile -t config_files < <(find "$steam_root/userdata" -mindepth 3 -maxdepth 3 -path '*/config/localconfig.vdf' -type f -print)
+(( ${#config_files[@]} == 1 )) || die 'trovati zero o piu di un profilo Steam; imposta un solo profilo locale prima di usare il fallback'
+config_file="${config_files[0]}"
+state_file="$state_dir/$app_id.json"
+
+case "${1:-}" in
+  enable|disable)
+    require_root
+    pgrep -u "$user" -x steam >/dev/null 2>&1 && die 'Steam e aperto: chiudilo completamente, poi ripeti il comando'
+    ;;
+esac
+
+install -d -o "$user" -g "$user" -m 0700 "$state_dir"
+python3 - "$1" "$app_id" "$config_file" "$state_file" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+action, app_id, config_arg, state_arg = sys.argv[1:]
+config_path, state_path = pathlib.Path(config_arg), pathlib.Path(state_arg)
+text = config_path.read_text(encoding="utf-8")
+
+class Token:
+    def __init__(self, kind, value, start, end):
+        self.kind, self.value, self.start, self.end = kind, value, start, end
+
+def lex(source):
+    tokens, i, size = [], 0, len(source)
+    while i < size:
+        char = source[i]
+        if char.isspace():
+            i += 1
+        elif char in "{}":
+            tokens.append(Token(char, char, i, i + 1)); i += 1
+        elif char == '"':
+            start, i, out = i, i + 1, []
+            while i < size:
+                if source[i] == "\\" and i + 1 < size:
+                    out.append(source[i + 1]); i += 2
+                elif source[i] == '"':
+                    i += 1; break
+                else:
+                    out.append(source[i]); i += 1
+            else:
+                raise SystemExit("VDF Steam non valido: stringa non chiusa")
+            tokens.append(Token("str", "".join(out), start, i))
+        else:
+            raise SystemExit(f"VDF Steam non valido vicino al carattere {i}")
+    return tokens
+
+def parse_dict(tokens, index):
+    if tokens[index].kind != "{": raise SystemExit("VDF Steam non valido: blocco atteso")
+    index += 1; entries = []
+    while index < len(tokens) and tokens[index].kind != "}":
+        key = tokens[index]
+        if key.kind != "str" or index + 1 >= len(tokens): raise SystemExit("VDF Steam non valido: chiave attesa")
+        value = tokens[index + 1]
+        if value.kind == "{":
+            child, index = parse_dict(tokens, index + 1); entries.append((key, child))
+        elif value.kind == "str":
+            entries.append((key, value)); index += 2
+        else: raise SystemExit("VDF Steam non valido: valore atteso")
+    if index >= len(tokens): raise SystemExit("VDF Steam non valido: blocco non chiuso")
+    return {"entries": entries, "close": tokens[index]}, index + 1
+
+def get_child(node, key):
+    for entry_key, value in node["entries"]:
+        if entry_key.value == key and isinstance(value, dict): return value
+    raise SystemExit(f"VDF Steam inatteso: blocco {key!r} mancante")
+
+def get_value(node, key):
+    for entry_key, value in node["entries"]:
+        if entry_key.value == key and isinstance(value, Token): return value
+    return None
+
+def quote(value): return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+tokens = lex(text)
+if len(tokens) < 2 or tokens[0].kind != "str" or tokens[1].kind != "{": raise SystemExit("VDF Steam inatteso: radice mancante")
+root, _ = parse_dict(tokens, 1)
+apps = get_child(get_child(get_child(get_child(root, "Software"), "Valve"), "Steam"), "apps")
+app = get_child(apps, app_id)
+option = get_value(app, "LaunchOptions")
+current = option.value if option else ""
+
+if action == "status":
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else None
+    print(f"app-id: {app_id}")
+    print(f"fallback: {'enabled' if state else 'disabled'}")
+    print(f"launch-options: {current or '(vuote)'}")
+    raise SystemExit(0)
+
+if action == "enable":
+    if state_path.exists(): raise SystemExit("fallback gia configurato; usa status o disable")
+    cleaned = re.sub(r"(?<!\S)--ozone-platform=(?:x11|wayland|auto)(?!\S)", "", current)
+    desired = " ".join(cleaned.split() + ["--ozone-platform=x11"])
+    state_path.write_text(json.dumps({"original_launch_options": current}, ensure_ascii=False) + "\n", encoding="utf-8")
+elif action == "disable":
+    if not state_path.exists(): raise SystemExit("nessun backup del fallback: non modifico opzioni Steam non gestite")
+    desired = json.loads(state_path.read_text(encoding="utf-8"))["original_launch_options"]
+else: raise SystemExit("azione interna non valida")
+
+if option:
+    updated = text[:option.start] + quote(desired) + text[option.end:]
+else:
+    close = app["close"]
+    line_start = text.rfind("\n", 0, close.start) + 1
+    closing_indent = text[line_start:close.start]
+    updated = text[:line_start] + f'{closing_indent}\t"LaunchOptions"\t\t{quote(desired)}\n' + text[line_start:]
+config_path.write_text(updated, encoding="utf-8")
+if action == "disable": state_path.unlink()
+print(f"{action}: AppID {app_id} -> {desired or '(opzioni originali vuote)'}")
+PY
+chown -R "$user:$user" "$state_dir"
+
+case "${1:-}" in
+  enable) note "fallback XWayland abilitato solo per AppID $app_id" ;;
+  disable) note "opzioni Steam originali ripristinate per AppID $app_id" ;;
+esac

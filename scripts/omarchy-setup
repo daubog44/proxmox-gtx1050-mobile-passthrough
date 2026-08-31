@@ -21,12 +21,15 @@ Uso:
   scripts/omarchy-setup [--config FILE] proxmox gpu-switch [--apply|--dry-run]
   scripts/omarchy-setup [--config FILE] guest sunshine <prepare|verify|status|rollback> [--apply]
   scripts/omarchy-setup [--config FILE] guest microphone <install|verify|add-client> [--apply]
+  scripts/omarchy-setup [--config FILE] guest nvidia <pin|verify> [--apply]
   scripts/omarchy-setup [--config FILE] guest steam <fix|verify> [--apply]
+  scripts/omarchy-setup [--config FILE] guest steam fallback <enable|disable|status> <app-id|nome-esatto> [--apply]
   scripts/omarchy-setup [--config FILE] guest all [--apply]
+  scripts/omarchy-setup [--config FILE] client fedora <all|check|moonlight|microphone|kde-connect|show> [--install-key] [--configure-kde-firewall] [--apply]
 
-Prima esecuzione:
-  cp config/omarchy.env.example config/omarchy.env
-  # modifica indirizzi, utente, VMID, GPU e microfono nel file locale
+Prima esecuzione: se il file `--config` manca, la CLI interattiva chiede e
+salva le variabili non sensibili. In un terminale non interattivo si ferma e
+indica di copiare `config/omarchy.env.example`.
 
 `proxmox` va eseguito come root sul nodo PVE. `guest` va eseguito come root
 nella VM Omarchy. Senza opzioni mutanti la CLI stampa soltanto la sequenza e
@@ -38,28 +41,66 @@ Il modulo microfono configura un solo flusso vocale attivo alla volta. Puoi
 registrare piu' PC, ma non lasciare due client Moonlight con il watcher audio
 attivo contemporaneamente: la VM non puo' dedurre quale microfono remoto debba
 rispondere a una singola richiesta PipeWire.
+
+`client fedora` si esegue come utente desktop sul PC Fedora, non sul nodo PVE
+o nella VM. Senza `--apply` mostra la chiamata riproducibile e non installa
+pacchetti, Flatpak, chiavi o servizi.
 EOF
 }
 
 load_config() {
-  [[ -f "$config_file" ]] || die "configurazione mancante: $config_file (copia config/omarchy.env.example)"
+  ensure_config_file
   # Il file e' locale e amministrato dall'utente; non versionarlo e non usare
   # configurazioni ricevute da fonti non fidate.
   # shellcheck disable=SC1090
   source "$config_file"
-  : "${OMARCHY_USER:?OMARCHY_USER mancante}"
-  : "${OMARCHY_VM_ADDRESS:?OMARCHY_VM_ADDRESS mancante}"
-  : "${OMARCHY_VM_HOST:?OMARCHY_VM_HOST mancante}"
-  : "${OMARCHY_CLIENT_ADDRESS:?OMARCHY_CLIENT_ADDRESS mancante}"
-  : "${OMARCHY_RTP_PORT:?OMARCHY_RTP_PORT mancante}"
-  : "${OMARCHY_VM_ID:?OMARCHY_VM_ID mancante}"
-  : "${OMARCHY_GPU_BDF:?OMARCHY_GPU_BDF mancante}"
-  : "${OMARCHY_ROM_SOURCE:?OMARCHY_ROM_SOURCE mancante}"
+  ensure_config_value OMARCHY_USER 'utente Linux della VM Omarchy' "$(id -un)"
+  ensure_config_value OMARCHY_VM_HOST 'hostname o IP SSH della VM' 'omarchy.local'
+  ensure_config_value OMARCHY_VM_ADDRESS 'indirizzo IP LAN della VM' ''
+  ensure_config_value OMARCHY_CLIENT_ADDRESS 'indirizzo IP LAN di questo PC client' ''
+  ensure_config_value OMARCHY_RTP_PORT 'porta UDP RTP del microfono' '40100'
+  ensure_config_value OMARCHY_MIC_DEVICE 'nome microfono DirectShow Windows (puo essere un placeholder su Fedora)' 'Microphone (USB Audio Device)'
+  ensure_config_value OMARCHY_FEDORA_MIC_SOURCE 'sorgente PipeWire/Pulse Fedora' '@DEFAULT_SOURCE@'
+  ensure_config_value OMARCHY_VM_ID 'VMID Proxmox' '1002'
+  ensure_config_value OMARCHY_GPU_BDF 'BDF GPU sul nodo PVE' '0000:02:00'
+  ensure_config_value OMARCHY_ROM_SOURCE 'percorso VBIOS OEM visto dal repository/nodo' './firmware/gtx1050_hp_native.rom'
+  ensure_config_value OMARCHY_STREAM_MODE 'modalita fallback streaming' '1920x1200@60'
   if [[ "$OMARCHY_ROM_SOURCE" != /* ]]; then
     OMARCHY_ROM_SOURCE="$repo_root/${OMARCHY_ROM_SOURCE#./}"
   fi
   [[ "$OMARCHY_RTP_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && (( OMARCHY_RTP_PORT <= 65535 )) || die 'OMARCHY_RTP_PORT non valida'
   [[ "$OMARCHY_CLIENT_ADDRESS" =~ ^[0-9a-fA-F:.]+$ ]] || die 'OMARCHY_CLIENT_ADDRESS non valida'
+}
+
+ensure_config_file() {
+  [[ -f "$config_file" ]] && return 0
+  [[ -t 0 && -t 1 ]] || die "configurazione mancante: $config_file (copia config/omarchy.env.example oppure esegui da un terminale interattivo)"
+  note "configurazione mancante: creo $config_file con il wizard locale"
+  install -d -m 0700 "$(dirname "$config_file")"
+  umask 077
+  cat >"$config_file" <<'EOF'
+# Creato dal wizard omarchy-setup. Non inserire password, chiavi o token.
+# Questo file e' locale e viene ignorato da Git.
+EOF
+  chmod 0600 "$config_file"
+}
+
+ensure_config_value() {
+  local key=$1 label=$2 default=$3 value=''
+  value="${!key:-}"
+  [[ -n "$value" ]] && return 0
+  [[ -t 0 && -t 1 ]] || die "$key mancante in $config_file"
+  if [[ -n "$default" ]]; then
+    read -r -p "$label [$default]: " value
+    value="${value:-$default}"
+  else
+    while [[ -z "$value" ]]; do
+      read -r -p "$label: " value
+    done
+  fi
+  printf -v "$key" '%s' "$value"
+  printf '%s=%q\n' "$key" "$value" >>"$config_file"
+  chmod 0600 "$config_file"
 }
 
 user_systemctl() {
@@ -129,8 +170,8 @@ write_ptt_bindings() {
   cat >>"$bindings" <<'EOF'
 
 -- BEGIN omarchy-setup voxtype microphone
--- Windows microphone is armed first, then VoxType records after a short
--- DirectShow/RTP pre-roll. Caps Lock is mapped to Super on this client.
+-- The remote microphone is armed first, then VoxType records after a short
+-- RTP pre-roll. Caps Lock is mapped to Super on the original Windows client.
 o.bind("SUPER + H", "Voxtype PTT start (Caps Lock + H)", "bash -c 'voxtype-remote-mic-demand arm; sleep 0.18; test -e /run/user/$(id -u)/voxtype/remote-mic-demand && voxtype record start'")
 o.bind("SUPER + H", "Voxtype PTT stop (Caps Lock + H)", "bash -c 'voxtype record stop; voxtype-remote-mic-demand disarm'", { release = true })
 o.bind("HOME", "Voxtype PTT start (Home)", "bash -c 'voxtype-remote-mic-demand arm; sleep 0.18; test -e /run/user/$(id -u)/voxtype/remote-mic-demand && voxtype record start'")
@@ -171,7 +212,7 @@ install_microphone() {
     comment "Omarchy Voxtype RTP microphone"
   write_ptt_bindings
   note "microfono VM pronto: UDP $OMARCHY_RTP_PORT ammessa solo da $OMARCHY_CLIENT_ADDRESS"
-  note 'installa poi la chiave e l’autostart dal PC Windows con clients/omarchy-client-setup.ps1'
+  note 'installa poi chiave e autostart dal client Windows o Fedora con il rispettivo modulo clients'
 }
 
 verify_microphone() {
@@ -230,14 +271,60 @@ guest_sunshine() {
 }
 
 guest_steam() {
-  local action=$1
+  local action=$1 fallback_action=${2:-} app_id=${3:-}
   case "$action" in
     fix)
       if (( apply )); then require_root; "$repo_root/scripts/omarchy-steam-pascal-fix" apply
       else note "anteprima: sudo $repo_root/scripts/omarchy-steam-pascal-fix apply"; fi ;;
     verify) "$repo_root/scripts/omarchy-steam-pascal-fix" verify ;;
-    *) die 'azione Steam: fix oppure verify' ;;
+    fallback)
+      case "$fallback_action" in
+        enable|disable)
+          [[ -n "$app_id" ]] || die 'Steam fallback richiede un AppID o il nome esatto del gioco'
+          if (( apply )); then
+            require_root
+            OMARCHY_USER="$OMARCHY_USER" "$repo_root/scripts/omarchy-steam-xwayland-fallback" "$fallback_action" "$app_id"
+          else
+            note "anteprima: chiudi Steam, poi sudo OMARCHY_USER=$OMARCHY_USER $repo_root/scripts/omarchy-steam-xwayland-fallback $fallback_action $app_id"
+          fi
+          ;;
+        status)
+          [[ -n "$app_id" ]] || die 'Steam fallback richiede un AppID o il nome esatto del gioco'
+          OMARCHY_USER="$OMARCHY_USER" "$repo_root/scripts/omarchy-steam-xwayland-fallback" status "$app_id"
+          ;;
+        *) die 'azione Steam fallback: enable, disable oppure status' ;;
+      esac
+      ;;
+    *) die 'azione Steam: fix, verify oppure fallback' ;;
   esac
+}
+
+guest_nvidia() {
+  local action=$1
+  case "$action" in
+    pin)
+      if (( apply )); then
+        require_root
+        "$repo_root/scripts/omarchy-nvidia-pascal-branch" apply
+      else
+        note "anteprima: sudo $repo_root/scripts/omarchy-nvidia-pascal-branch apply"
+      fi
+      ;;
+    verify) "$repo_root/scripts/omarchy-nvidia-pascal-branch" verify ;;
+    *) die 'azione NVIDIA: pin oppure verify' ;;
+  esac
+}
+
+client_fedora() {
+  local action=$1
+  local args=(--config "$config_file" --module "$action")
+  (( client_install_key )) && args+=(--install-key)
+  (( client_configure_kde_firewall )) && args+=(--configure-kde-firewall)
+  if (( apply )) || [[ "$action" == show || "$action" == check ]]; then
+    "$repo_root/clients/omarchy-client-setup-fedora.sh" "${args[@]}"
+  else
+    note "anteprima Fedora: $repo_root/clients/omarchy-client-setup-fedora.sh ${args[*]}"
+  fi
 }
 
 show_plan() {
@@ -246,19 +333,25 @@ show_plan() {
 2. [NODO PVE]  scripts/omarchy-setup --config $config_file proxmox gpu-switch --apply
 3. [VM]        scripts/omarchy-setup --config $config_file guest sunshine prepare --apply
 4. [VM]        scripts/omarchy-setup --config $config_file guest microphone install --apply
-5. [WINDOWS]   .\\clients\\omarchy-client-setup.ps1 -ConfigPath .\\config\\omarchy.env -Module Microphone -InstallKey
-6. [WINDOWS]   .\\clients\\omarchy-client-setup.ps1 -ConfigPath .\\config\\omarchy.env -Module Microphone
+5. [CLIENT]    Windows: .\\clients\\omarchy-client-setup.ps1 -ConfigPath .\\config\\omarchy.env -Module Microphone -InstallKey
+               Fedora: scripts/omarchy-setup --config config/omarchy.env client fedora microphone --install-key --apply
+6. [CLIENT]    Windows: .\\clients\\omarchy-client-setup.ps1 -ConfigPath .\\config\\omarchy.env -Module Microphone
+               Fedora: scripts/omarchy-setup --config config/omarchy.env client fedora microphone --apply
 7. [VM]        scripts/omarchy-setup --config $config_file guest sunshine status
 8. [VM]        scripts/omarchy-setup --config $config_file guest microphone verify
 EOF
 }
 
 positionals=()
+client_install_key=0
+client_configure_kde_firewall=0
 while (( $# )); do
   case "$1" in
     --config) (( $# >= 2 )) || die '--config richiede un file'; config_file=$2; shift 2 ;;
     --apply) apply=1; shift ;;
     --dry-run) dry_run=1; shift ;;
+    --install-key) client_install_key=1; shift ;;
+    --configure-kde-firewall) client_configure_kde_firewall=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) positionals+=("$1"); shift ;;
   esac
@@ -287,10 +380,18 @@ case "$1" in
             if (( apply )); then require_root; ufw allow from "$OMARCHY_CLIENT_ADDRESS" to any port "$OMARCHY_RTP_PORT" proto udp comment 'Omarchy Voxtype RTP microphone'; else note "anteprima: abilito $OMARCHY_CLIENT_ADDRESS -> UDP $OMARCHY_RTP_PORT"; fi ;;
           *) die 'azione microfono: install, verify oppure add-client' ;;
         esac ;;
-      steam) guest_steam "${3:-}" ;;
+      steam) guest_steam "${3:-}" "${4:-}" "${5:-}" ;;
+      nvidia) guest_nvidia "${3:-}" ;;
       all)
-        if (( apply )); then guest_sunshine prepare; install_microphone; else note 'anteprima: Sunshine headless + ricevitore microfono/pipewire/PTT'; fi ;;
-      *) die 'modulo guest: sunshine, microphone, steam oppure all' ;;
+        if (( apply )); then guest_nvidia pin; guest_sunshine prepare; install_microphone; else note 'anteprima: guardia driver 580xx + Sunshine headless + ricevitore microfono/pipewire/PTT'; fi ;;
+      *) die 'modulo guest: sunshine, microphone, nvidia, steam oppure all' ;;
+    esac ;;
+  client)
+    case "${2:-}" in
+      fedora)
+        case "${3:-}" in all|check|moonlight|microphone|kde-connect|show) client_fedora "$3" ;; *) die 'modulo client Fedora: all, check, moonlight, microphone, kde-connect oppure show' ;; esac
+        ;;
+      *) die 'modulo client: fedora' ;;
     esac ;;
   *) usage >&2; exit 2 ;;
 esac

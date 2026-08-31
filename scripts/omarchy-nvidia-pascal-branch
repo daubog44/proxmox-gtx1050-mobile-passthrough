@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Keep a Pascal GPU on the proprietary NVIDIA 580xx package family while
+# still permitting normal updates inside that branch.
+set -Eeuo pipefail
+
+readonly HOOK_DIR='/etc/pacman.d/hooks'
+readonly HOOK="$HOOK_DIR/98-omarchy-nvidia-pascal-580xx.hook"
+readonly INSTALLED='/usr/local/sbin/omarchy-nvidia-pascal-branch'
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+require_root() { (( EUID == 0 )) || die 'eseguire come root nella VM Omarchy'; }
+
+assert_580_stack() {
+  local package version
+  for package in nvidia-580xx-dkms nvidia-580xx-utils lib32-nvidia-580xx-utils; do
+    version="$(pacman -Q "$package" 2>/dev/null | awk '{print $2}')" \
+      || die "pacchetto 580xx mancante: $package"
+    [[ "$version" == 580.* ]] || die "$package non e nel ramo 580: $version"
+  done
+}
+
+write_hook() {
+  install -d -m 0755 "$HOOK_DIR"
+  install -m 0755 "$0" "$INSTALLED"
+  cat >"$HOOK" <<'EOF'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+# Generic/current NVIDIA packages and other numbered branches are rejected.
+# The two exclusions leave every future update of 580xx available.
+Target = nvidia
+Target = nvidia-utils
+Target = nvidia-dkms
+Target = nvidia-open
+Target = nvidia-open-dkms
+Target = nvidia-[0-9]*
+Target = lib32-nvidia-utils
+Target = lib32-nvidia-[0-9]*
+Target = !nvidia-580xx-*
+Target = !lib32-nvidia-580xx-*
+
+[Action]
+Description = Protect NVIDIA Pascal on the 580xx branch
+When = PreTransaction
+Exec = /usr/local/sbin/omarchy-nvidia-pascal-branch block
+AbortOnFail
+EOF
+  chmod 0644 "$HOOK"
+}
+
+verify() {
+  assert_580_stack
+  [[ -r "$HOOK" ]] || die "guardia Pacman mancante: $HOOK"
+  grep -Fxq 'When = PreTransaction' "$HOOK" || die 'la guardia Pacman non e pre-transazione'
+  grep -Fxq 'AbortOnFail' "$HOOK" || die 'la guardia Pacman non interrompe la sostituzione'
+  grep -Fxq 'Target = !nvidia-580xx-*' "$HOOK" || die 'gli update 580xx non sono esplicitamente consentiti'
+  grep -Fxq 'Target = !lib32-nvidia-580xx-*' "$HOOK" || die 'gli update lib32 580xx non sono esplicitamente consentiti'
+  ! pacman -Q nvidia-utils lib32-nvidia-utils nvidia-dkms nvidia-open nvidia-open-dkms >/dev/null 2>&1 \
+    || die 'e presente almeno un pacchetto NVIDIA generico incompatibile'
+  note 'ramo NVIDIA Pascal verificato: solo 580xx; guardia Pacman attiva'
+}
+
+block() {
+  cat >&2 <<'EOF'
+ERRORE: la transazione tenta di usare un driver NVIDIA fuori dal ramo Pascal 580xx.
+La GTX 1050 Mobile di questa VM richiede nvidia-580xx-dkms, nvidia-580xx-utils
+e lib32-nvidia-580xx-utils. Aggiorna questi pacchetti 580xx normalmente; non
+accettare la sostituzione con nvidia-utils/lib32-nvidia-utils o il ramo open.
+EOF
+  exit 1
+}
+
+case "${1:-apply}" in
+  apply) require_root; assert_580_stack; write_hook; verify ;;
+  verify) verify ;;
+  block) block ;;
+  -h|--help)
+    cat <<'EOF'
+Uso: omarchy-nvidia-pascal-branch [apply|verify]
+
+apply   installa una guardia Pacman che mantiene il ramo proprietario 580xx.
+verify  controlla stack 580xx e guardia. Gli aggiornamenti minori 580xx restano consentiti.
+EOF
+    ;;
+  *) die "azione sconosciuta: $1" ;;
+esac
