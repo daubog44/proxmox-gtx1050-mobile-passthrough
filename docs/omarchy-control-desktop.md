@@ -21,6 +21,19 @@ grafico e avvia il wizard `onboard`; su macOS avvia e verifica Moonlight, ma
 blocca con un messaggio esplicito il tunnel microfono, perche' non esiste ancora
 un adapter RTP macOS equivalente a quello Windows/Fedora.
 
+Su Fedora non serve clonare la repository. Installare l'RPM pubblicato nella
+[release Omarchy Control 0.1.0](https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/tag/omarchy-control-v0.1.0):
+
+```bash
+curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.1.0/omarchy-control-0.1.0-x86_64.rpm
+sudo dnf install ./omarchy-control-0.1.0-x86_64.rpm
+omarchy-control
+```
+
+Dopo l'installazione l'app compare anche nel menu grafico come **Omarchy Control**.
+Il pacchetto contiene gia' gli script necessari: Node, Rust e Git non servono
+sul PC Fedora.
+
 ## Perche' Moonlight non e' incorporato
 
 Moonlight Qt e' un client completo Qt/C++ GPL-3.0: gestisce decoder hardware,
