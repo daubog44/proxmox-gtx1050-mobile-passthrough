@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 version="${1:-0.1.0}"
+output_dir="${OMARCHY_RPM_OUTPUT:-$repo_root/dist}"
 [[ "$version" =~ ^[0-9]+(\.[0-9]+){1,3}([a-zA-Z0-9._-]+)?$ ]] || {
   printf 'Errore: versione RPM non valida: %s\n' "$version" >&2
   exit 2
@@ -22,6 +23,6 @@ rpmbuild -bb \
   --define "_sourcedir $repo_root" \
   --define "version $version" \
   "$repo_root/packaging/omarchy-fedora-client.spec"
-mkdir -p "$repo_root/dist"
-find "$topdir/RPMS" -type f -name '*.rpm' -exec cp -f {} "$repo_root/dist/" \;
-printf 'RPM creato in %s\n' "$repo_root/dist"
+install -d "$output_dir"
+find "$topdir/RPMS" -type f -name '*.rpm' -exec cp -f {} "$output_dir/" \;
+printf 'RPM creato in %s\n' "$output_dir"
