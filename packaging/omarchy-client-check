@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Read-only diagnostic companion for a package installation.
+set -Eeuo pipefail
+
+config_file="${OMARCHY_SETUP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/omarchy.env}"
+exec /usr/libexec/omarchy-fedora-client/scripts/omarchy-setup \
+  --config "$config_file" client fedora check "$@"

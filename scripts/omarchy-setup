@@ -5,7 +5,9 @@
 set -Eeuo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-config_file="$repo_root/config/omarchy.env"
+# Il wrapper RPM imposta OMARCHY_SETUP_CONFIG nel profilo dell'utente, cosi'
+# il pacchetto resta immutabile in /usr e il wizard non richiede un clone Git.
+config_file="${OMARCHY_SETUP_CONFIG:-$repo_root/config/omarchy.env}"
 apply=0
 dry_run=0
 
@@ -16,6 +18,7 @@ require_root() { (( EUID == 0 )) || die 'eseguire come root nel contesto indicat
 usage() {
   cat <<'EOF'
 Uso:
+  scripts/omarchy-setup [--config FILE] onboard [--apply]
   scripts/omarchy-setup [--config FILE] plan
   scripts/omarchy-setup [--config FILE] proxmox gpu-prepare [--apply|--dry-run]
   scripts/omarchy-setup [--config FILE] proxmox gpu-switch [--apply|--dry-run]
@@ -25,7 +28,7 @@ Uso:
   scripts/omarchy-setup [--config FILE] guest steam <fix|verify> [--apply]
   scripts/omarchy-setup [--config FILE] guest steam fallback <enable|disable|status> <app-id|nome-esatto> [--apply]
   scripts/omarchy-setup [--config FILE] guest all [--apply]
-  scripts/omarchy-setup [--config FILE] client fedora <all|check|moonlight|microphone|kde-connect|show> [--install-key] [--configure-kde-firewall] [--apply]
+  scripts/omarchy-setup [--config FILE] client fedora <onboard|all|check|moonlight|microphone|kde-connect|show> [--install-key] [--configure-kde-firewall] [--apply]
 
 Prima esecuzione: se il file `--config` manca, la CLI interattiva chiede e
 salva le variabili non sensibili. In un terminale non interattivo si ferma e
@@ -45,6 +48,10 @@ rispondere a una singola richiesta PipeWire.
 `client fedora` si esegue come utente desktop sul PC Fedora, non sul nodo PVE
 o nella VM. Senza `--apply` mostra la chiamata riproducibile e non installa
 pacchetti, Flatpak, chiavi o servizi.
+
+Per un nuovo PC Fedora il comando unico da ricordare e' `onboard --apply`:
+apre il wizard .env se necessario, prepara il firewall RTP nella VM via SSH
+con password richiesta nel terminale, poi installa e verifica il client.
 EOF
 }
 
@@ -334,9 +341,9 @@ show_plan() {
 3. [VM]        scripts/omarchy-setup --config $config_file guest sunshine prepare --apply
 4. [VM]        scripts/omarchy-setup --config $config_file guest microphone install --apply
 5. [CLIENT]    Windows: .\\clients\\omarchy-client-setup.ps1 -ConfigPath .\\config\\omarchy.env -Module Microphone -InstallKey
-               Fedora: scripts/omarchy-setup --config config/omarchy.env client fedora microphone --install-key --apply
-6. [CLIENT]    Windows: .\\clients\\omarchy-client-setup.ps1 -ConfigPath .\\config\\omarchy.env -Module Microphone
-               Fedora: scripts/omarchy-setup --config config/omarchy.env client fedora microphone --apply
+               Fedora: scripts/omarchy-setup onboard --apply
+               (wizard: UFW VM, chiave, Moonlight, microfono, KDE Connect, verifica)
+6. [CLIENT]    Facoltativo: client fedora check oppure client fedora show
 7. [VM]        scripts/omarchy-setup --config $config_file guest sunshine status
 8. [VM]        scripts/omarchy-setup --config $config_file guest microphone verify
 EOF
@@ -362,6 +369,10 @@ set -- "${positionals[@]}"
 load_config
 
 case "$1" in
+  onboard)
+    [[ $# -eq 1 ]] || die 'onboard non accetta altri argomenti; eseguilo dal desktop Fedora'
+    client_fedora onboard
+    ;;
   plan) [[ $# -eq 1 ]] || die 'plan non accetta altri argomenti'; show_plan ;;
   proxmox)
     case "${2:-}" in
@@ -389,7 +400,7 @@ case "$1" in
   client)
     case "${2:-}" in
       fedora)
-        case "${3:-}" in all|check|moonlight|microphone|kde-connect|show) client_fedora "$3" ;; *) die 'modulo client Fedora: all, check, moonlight, microphone, kde-connect oppure show' ;; esac
+        case "${3:-}" in onboard|all|check|moonlight|microphone|kde-connect|show) client_fedora "$3" ;; *) die 'modulo client Fedora: onboard, all, check, moonlight, microphone, kde-connect oppure show' ;; esac
         ;;
       *) die 'modulo client: fedora' ;;
     esac ;;

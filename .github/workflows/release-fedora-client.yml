@@ -1,0 +1,53 @@
+name: Release Fedora client RPM
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Versione RPM, senza prefisso v
+        required: true
+        default: '0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-rpm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build RPM in Fedora
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          VERSION="${VERSION#v}"
+          mkdir -p dist
+          docker run --rm -v "$PWD:/src:ro" -v "$PWD/dist:/out" fedora:latest bash -lc '
+            dnf -y install rpm-build
+            cp -a /src /work
+            cd /work
+            packaging/build-fedora-rpm.sh "'"$VERSION"'"
+            cp dist/*.rpm /out/
+          '
+          cp dist/omarchy-fedora-client-*.noarch.rpm dist/omarchy-fedora-client-latest.noarch.rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fedora-rpm
+          path: dist/*.rpm
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-rpm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fedora-rpm
+          path: dist
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.rpm --generate-notes

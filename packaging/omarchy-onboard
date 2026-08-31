@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Public entry point installed by the Fedora RPM.  Keep mutable configuration
+# under the caller's profile, never in the package-owned /usr tree.
+set -Eeuo pipefail
+
+config_file="${OMARCHY_SETUP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/omarchy.env}"
+exec /usr/libexec/omarchy-fedora-client/scripts/omarchy-setup \
+  --config "$config_file" onboard "$@"

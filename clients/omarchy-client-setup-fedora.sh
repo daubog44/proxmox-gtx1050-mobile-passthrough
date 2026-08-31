@@ -18,7 +18,7 @@ Uso:
   clients/omarchy-client-setup-fedora.sh --config FILE [opzioni]
 
 Opzioni:
-  --module all|check|moonlight|microphone|kde-connect|show
+  --module onboard|all|check|moonlight|microphone|kde-connect|show
   --install-key                 autorizza una volta la chiave SSH del microfono
   --configure-kde-firewall      consente KDE Connect solo dall'IP della VM
 
@@ -38,7 +38,7 @@ while (( $# )); do
     *) die "opzione sconosciuta: $1" ;;
   esac
 done
-case "$module" in all|check|moonlight|microphone|kde-connect|show) ;; *) die 'modulo: all, check, moonlight, microphone, kde-connect oppure show' ;; esac
+case "$module" in onboard|all|check|moonlight|microphone|kde-connect|show) ;; *) die 'modulo: onboard, all, check, moonlight, microphone, kde-connect oppure show' ;; esac
 [[ $EUID -ne 0 ]] || die 'esegui come utente desktop Fedora: il servizio deve appartenere al tuo account'
 
 [[ -r /etc/os-release ]] || die '/etc/os-release mancante'
@@ -54,6 +54,25 @@ source "$config_file"
 : "${OMARCHY_VM_ADDRESS:?OMARCHY_VM_ADDRESS mancante}"
 : "${OMARCHY_CLIENT_ADDRESS:?OMARCHY_CLIENT_ADDRESS mancante}"
 : "${OMARCHY_RTP_PORT:?OMARCHY_RTP_PORT mancante}"
+
+validate_onboard_config() {
+  [[ "$OMARCHY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die 'OMARCHY_USER non valido per SSH'
+  [[ "$OMARCHY_VM_HOST" =~ ^[a-zA-Z0-9._:-]+$ ]] || die 'OMARCHY_VM_HOST non valido per SSH'
+  [[ "$OMARCHY_CLIENT_ADDRESS" =~ ^[0-9a-fA-F:.]+$ ]] || die 'OMARCHY_CLIENT_ADDRESS non valido'
+  [[ "$OMARCHY_RTP_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && (( OMARCHY_RTP_PORT <= 65535 )) || die 'OMARCHY_RTP_PORT non valida'
+}
+
+confirm() {
+  local prompt=$1 answer
+  while true; do
+    read -r -p "$prompt [s/N]: " answer
+    case "$answer" in
+      s|S|si|SI|Si) return 0 ;;
+      ''|n|N|no|NO|No) return 1 ;;
+      *) note 'rispondi s oppure n' ;;
+    esac
+  done
+}
 
 install_rpms() {
   local packages=("$@")
@@ -174,6 +193,40 @@ install_kde_connect() {
   note 'apri KDE Connect su Fedora e Omarchy, effettua il pairing e abilita Clipboard su entrambi: il consenso non viene automatizzato'
 }
 
+configure_vm_rtp_firewall() {
+  validate_onboard_config
+  command -v ssh >/dev/null || die 'ssh mancante: installa openssh-clients prima di configurare la VM'
+  note "VM Omarchy: verifico il ricevitore e autorizzo UDP $OMARCHY_RTP_PORT da $OMARCHY_CLIENT_ADDRESS"
+  note 'il terminale puo chiedere prima la password SSH e poi sudo della VM; nessuna password viene salvata'
+  ssh -tt "$OMARCHY_USER@$OMARCHY_VM_HOST" \
+    "test -x ~/.local/bin/voxtype-remote-mic-ssh-dispatch || { echo 'Ricevitore microfono assente nella VM: esegui prima guest microphone install --apply.' >&2; exit 3; }; sudo ufw allow from $OMARCHY_CLIENT_ADDRESS to any port $OMARCHY_RTP_PORT proto udp comment 'Omarchy Voxtype RTP microphone'"
+}
+
+onboard() {
+  validate_onboard_config
+  note '1/5: installo Moonlight e le dipendenze richieste'
+  install_moonlight
+  install_rpms ffmpeg-free openssh-clients iproute pulseaudio-utils pipewire-pulseaudio kde-connect
+
+  note '2/5: la VM deve avere gia il ricevitore RTP installato con: guest microphone install --apply'
+  confirm 'Autorizzare ora la porta RTP sulla VM tramite SSH?' || die 'onboarding interrotto: il firewall RTP della VM e necessario per il microfono'
+  configure_vm_rtp_firewall
+
+  note '3/5: installo watcher e chiave SSH limitata del microfono'
+  install_key=1
+  install_microphone
+
+  note '4/5: installo KDE Connect; il pairing Clipboard resta un consenso manuale nelle due GUI'
+  if confirm 'Limitare il firewall locale di KDE Connect al solo IP della VM?'; then
+    configure_kde_firewall=1
+  fi
+  install_kde_connect
+
+  note '5/5: verifico dipendenze, Moonlight e watcher'
+  check_dependencies || die 'onboarding non completato: leggi le dipendenze mancanti indicate sopra'
+  note 'onboarding completato: apri Moonlight, associa Sunshine e poi approva il pairing KDE Connect su entrambi i PC'
+}
+
 show() {
   "$script_dir/voxtype-fedora-mic-rtp.sh" --config "$config_file" --show
   printf '%-18s %s\n' 'Moonlight Flatpak:' "$(flatpak info com.moonlight_stream.Moonlight >/dev/null 2>&1 && echo installato || echo non-installato)"
@@ -183,6 +236,7 @@ show() {
 
 case "$module" in
   check) check_dependencies ;;
+  onboard) onboard ;;
   moonlight) install_moonlight ;;
   microphone) install_microphone ;;
   kde-connect) install_kde_connect ;;

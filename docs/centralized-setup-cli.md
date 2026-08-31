@@ -328,6 +328,18 @@ Sul PC Windows, da PowerShell:
 Sul PC Fedora Workstation, dal clone del repository e come **utente desktop**:
 
 ```bash
+# Senza clonare la repository: installa l'ultimo RPM pubblicato su GitHub,
+# poi esegui il solo comando necessario. DNF installa anche le dipendenze RPM;
+# Moonlight Flatpak viene aggiunto dal wizard.
+sudo dnf install -y https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/latest/download/omarchy-fedora-client-latest.noarch.rpm
+omarchy-onboard --apply
+
+# Unico comando per un nuovo client: se manca, apre il wizard per il file .env;
+# installa Moonlight e dipendenze, configura via SSH la regola RTP della VM,
+# registra la chiave SSH ristretta, abilita il watcher e verifica tutto.
+# La VM deve avere gia eseguito una volta `guest microphone install --apply`.
+scripts/omarchy-setup onboard --apply
+
 # Anteprima della stessa CLI centrale: non modifica nulla.
 scripts/omarchy-setup --config config/omarchy.env client fedora all
 
@@ -335,7 +347,8 @@ scripts/omarchy-setup --config config/omarchy.env client fedora all
 # Moonlight e watcher; se manca qualcosa stampa il comando d'installazione.
 scripts/omarchy-setup --config config/omarchy.env client fedora check
 
-# Installa Moonlight da Flathub, FFmpeg/SSH/KDE Connect da Fedora e il watcher.
+# Alternativa per riparare/installare manualmente i singoli moduli: installa
+# Moonlight da Flathub, FFmpeg/SSH/KDE Connect da Fedora e il watcher.
 # --install-key chiede una sola volta la password SSH della VM, per registrare
 # una chiave ristretta; non viene salvata.
 scripts/omarchy-setup --config config/omarchy.env \
