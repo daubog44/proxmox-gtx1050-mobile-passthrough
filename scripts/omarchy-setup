@@ -67,7 +67,16 @@ load_config() {
   ensure_config_value OMARCHY_CLIENT_ADDRESS 'indirizzo IP LAN di questo PC client' ''
   ensure_config_value OMARCHY_RTP_PORT 'porta UDP RTP del microfono' '40100'
   ensure_config_value OMARCHY_MIC_DEVICE 'nome microfono DirectShow Windows (puo essere un placeholder su Fedora)' 'Microphone (USB Audio Device)'
-  ensure_config_value OMARCHY_FEDORA_MIC_SOURCE 'sorgente PipeWire/Pulse Fedora' '@DEFAULT_SOURCE@'
+  # Il valore Pulse speciale e' portabile: un file creato in precedenza per
+  # Windows resta quindi utilizzabile anche per l'anteprima Fedora, senza
+  # bloccarla su una variabile che puo' essere risolta a runtime dal client.
+  if [[ -z "${OMARCHY_FEDORA_MIC_SOURCE:-}" ]]; then
+    OMARCHY_FEDORA_MIC_SOURCE='@DEFAULT_SOURCE@'
+    if [[ -t 0 && -t 1 ]]; then
+      printf 'OMARCHY_FEDORA_MIC_SOURCE=%q\n' "$OMARCHY_FEDORA_MIC_SOURCE" >>"$config_file"
+      chmod 0600 "$config_file"
+    fi
+  fi
   ensure_config_value OMARCHY_VM_ID 'VMID Proxmox' '1002'
   ensure_config_value OMARCHY_GPU_BDF 'BDF GPU sul nodo PVE' '0000:02:00'
   ensure_config_value OMARCHY_ROM_SOURCE 'percorso VBIOS OEM visto dal repository/nodo' './firmware/gtx1050_hp_native.rom'

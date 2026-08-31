@@ -103,7 +103,7 @@ print_install_command() {
 check_dependencies() {
   local missing_packages=() missing=0 package command
   local packages=(ffmpeg-free openssh-clients iproute pulseaudio-utils pipewire-pulseaudio kde-connect flatpak)
-  local commands=(ffmpeg ssh ssh-keygen ss pactl kdeconnect-cli flatpak systemctl)
+  local commands=(ffmpeg ssh scp ssh-keygen ss pactl kdeconnect-cli flatpak systemctl)
   printf '%-27s %s\n' 'Sistema:' "Fedora ${VERSION_ID:-sconosciuta}"
   for package in "${packages[@]}"; do
     if rpm -q "$package" >/dev/null 2>&1; then
@@ -193,13 +193,106 @@ install_kde_connect() {
   note 'apri KDE Connect su Fedora e Omarchy, effettua il pairing e abilita Clipboard su entrambi: il consenso non viene automatizzato'
 }
 
-configure_vm_rtp_firewall() {
-  validate_onboard_config
+remote_ssh_options=()
+remote_control_dir=''
+
+cleanup_remote_ssh() {
+  [[ -n "$remote_control_dir" ]] || return 0
+  rm -rf -- "$remote_control_dir"
+  remote_control_dir=''
+}
+
+prepare_remote_ssh() {
+  [[ -n "$remote_control_dir" ]] && return 0
   command -v ssh >/dev/null || die 'ssh mancante: installa openssh-clients prima di configurare la VM'
+  command -v scp >/dev/null || die 'scp mancante: installa openssh-clients prima di configurare la VM'
+  remote_control_dir="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/omarchy-ssh.XXXXXX")"
+  chmod 0700 "$remote_control_dir"
+  remote_ssh_options=(
+    -o StrictHostKeyChecking=accept-new
+    -o ConnectTimeout=10
+    -o ControlMaster=auto
+    -o ControlPersist=2m
+    -o "ControlPath=$remote_control_dir/control"
+  )
+}
+
+vm_receiver_present() {
+  ssh "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" \
+    'test -x ~/.local/bin/voxtype-remote-mic-ssh-dispatch && test -x ~/.local/bin/voxtype-remote-mic-rtp-receive && test -f ~/.config/systemd/user/voxtype-remote-mic-rtp.service'
+}
+
+bootstrap_vm_microphone() (
+  local local_stage remote_stage source destination
+  local sources=(
+    scripts/omarchy-setup
+    scripts/voxtype-remote-mic-rtp-receive
+    scripts/voxtype-remote-mic-control-follow
+    scripts/voxtype-remote-mic-demand
+    scripts/voxtype-remote-mic-ssh-dispatch
+    systemd/voxtype-remote-mic-rtp.service
+  )
+
+  for source in "${sources[@]}"; do
+    [[ -f "$repo_root/$source" ]] || die "bootstrap VM non disponibile: file pacchetto mancante $source"
+  done
+
+  local_stage="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/omarchy-guest-bootstrap.XXXXXX")"
+  chmod 0700 "$local_stage"
+  remote_stage=''
+  cleanup_bootstrap() {
+    rm -rf -- "$local_stage"
+    [[ "$remote_stage" =~ ^/tmp/omarchy-guest-bootstrap\.[A-Za-z0-9]+$ ]] || return 0
+    ssh -o BatchMode=yes "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" "rm -rf -- $remote_stage" >/dev/null 2>&1 || true
+  }
+  trap cleanup_bootstrap EXIT
+  install -d -m 0700 "$local_stage/scripts" "$local_stage/systemd" "$local_stage/config"
+  for source in "${sources[@]}"; do
+    destination="$local_stage/$source"
+    install -D -m "$(test -x "$repo_root/$source" && echo 0755 || echo 0644)" "$repo_root/$source" "$destination"
+  done
+  install -m 0600 "$config_file" "$local_stage/config/omarchy.env"
+
+  note 'ricevitore VM assente: trasferisco soltanto gli script del microfono e la configurazione privata temporanea'
+  remote_stage="$(ssh "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" 'umask 077; mktemp -d /tmp/omarchy-guest-bootstrap.XXXXXX')" || die 'impossibile creare la directory temporanea nella VM via SSH'
+  [[ "$remote_stage" =~ ^/tmp/omarchy-guest-bootstrap\.[A-Za-z0-9]+$ ]] || die 'directory temporanea VM non valida: bootstrap annullato'
+  scp "${remote_ssh_options[@]}" -pr "$local_stage/." "$OMARCHY_USER@$OMARCHY_VM_HOST:$remote_stage/" || die 'trasferimento del ricevitore alla VM fallito'
+
+  note 'VM: installo il ricevitore, il servizio utente, la regola UFW e i binding PTT esistenti'
+  ssh -tt "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" \
+    "trap 'rm -rf -- $remote_stage' EXIT; sudo bash $remote_stage/scripts/omarchy-setup --config $remote_stage/config/omarchy.env guest microphone install --apply" || \
+    die 'bootstrap microfono VM fallito: leggi l errore precedente. Servono VoxType, ffmpeg, PipeWire/Pulse, pw-cat, systemd utente e ufw gia disponibili nella VM Omarchy'
+  trap - EXIT
+  rm -rf -- "$local_stage"
+  note 'ricevitore microfono VM installato e configurato automaticamente'
+)
+
+ensure_vm_microphone_receiver() {
+  validate_onboard_config
+  prepare_remote_ssh
+  note "VM Omarchy: controllo il ricevitore RTP su $OMARCHY_VM_HOST"
+  if vm_receiver_present; then
+    note 'ricevitore microfono VM: gia installato'
+  else
+    bootstrap_vm_microphone
+  fi
+  configure_vm_rtp_firewall
+  cleanup_remote_ssh
+}
+
+configure_vm_rtp_firewall() {
+  local owns_connection=0
+  validate_onboard_config
+  if [[ -z "$remote_control_dir" ]]; then
+    prepare_remote_ssh
+    owns_connection=1
+  fi
   note "VM Omarchy: verifico il ricevitore e autorizzo UDP $OMARCHY_RTP_PORT da $OMARCHY_CLIENT_ADDRESS"
   note 'il terminale puo chiedere prima la password SSH e poi sudo della VM; nessuna password viene salvata'
-  ssh -tt "$OMARCHY_USER@$OMARCHY_VM_HOST" \
-    "test -x ~/.local/bin/voxtype-remote-mic-ssh-dispatch || { echo 'Ricevitore microfono assente nella VM: esegui prima guest microphone install --apply.' >&2; exit 3; }; sudo ufw allow from $OMARCHY_CLIENT_ADDRESS to any port $OMARCHY_RTP_PORT proto udp comment 'Omarchy Voxtype RTP microphone'"
+  vm_receiver_present || die 'ricevitore VM assente dopo il bootstrap: esegui omarchy-onboard --apply e riporta l errore completo'
+  ssh -tt "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" \
+    "sudo ufw allow from $OMARCHY_CLIENT_ADDRESS to any port $OMARCHY_RTP_PORT proto udp comment 'Omarchy Voxtype RTP microphone'"
+  (( owns_connection )) && cleanup_remote_ssh
 }
 
 onboard() {
@@ -208,9 +301,8 @@ onboard() {
   install_moonlight
   install_rpms ffmpeg-free openssh-clients iproute pulseaudio-utils pipewire-pulseaudio kde-connect
 
-  note '2/5: la VM deve avere gia il ricevitore RTP installato con: guest microphone install --apply'
-  confirm 'Autorizzare ora la porta RTP sulla VM tramite SSH?' || die 'onboarding interrotto: il firewall RTP della VM e necessario per il microfono'
-  configure_vm_rtp_firewall
+  note '2/5: controllo o installo automaticamente il ricevitore RTP nella VM via SSH'
+  ensure_vm_microphone_receiver
 
   note '3/5: installo watcher e chiave SSH limitata del microfono'
   install_key=1

@@ -16,10 +16,10 @@ Requires:       pulseaudio-utils
 Requires:       systemd
 
 %description
-Client-side installer for a preconfigured Omarchy/Sunshine VM.  The
-omarchy-onboard command starts a local configuration wizard, installs
-Moonlight and an on-demand Opus/RTP microphone watcher, and asks before
-adding the required UDP firewall rule to the VM via SSH.
+Client-side installer for an Omarchy/Sunshine VM. The omarchy-onboard command
+starts a local configuration wizard, installs Moonlight and an on-demand
+Opus/RTP microphone watcher, and automatically bootstraps the matching
+receiver in the VM through SSH when it is absent.
 
 %prep
 
@@ -29,6 +29,16 @@ adding the required UDP firewall rule to the VM via SSH.
 rm -rf %{buildroot}
 install -Dpm0755 %{_sourcedir}/scripts/omarchy-setup \
   %{buildroot}%{_libexecdir}/omarchy-fedora-client/scripts/omarchy-setup
+install -Dpm0755 %{_sourcedir}/scripts/voxtype-remote-mic-rtp-receive \
+  %{buildroot}%{_libexecdir}/omarchy-fedora-client/scripts/voxtype-remote-mic-rtp-receive
+install -Dpm0755 %{_sourcedir}/scripts/voxtype-remote-mic-control-follow \
+  %{buildroot}%{_libexecdir}/omarchy-fedora-client/scripts/voxtype-remote-mic-control-follow
+install -Dpm0755 %{_sourcedir}/scripts/voxtype-remote-mic-demand \
+  %{buildroot}%{_libexecdir}/omarchy-fedora-client/scripts/voxtype-remote-mic-demand
+install -Dpm0755 %{_sourcedir}/scripts/voxtype-remote-mic-ssh-dispatch \
+  %{buildroot}%{_libexecdir}/omarchy-fedora-client/scripts/voxtype-remote-mic-ssh-dispatch
+install -Dpm0644 %{_sourcedir}/systemd/voxtype-remote-mic-rtp.service \
+  %{buildroot}%{_libexecdir}/omarchy-fedora-client/systemd/voxtype-remote-mic-rtp.service
 install -Dpm0755 %{_sourcedir}/clients/omarchy-client-setup-fedora.sh \
   %{buildroot}%{_libexecdir}/omarchy-fedora-client/clients/omarchy-client-setup-fedora.sh
 install -Dpm0755 %{_sourcedir}/clients/voxtype-fedora-mic-rtp.sh \

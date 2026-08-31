@@ -335,9 +335,9 @@ sudo dnf install -y https://raw.githubusercontent.com/daubog44/proxmox-gtx1050-m
 omarchy-onboard --apply
 
 # Unico comando per un nuovo client: se manca, apre il wizard per il file .env;
-# installa Moonlight e dipendenze, configura via SSH la regola RTP della VM,
-# registra la chiave SSH ristretta, abilita il watcher e verifica tutto.
-# La VM deve avere gia eseguito una volta `guest microphone install --apply`.
+# installa Moonlight e dipendenze, controlla via SSH il ricevitore della VM e,
+# se assente, trasferisce e avvia automaticamente il modulo guest del pacchetto.
+# Poi configura firewall RTP, chiave SSH ristretta, watcher e verifiche.
 scripts/omarchy-setup onboard --apply
 
 # Anteprima della stessa CLI centrale: non modifica nulla.
@@ -375,6 +375,37 @@ L'RPM `latest` e' costruito su Fedora 44; l'hash SHA-256 della copia corrente
 e' pubblicato in [`releases/SHA256SUMS`](../releases/SHA256SUMS). Il pacchetto
 non include password o indirizzi: il wizard li salva localmente con permessi
 `0600` in `~/.config/omarchy/omarchy.env`.
+
+Non esiste piu' un prerequisito nascosto `guest microphone install --apply`:
+durante `omarchy-onboard --apply` il client controlla in SSH che la VM abbia
+dispatcher, ricevitore RTP e servizio utente. Se mancano, copia in una
+directory temporanea privata della VM gli stessi script guest contenuti
+nell'RPM, esegue il modulo guest con `sudo`, poi elimina quella directory. Il
+terminale puo' chiedere la password SSH e quella sudo della VM, ma non le
+salva. Se la VM non ha gia' i programmi che il ricevitore usa (`voxtype`,
+`ffmpeg`, `pactl`, `pw-cat`, `systemd --user`, `ufw`), il comando termina con
+l'errore del programma mancante: e' una dipendenza della VM, non un requisito
+implicito del client Fedora.
+
+### Come viene creato l'RPM
+
+Il file [packaging/build-fedora-rpm.sh](../packaging/build-fedora-rpm.sh)
+richiede solo `rpmbuild` (su Fedora: `sudo dnf install -y rpm-build`) e avvia:
+
+```bash
+OMARCHY_RPM_OUTPUT=/tmp/out packaging/build-fedora-rpm.sh 0.1.4
+```
+
+Lo script crea un `rpmbuild` temporaneo, passa alla specifica
+[omarchy-fedora-client.spec](../packaging/omarchy-fedora-client.spec) il
+repository come `_sourcedir` e la versione come macro RPM, quindi esegue
+`rpmbuild -bb`. La sezione `%install` della spec copia gli entry point in
+`/usr/bin` e i client, il receiver guest e le unit systemd in
+`/usr/libexec/omarchy-fedora-client`; `%files` dichiara quella lista al
+database RPM. Per la pubblicazione la copia versionata e `latest` ricevono lo
+stesso SHA-256 in [`releases/SHA256SUMS`](../releases/SHA256SUMS). Il pacchetto
+e' `noarch`: contiene Bash e unit file, non driver o binari dipendenti dalla
+CPU.
 
 `--apply` e' necessario per le mutazioni Linux. Senza opzioni mutanti, la CLI
 stampa la sequenza prevista e funziona anche fuori da PVE/Omarchy. `--dry-run`
