@@ -19,17 +19,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build RPM in Fedora
+      - name: Install RPM build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+      - name: Build noarch RPM
         env:
           VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           VERSION="${VERSION#v}"
           mkdir -p dist
-          docker run --rm -w /src -e OMARCHY_RPM_OUTPUT=/out -v "$PWD:/src:ro" -v "$PWD/dist:/out" fedora:latest bash -lc '
-            dnf -y install rpm-build
-            packaging/build-fedora-rpm.sh "'"$VERSION"'"
-            cp /out/omarchy-fedora-client-*.noarch.rpm /out/omarchy-fedora-client-latest.noarch.rpm
-          '
+          packaging/build-fedora-rpm.sh "$VERSION"
+          cp dist/omarchy-fedora-client-*.noarch.rpm dist/omarchy-fedora-client-latest.noarch.rpm
       - uses: actions/upload-artifact@v4
         with:
           name: fedora-rpm
