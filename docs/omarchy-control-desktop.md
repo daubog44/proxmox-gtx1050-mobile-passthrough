@@ -12,7 +12,9 @@ contesti distinti e avvia la procedura nel contesto giusto.
 
 ## Uso
 
-Su Windows installare [Omarchy Control 0.1.0](../releases/omarchy-control-0.1.0-x64-setup.exe).
+I comandi di installazione diretta per Fedora, Windows, macOS Apple Silicon e
+macOS Intel sono nel [README](../README.md#installare-omarchy-control). Tutti i
+pacchetti correnti sono pubblicati nella [release Omarchy Control 0.1.1](https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/tag/omarchy-control-v0.1.1).
 La GUI chiede host, IP e utente della VM, IP del client e porta RTP. Non chiede
 ne' salva password. Dopo **Salva localmente**, il pulsante **Configura questo
 client** apre PowerShell e avvia gli script gia' inclusi con il pacchetto; i
@@ -21,18 +23,9 @@ grafico e avvia il wizard `onboard`; su macOS avvia e verifica Moonlight, ma
 blocca con un messaggio esplicito il tunnel microfono, perche' non esiste ancora
 un adapter RTP macOS equivalente a quello Windows/Fedora.
 
-Su Fedora non serve clonare la repository. Installare l'RPM pubblicato nella
-[release Omarchy Control 0.1.0](https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/tag/omarchy-control-v0.1.0):
-
-```bash
-curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.1.0/omarchy-control-0.1.0-x86_64.rpm
-sudo dnf install ./omarchy-control-0.1.0-x86_64.rpm
-omarchy-control
-```
-
-Dopo l'installazione l'app compare anche nel menu grafico come **Omarchy Control**.
-Il pacchetto contiene gia' gli script necessari: Node, Rust e Git non servono
-sul PC Fedora.
+Dopo l'installazione l'app compare nel menu grafico come **Omarchy Control**.
+I pacchetti contengono gia' gli script necessari: Node, Rust e Git non servono
+sul computer client.
 
 ## Perche' Moonlight non e' incorporato
 
@@ -57,7 +50,6 @@ Il backend Rust restringe le operazioni a quattro comandi Tauri: leggere lo
 stato, salvare la configurazione, avviare Moonlight e aprire l'automazione nel
 terminale. Non espone un comando shell arbitrario alla WebView.
 
-Tauri produce bundle nativi dalla stessa sorgente: NSIS/MSI su Windows, DMG su
-macOS e AppImage/DEB/RPM su Linux, ma ogni bundle deve essere costruito e
-firmato sulla rispettiva piattaforma o in CI. Questa repository contiene e ha
-verificato l'installer NSIS x64; non dichiara costruiti DMG o bundle Linux.
+Tauri produce bundle nativi dalla stessa sorgente. La pipeline di release crea
+RPM x86_64, NSIS x64 e DMG macOS per Apple Silicon e Intel sulla rispettiva
+piattaforma CI. I DMG usano una firma ad-hoc e non sono notarizzati da Apple.

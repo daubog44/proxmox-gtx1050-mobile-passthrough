@@ -9,8 +9,24 @@ permissions:
   contents: write
 
 jobs:
-  fedora-rpm:
-    runs-on: ubuntu-22.04
+  desktop-packages:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            targets: ""
+            args: --bundles rpm
+          - platform: windows-latest
+            targets: ""
+            args: --bundles nsis
+          - platform: macos-latest
+            targets: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles dmg
+          - platform: macos-latest
+            targets: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --bundles dmg
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,8 +37,11 @@ jobs:
           cache-dependency-path: apps/omarchy-control/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
 
       - name: Install Tauri Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -41,6 +60,7 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ startsWith(matrix.platform, 'macos') && '-' || '' }}
         with:
           projectPath: apps/omarchy-control
           tagName: ${{ github.ref_name }}
@@ -48,8 +68,8 @@ jobs:
           releaseBody: |
             Desktop control plane for the Omarchy remote workstation.
 
-            Fedora: download the RPM, install it with DNF, then launch `omarchy-control`.
+            Native packages for Fedora, Windows, macOS Apple Silicon and macOS Intel.
           releaseDraft: false
           prerelease: false
-          args: --bundles rpm
-          assetNamePattern: "omarchy-control-[version]-[arch].[ext]"
+          args: ${{ matrix.args }}
+          assetNamePattern: "omarchy-control-[version]-[platform]-[arch][setup][ext]"
