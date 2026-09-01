@@ -293,14 +293,21 @@ proxmox_gpu_switch() {
 }
 
 guest_sunshine() {
-  local action=$1
+  local action=$1 gtx_action
+  case "$action" in
+    prepare) gtx_action=prepare-headless ;;
+    verify) gtx_action=verify-headless ;;
+    status) gtx_action=status-runtime ;;
+    rollback) gtx_action=rollback-guest ;;
+    *) die "azione Sunshine non valida: $action" ;;
+  esac
   if (( ! apply )) && [[ "$action" != verify && "$action" != status ]]; then
-    note "anteprima: OMARCHY_USER=$OMARCHY_USER $repo_root/scripts/omarchy-gtx-primary $action"
+    note "anteprima: OMARCHY_USER=$OMARCHY_USER $repo_root/scripts/omarchy-gtx-primary $gtx_action"
     [[ "$action" != prepare ]] || note "anteprima: configuro autologin SDDM e stay awake persistente per $OMARCHY_USER"
     return 0
   fi
   require_root
-  OMARCHY_USER="$OMARCHY_USER" "$repo_root/scripts/omarchy-gtx-primary" "$action"
+  OMARCHY_USER="$OMARCHY_USER" "$repo_root/scripts/omarchy-gtx-primary" "$gtx_action"
   case "$action" in
     prepare) configure_moonlight_boot; verify_moonlight_boot ;;
     verify) verify_moonlight_boot ;;
