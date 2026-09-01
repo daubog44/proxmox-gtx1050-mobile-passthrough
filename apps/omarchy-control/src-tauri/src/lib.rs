@@ -466,10 +466,22 @@ fn dependencies() -> Vec<Dependency> {
             ),
         ]
     } else {
+        let ffmpeg_available = command_exists("ffmpeg");
         vec![
             dependency("moonlight", "Moonlight", flatpak_installed("com.moonlight_stream.Moonlight"), "Flatpak installato", "Client streaming non installato", Some("flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo && flatpak install --user -y flathub com.moonlight_stream.Moonlight")),
             dependency("ssh", "OpenSSH Client", command_exists("ssh") && command_exists("scp"), "SSH e SCP disponibili", "Richiesto per configurare Omarchy", Some("sudo dnf install -y openssh-clients")),
-            dependency("ffmpeg", "FFmpeg + Opus", ffmpeg_has_opus(), "Trasporto audio Opus disponibile", "FFmpeg con encoder libopus richiesto per il tunnel microfono", Some("sudo dnf install -y ffmpeg-free")),
+            dependency(
+                "ffmpeg",
+                "FFmpeg + Opus",
+                ffmpeg_has_opus(),
+                "Trasporto audio Opus disponibile",
+                if ffmpeg_available {
+                    "FFmpeg presente ma senza libopus: scegli una build compatibile con i repository gia configurati"
+                } else {
+                    "FFmpeg con encoder libopus richiesto per il tunnel microfono"
+                },
+                (!ffmpeg_available).then_some("sudo dnf install -y ffmpeg-free"),
+            ),
             dependency("pipewire", "PipeWire tools", command_exists("pactl"), "Sorgente microfono rilevabile", "pactl non disponibile", Some("sudo dnf install -y pulseaudio-utils pipewire-pulseaudio")),
             dependency("kdeconnect", "KDE Connect", command_exists("kdeconnect-cli"), "Clipboard bidirezionale disponibile", "Opzionale: abilita clipboard e file", Some("sudo dnf install -y kde-connect")),
         ]

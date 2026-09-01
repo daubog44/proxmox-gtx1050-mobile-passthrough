@@ -89,6 +89,21 @@ install_rpms() {
   sudo dnf install -y "${missing[@]}"
 }
 
+has_ffmpeg_opus() {
+  command -v ffmpeg >/dev/null &&
+    ffmpeg -hide_banner -encoders 2>/dev/null |
+      grep -E '[[:space:]]libopus([[:space:]]|$)' >/dev/null
+}
+
+ensure_ffmpeg_opus() {
+  has_ffmpeg_opus && return 0
+  if command -v ffmpeg >/dev/null; then
+    die 'FFmpeg e presente ma non include libopus: installa una build compatibile senza sostituire automaticamente il pacchetto attuale'
+  fi
+  install_rpms ffmpeg-free
+  has_ffmpeg_opus || die 'FFmpeg installato ma senza encoder libopus'
+}
+
 print_install_command() {
   local packages=("$@")
   if command -v rpm-ostree >/dev/null && rpm-ostree status --json >/dev/null 2>&1; then
@@ -102,7 +117,7 @@ print_install_command() {
 
 check_dependencies() {
   local missing_packages=() missing=0 package command
-  local packages=(ffmpeg-free openssh-clients iproute pulseaudio-utils pipewire-pulseaudio kde-connect flatpak)
+  local packages=(openssh-clients iproute pulseaudio-utils pipewire-pulseaudio kde-connect flatpak)
   local commands=(ffmpeg ssh scp ssh-keygen ss pactl kdeconnect-cli flatpak systemctl)
   printf '%-27s %s\n' 'Sistema:' "Fedora ${VERSION_ID:-sconosciuta}"
   for package in "${packages[@]}"; do
@@ -122,10 +137,11 @@ check_dependencies() {
       missing=1
     fi
   done
-  if command -v ffmpeg >/dev/null && ffmpeg -hide_banner -encoders 2>/dev/null | grep -Eq '[[:space:]]libopus([[:space:]]|$)'; then
+  if has_ffmpeg_opus; then
     printf '%-27s %s\n' 'Encoder libopus:' 'ok'
   else
     printf '%-27s %s\n' 'Encoder libopus:' 'MANCANTE'
+    command -v ffmpeg >/dev/null || missing_packages+=(ffmpeg-free)
     missing=1
   fi
   if command -v flatpak >/dev/null && flatpak info com.moonlight_stream.Moonlight >/dev/null 2>&1; then
@@ -154,14 +170,18 @@ check_dependencies() {
 
 install_moonlight() {
   install_rpms flatpak
+  if flatpak info com.moonlight_stream.Moonlight >/dev/null 2>&1; then
+    note 'Moonlight gia installato'
+    return 0
+  fi
   flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
   flatpak install --user -y flathub com.moonlight_stream.Moonlight
   note 'Moonlight installato. Aprilo dal menu o con: flatpak run com.moonlight_stream.Moonlight'
 }
 
 install_microphone() {
-  install_rpms ffmpeg-free openssh-clients iproute pulseaudio-utils pipewire-pulseaudio
-  ffmpeg -hide_banner -encoders 2>/dev/null | grep -Eq '[[:space:]]libopus([[:space:]]|$)' || die 'ffmpeg-free installato ma senza encoder libopus; usa un build FFmpeg Fedora con libopus e riesegui'
+  ensure_ffmpeg_opus
+  install_rpms openssh-clients iproute pulseaudio-utils pipewire-pulseaudio
   local target_bin="$HOME/.local/bin/voxtype-fedora-mic-rtp"
   local target_config="$HOME/.config/omarchy/omarchy.env"
   local target_unit="$HOME/.config/systemd/user/voxtype-fedora-mic-rtp.service"
@@ -328,7 +348,8 @@ onboard() {
   validate_onboard_config
   note '1/5: installo Moonlight e le dipendenze richieste'
   install_moonlight
-  install_rpms ffmpeg-free openssh-clients iproute pulseaudio-utils pipewire-pulseaudio kde-connect
+  ensure_ffmpeg_opus
+  install_rpms openssh-clients iproute pulseaudio-utils pipewire-pulseaudio kde-connect
 
   note '2/5: controllo o installo automaticamente il ricevitore RTP nella VM via SSH'
   ensure_vm_microphone_receiver

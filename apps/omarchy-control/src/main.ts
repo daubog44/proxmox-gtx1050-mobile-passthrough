@@ -35,6 +35,7 @@ const defaults: SetupConfig = {
 
 let dirty = false;
 let hydrated = false;
+let refreshing = false;
 let dashboard: Dashboard | null = null;
 
 const $ = <T extends HTMLElement>(selector: string) => {
@@ -149,6 +150,8 @@ function render(data: Dashboard) {
 }
 
 async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
   const button = $<HTMLButtonElement>("#refresh");
   setBusy(button, true, "Verifico…");
   setMessage("Controllo configurazione, software locale e receiver…");
@@ -160,6 +163,7 @@ async function refresh() {
     setMessage(String(error), "error");
   } finally {
     setBusy(button, false);
+    refreshing = false;
   }
 }
 
@@ -252,6 +256,7 @@ async function installDependency(button: HTMLButtonElement) {
   try {
     const detail = await invoke<string>("install_dependency", { dependencyId: button.dataset.id });
     setMessage(detail, "ok");
+    await refresh();
   } catch (error) {
     setMessage(String(error), "error");
   } finally {
@@ -327,5 +332,8 @@ $("#discover").addEventListener("click", () => void discover());
 $("#check-receiver").addEventListener("click", () => void checkReceiver());
 $("#moonlight").addEventListener("click", () => void launchMoonlight());
 $("#configure").addEventListener("click", () => void configureClient());
+window.addEventListener("focus", () => {
+  if (hydrated) void refresh();
+});
 
 void refresh();

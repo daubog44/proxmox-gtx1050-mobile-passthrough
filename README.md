@@ -227,30 +227,30 @@ non viene salvata dall'app. Non serve clonare questa repository.
 **Fedora x86_64:**
 
 ```bash
-curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.0/omarchy-control-0.2.0-linux-x86_64.rpm
-sudo dnf install ./omarchy-control-0.2.0-linux-x86_64.rpm
+curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.1/omarchy-control-0.2.1-linux-x86_64.rpm
+sudo dnf install ./omarchy-control-0.2.1-linux-x86_64.rpm
 omarchy-control
 ```
 
 **Windows x64 (PowerShell):**
 
 ```powershell
-$installer = "$env:TEMP\omarchy-control-0.2.0-windows-x64-setup.exe"
-Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.0/omarchy-control-0.2.0-windows-x64-setup.exe" -OutFile $installer
+$installer = "$env:TEMP\omarchy-control-0.2.1-windows-x64-setup.exe"
+Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.1/omarchy-control-0.2.1-windows-x64-setup.exe" -OutFile $installer
 Start-Process $installer -Wait
 ```
 
 **macOS Apple Silicon:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.0/omarchy-control-0.2.0-darwin-aarch64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.1/omarchy-control-0.2.1-darwin-aarch64.dmg
 open Omarchy-Control.dmg
 ```
 
 **macOS Intel:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.0/omarchy-control-0.2.0-darwin-x64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.1/omarchy-control-0.2.1-darwin-x64.dmg
 open Omarchy-Control.dmg
 ```
 
