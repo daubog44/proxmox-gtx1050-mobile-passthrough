@@ -341,7 +341,7 @@ configure_vm_rtp_firewall() {
   note 'il terminale puo chiedere prima la password SSH e poi sudo della VM; nessuna password viene salvata'
   vm_receiver_present || die 'ricevitore VM assente dopo il bootstrap: esegui omarchy-onboard --apply e riporta l errore completo'
   remote_sudo ufw allow from "$OMARCHY_CLIENT_ADDRESS" to any port "$OMARCHY_RTP_PORT" proto udp comment Omarchy-Voxtype-RTP-microphone
-  (( owns_connection )) && cleanup_remote_ssh
+  if (( owns_connection )); then cleanup_remote_ssh; fi
 }
 
 onboard() {
