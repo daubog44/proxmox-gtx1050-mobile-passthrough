@@ -227,7 +227,7 @@ install_kde_connect() {
 }
 
 guide_kde_pairing() {
-  local paired=() discovered=() device_id line candidate
+  local paired=() discovered=() device_id='' line='' candidate='' local_id='' remote_pair_started=0
   mapfile -t paired < <(kdeconnect-cli --list-available --id-only 2>/dev/null || true)
   if ((${#paired[@]})); then
     note "KDE Connect: pairing gia attivo con ${#paired[@]} dispositivo/i"
@@ -236,13 +236,16 @@ guide_kde_pairing() {
   fi
 
   note 'KDE Connect: cerco Omarchy nella LAN (puo richiedere alcuni secondi)'
-  kdeconnect-cli --refresh >/dev/null 2>&1 || true
-  sleep 2
-  while IFS= read -r line; do
-    [[ "$line" == *"$OMARCHY_VM_ADDRESS"* ]] || continue
-    candidate=$(grep -Eo '[0-9a-fA-F]{32}' <<<"$line" | head -n 1 || true)
-    [[ -n "$candidate" ]] && { device_id=$candidate; break; }
-  done < <(kdeconnect-cli --list-devices 2>/dev/null || true)
+  for _ in {1..5}; do
+    kdeconnect-cli --refresh >/dev/null 2>&1 || true
+    sleep 2
+    while IFS= read -r line; do
+      [[ "$line" == *"$OMARCHY_VM_ADDRESS"* ]] || continue
+      candidate=$(grep -Eo '[0-9a-fA-F]{32}' <<<"$line" | head -n 1 || true)
+      [[ -n "$candidate" ]] && { device_id=$candidate; break; }
+    done < <(kdeconnect-cli --list-devices 2>/dev/null || true)
+    [[ -n "$device_id" ]] && break
+  done
   mapfile -t discovered < <(kdeconnect-cli --list-devices --id-only 2>/dev/null || true)
   if ((${#discovered[@]} == 0)); then
     note 'nessun dispositivo rilevato: apri KDE Connect su Omarchy e Fedora, poi usa kdeconnect-cli --refresh'
@@ -257,13 +260,31 @@ guide_kde_pairing() {
     read -r -p 'Incolla l ID del dispositivo Omarchy da associare (vuoto per saltare): ' device_id
     [[ -n "$device_id" ]] || return 0
   fi
+
+  local_id="$(kdeconnect-cli --my-id 2>/dev/null || true)"
+  if [[ "$local_id" =~ ^[0-9a-fA-F]{32}$ && "$device_id" =~ ^[0-9a-fA-F]{32}$ ]]; then
+    prepare_remote_ssh
+    note 'KDE Connect: confermo automaticamente il pairing tramite la sessione SSH gia autenticata'
+    if ssh_run "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" \
+      "for attempt in 1 2 3 4 5; do kdeconnect-cli --refresh >/dev/null 2>&1 || true; kdeconnect-cli --list-devices --id-only 2>/dev/null | grep -Fxq $local_id && exec kdeconnect-cli --pair --device $local_id; sleep 2; done; exit 1"; then
+      remote_pair_started=1
+      sleep 2
+    else
+      note 'conferma remota non disponibile: resta possibile approvare la notifica sul desktop Omarchy'
+    fi
+  fi
   if ! kdeconnect-cli --pair --device "$device_id"; then
     note 'KDE Connect non ha inviato la richiesta: apri le due GUI e riprova solo il pairing'
     return 0
   fi
-  note 'richiesta inviata: approva la notifica Pairing request sul desktop Omarchy; il wizard attende fino a 45 secondi'
+  if (( remote_pair_started )); then
+    note 'richieste incrociate inviate in modo autenticato; verifico il pairing'
+  else
+    note 'richiesta inviata: approva la notifica Pairing request sul desktop Omarchy; il wizard attende fino a 45 secondi'
+  fi
   for _ in {1..15}; do
     sleep 3
+    kdeconnect-cli --refresh >/dev/null 2>&1 || true
     kdeconnect-cli --list-available --id-only 2>/dev/null | grep -Fxq -- "$device_id" && {
       note 'pairing KDE Connect completato; abilita il plugin Clipboard nelle due GUI se non e gia attivo'
       return 0

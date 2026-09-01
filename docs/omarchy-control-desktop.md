@@ -54,10 +54,11 @@ Il pulsante **Prova accesso SSH** distingue tre casi: receiver pronto,
 autenticazione riuscita ma receiver mancante, oppure credenziale/host non
 valido. **Configura questo client** salva prima i valori rilevati, poi apre il
 wizard `onboard`. Su Fedora il wizard limita automaticamente le porte KDE
-Connect al solo IP della VM, scopre i dispositivi, invia la richiesta di
-pairing e attende l'approvazione sul desktop Omarchy. Quell'approvazione resta
-intenzionalmente visibile: e' il consenso di sicurezza di KDE Connect, non una
-password da automatizzare. Su macOS il pulsante di setup completo e' disabilitato
+Connect al solo IP della VM, scopre i dispositivi e invia richieste di pairing
+incrociate usando la sessione SSH gia' autenticata. In questo modo il consenso
+e' ristretto ai due ID appena rilevati senza chiedere una seconda password o un
+clic; se il demone KDE remoto non risponde, l'app mostra il fallback manuale con
+notifica sul desktop Omarchy. Su macOS il pulsante di setup completo e' disabilitato
 con una spiegazione, mentre installazione e avvio Moonlight funzionano; il tunnel
 microfono RTP macOS non e' ancora implementato.
 

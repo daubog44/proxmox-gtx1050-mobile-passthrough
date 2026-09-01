@@ -370,8 +370,11 @@ Il modulo Fedora installa Moonlight come Flatpak utente
 Qt non documentati: risoluzione, codec e bitrate vanno scelti nella GUI una
 volta associato Sunshine. Durante `onboard` KDE Connect viene rilevato, il
 firewall viene limitato automaticamente all'IP Omarchy e la richiesta di
-pairing viene inviata al dispositivo trovato. Sul desktop Omarchy va comunque
-approvata la notifica: e' il consenso reciproco previsto da KDE Connect. Il
+pairing viene inviata al dispositivo trovato. Il wizard usa la sessione SSH
+gia' autenticata per inviare anche la richiesta reciproca da Omarchy: i due ID
+KDE Connect restano distinti, ma non serve un secondo inserimento della password
+ne' un clic manuale. Se il demone remoto non risponde, resta disponibile il
+fallback esplicito con notifica da approvare sul desktop Omarchy. Il
 servizio microfono parte dopo il login grafico Fedora e
 non usa `sudo` a ogni avvio: l'unico `sudo` possibile e' quello esplicito per
 installare pacchetti o, se richiesto, le due regole firewall.

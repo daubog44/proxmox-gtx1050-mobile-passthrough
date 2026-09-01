@@ -334,9 +334,11 @@ Non leggiamo ne' sovrascriviamo gli appunti dell'utente per il test: la prova
 finale e' copiare una breve frase non sensibile in Windows, incollarla in
 Omarchy e ripetere nell'altra direzione.
 
-Il pairing resta deliberatamente manuale: ogni nuovo PC genera una propria
-chiave e fidarlo equivale a concedergli accesso agli appunti. Il riuso e'
-automatizzato da [`clients/kde-connect-windows-setup.ps1`](../clients/kde-connect-windows-setup.ps1): dopo l'installazione di KDE Connect eseguire
+Ogni nuovo PC genera una propria chiave e fidarlo equivale a concedergli accesso
+agli appunti. Su Fedora il wizard invia richieste reciproche ai due ID appena
+rilevati attraverso SSH gia' autenticato, senza copiare le identita'; resta una
+notifica manuale di fallback se il demone remoto non risponde. Su Windows il
+riuso e' automatizzato da [`clients/kde-connect-windows-setup.ps1`](../clients/kde-connect-windows-setup.ps1): dopo l'installazione di KDE Connect eseguire
 `-ConfigureFirewall`, approvare UAC, usare `-Show`, poi inviare `-PairDeviceId`
 e accettare nel guest. Non copia identita' o chiavi da un PC a un altro. Il
 daemon guest e' headless e non richiede un secondo desktop; per sincronizzare

@@ -135,9 +135,10 @@ Moonlight puo' inviare testo dal client al guest con la scorciatoia
 prevede invece la sincronizzazione del clipboard guest -> client; Sunshine non
 ha un'opzione che lo renda bidirezionale. Per una clipboard reale serve un
 canale indipendente, qui KDE Connect. Il daemon e' headless ma per copiare da e
-verso la GUI occorre una sessione Wayland che possieda la clipboard. Il pairing
-di ciascun PC resta manuale: automatizzare chiavi e consenso eliminerebbe la
-barriera di fiducia.
+verso la GUI occorre una sessione Wayland che possieda la clipboard. Su Fedora
+il wizard automatizza il pairing senza copiare identita': individua i due ID e
+invia richieste reciproche attraverso la sessione SSH gia' autenticata. Se SSH o
+il demone remoto non sono disponibili, resta il consenso manuale della GUI.
 
 ### NVENC `enc`
 
