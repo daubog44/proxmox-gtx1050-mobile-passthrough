@@ -150,6 +150,11 @@ function render(data: Dashboard) {
   const configure = $<HTMLButtonElement>("#configure");
   configure.disabled = data.checks.setup.state === "blocked";
   configure.title = configure.disabled ? data.checks.setup.detail : "";
+  const configureGuest = $<HTMLButtonElement>("#configure-guest");
+  configureGuest.disabled = !data.platform.toLowerCase().includes("fedora");
+  configureGuest.title = configureGuest.disabled
+    ? "La sincronizzazione remota Omarchy e disponibile dalla GUI Fedora"
+    : "Riapplica idempotentemente la configurazione guest senza modificare PVE";
 }
 
 async function refresh() {
@@ -249,7 +254,27 @@ async function configureClient() {
   setBusy(button, true, "Preparo…");
   try {
     if (!await save()) return;
-    const detail = await invoke<string>("run_setup_in_terminal", { sshPassword: password() });
+    const detail = await invoke<string>("run_setup_in_terminal", {
+      sshPassword: password(),
+      setupScope: "client",
+    });
+    setMessage(detail, "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function configureGuest() {
+  const button = $<HTMLButtonElement>("#configure-guest");
+  setBusy(button, true, "Sincronizzo…");
+  try {
+    if (!await save()) return;
+    const detail = await invoke<string>("run_setup_in_terminal", {
+      sshPassword: password(),
+      setupScope: "guest",
+    });
     setMessage(detail, "ok");
   } catch (error) {
     setMessage(String(error), "error");
@@ -305,6 +330,7 @@ $("#app").innerHTML = `
           <div class="connection-actions">
             <button type="button" class="quiet" id="check-receiver">Prova accesso SSH</button>
             <button type="button" class="quiet" id="save">Salva localmente</button>
+            <button type="button" class="quiet" id="configure-guest">Sincronizza Omarchy</button>
             <button type="button" id="configure">Configura questo client</button>
           </div>
           <details>
@@ -339,6 +365,7 @@ $("#discover").addEventListener("click", () => void discover());
 $("#check-receiver").addEventListener("click", () => void checkReceiver());
 $("#moonlight").addEventListener("click", () => void launchMoonlight());
 $("#configure").addEventListener("click", () => void configureClient());
+$("#configure-guest").addEventListener("click", () => void configureGuest());
 window.addEventListener("focus", () => {
   if (hydrated) void refresh();
 });

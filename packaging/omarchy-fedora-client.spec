@@ -19,7 +19,8 @@ Requires:       systemd
 Client-side installer for an Omarchy/Sunshine VM. The omarchy-onboard command
 starts a local configuration wizard, installs Moonlight and an on-demand
 Opus/RTP microphone watcher, and automatically bootstraps the matching
-receiver in the VM through SSH when it is absent.
+receiver in the VM through SSH. Every run reapplies the managed guest files
+idempotently so an installed but older receiver is upgraded too.
 
 %prep
 
@@ -29,6 +30,10 @@ receiver in the VM through SSH when it is absent.
 rm -rf %{buildroot}
 install -Dpm0755 %{_sourcedir}/scripts/omarchy-setup \
   %{buildroot}%{_libexecdir}/omarchy-fedora-client/scripts/omarchy-setup
+install -Dpm0755 %{_sourcedir}/scripts/omarchy-gtx-primary \
+  %{buildroot}%{_libexecdir}/omarchy-fedora-client/scripts/omarchy-gtx-primary
+install -Dpm0755 %{_sourcedir}/scripts/omarchy-nvidia-pascal-branch \
+  %{buildroot}%{_libexecdir}/omarchy-fedora-client/scripts/omarchy-nvidia-pascal-branch
 install -Dpm0755 %{_sourcedir}/scripts/voxtype-remote-mic-rtp-receive \
   %{buildroot}%{_libexecdir}/omarchy-fedora-client/scripts/voxtype-remote-mic-rtp-receive
 install -Dpm0755 %{_sourcedir}/scripts/voxtype-remote-mic-control-follow \

@@ -638,6 +638,22 @@ fn prepare_askpass(command: &mut Command, password: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn receiver_key_path() -> Option<PathBuf> {
+    if cfg!(target_os = "windows") {
+        env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .map(|home| home.join(".ssh").join("voxtype-omarchy_ed25519"))
+    } else if cfg!(target_os = "linux") {
+        env::var_os("HOME").map(PathBuf::from).map(|home| {
+            home.join(".config")
+                .join("omarchy")
+                .join("voxtype-omarchy_ed25519")
+        })
+    } else {
+        None
+    }
+}
+
 fn receiver_check(config: &SetupConfig, password: Option<&str>) -> Check {
     if config.vm_host.is_empty() || config.user.is_empty() {
         return Check {
@@ -663,6 +679,11 @@ fn receiver_check(config: &SetupConfig, password: Option<&str>) -> Check {
         "-o",
         "NumberOfPasswordPrompts=1",
     ]);
+    let dedicated_key = password
+        .is_none()
+        .then(receiver_key_path)
+        .flatten()
+        .filter(|path| path.is_file());
     if let Some(secret) = password {
         if let Err(error) = prepare_askpass(&mut command, secret) {
             return Check {
@@ -671,22 +692,40 @@ fn receiver_check(config: &SetupConfig, password: Option<&str>) -> Check {
                 install_command: None,
             };
         }
+    } else if let Some(key) = dedicated_key.as_ref() {
+        command
+            .arg("-i")
+            .arg(key)
+            .args(["-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"]);
     } else {
         command.args(["-o", "BatchMode=yes"]);
     }
-    let result = command
-        .arg(target)
-        .arg("test -x ~/.local/bin/voxtype-remote-mic-ssh-dispatch && test -f ~/.config/systemd/user/voxtype-remote-mic-rtp.service")
-        .output();
+    let remote_check = if dedicated_key.is_some() {
+        "voxtype-remote-mic-status"
+    } else {
+        "test -x ~/.local/bin/voxtype-remote-mic-ssh-dispatch && test -f ~/.config/systemd/user/voxtype-remote-mic-rtp.service"
+    };
+    let result = command.arg(target).arg(remote_check).output();
     match result {
         Ok(output) if output.status.success() => Check {
             state: "ready",
             detail: "Connessione SSH e receiver verificati".into(),
             install_command: None,
         },
-        Ok(output) if password.is_some() && output.status.code() == Some(1) => Check {
+        Ok(output)
+            if (password.is_some() || dedicated_key.is_some())
+                && output.status.code() == Some(1) =>
+        {
+            Check {
             state: "missing",
             detail: "SSH sbloccato; receiver non ancora installato. Esegui Configura client."
+                .into(),
+            install_command: None,
+            }
+        }
+        Ok(output) if dedicated_key.is_some() && output.status.code() == Some(126) => Check {
+            state: "missing",
+            detail: "Receiver raggiungibile ma protocollo di stato obsoleto. Riesegui Configura client per sincronizzarlo."
                 .into(),
             install_command: None,
         },
@@ -912,11 +951,19 @@ fn install_dependency(dependency_id: String) -> AppResult<String> {
 }
 
 #[tauri::command]
-fn run_setup_in_terminal(app: AppHandle, ssh_password: Option<String>) -> AppResult<String> {
+fn run_setup_in_terminal(
+    app: AppHandle,
+    ssh_password: Option<String>,
+    setup_scope: Option<String>,
+) -> AppResult<String> {
     let path = config_path(&app)?;
     let config = detect_config(parse_config(&path));
     validate_config(&config)?;
     let password = effective_password(&app, ssh_password)?;
+    let setup_scope = setup_scope.unwrap_or_else(|| "client".into());
+    if !matches!(setup_scope.as_str(), "client" | "guest") {
+        return Err("Ambito setup non valido".into());
+    }
     let configure_askpass = |command: &mut Command| -> AppResult<()> {
         if let Some(secret) = password.as_deref() {
             prepare_askpass(command, secret)?;
@@ -925,6 +972,9 @@ fn run_setup_in_terminal(app: AppHandle, ssh_password: Option<String>) -> AppRes
         Ok(())
     };
     if cfg!(target_os = "windows") {
+        if setup_scope == "guest" {
+            return Err("La sincronizzazione remota Omarchy e disponibile dalla GUI Fedora".into());
+        }
         let script = asset(&app, "clients/omarchy-client-setup.ps1")?;
         let instruction = format!(
             "$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User'); try {{ & {} -ConfigPath {} -Module All -InstallKey }} finally {{ Remove-Item Env:OMARCHY_SSH_PASSWORD,Env:OMARCHY_SUDO_PASSWORD,Env:OMARCHY_ASKPASS_MODE -ErrorAction SilentlyContinue }}",
@@ -947,10 +997,16 @@ fn run_setup_in_terminal(app: AppHandle, ssh_password: Option<String>) -> AppRes
         Ok("PowerShell aperto. La password SSH resta soltanto nella memoria del processo; eventuale sudo viene mostrato nel terminale.".into())
     } else if cfg!(target_os = "linux") {
         let script = asset(&app, "clients/omarchy-client-setup-fedora.sh")?;
+        let module = if setup_scope == "guest" {
+            "guest"
+        } else {
+            "onboard"
+        };
         let instruction = format!(
-            "{} --config {} --module onboard; status=$?; unset OMARCHY_SSH_PASSWORD OMARCHY_SUDO_PASSWORD OMARCHY_ASKPASS_MODE; echo; read -r -p 'Premi Invio per chiudere…'; exit $status",
+            "{} --config {} --module {}; status=$?; unset OMARCHY_SSH_PASSWORD OMARCHY_SUDO_PASSWORD OMARCHY_LOCAL_SUDO_PASSWORD OMARCHY_ASKPASS_MODE; echo; read -r -p 'Premi Invio per chiudere…'; exit $status",
             shell_quote(&script),
-            shell_quote(&path)
+            shell_quote(&path),
+            module
         );
         let terminals: [(&str, &[&str]); 4] = [
             ("kgx", &["--", "bash", "-lc"]),
@@ -967,10 +1023,9 @@ fn run_setup_in_terminal(app: AppHandle, ssh_password: Option<String>) -> AppRes
                     .spawn()
                     .map_err(|error| format!("Impossibile aprire {terminal}: {error}"))?;
                 return Ok(if password.is_some() {
-                    "Wizard Fedora aperto con credenziale SSH temporanea; non viene scritta nel file locale.".into()
+                    format!("Setup {setup_scope} aperto con credenziale SSH temporanea; non viene scritta nel file locale.")
                 } else {
-                    "Wizard Fedora aperto; SSH o sudo possono chiedere la password nel terminale."
-                        .into()
+                    format!("Setup {setup_scope} aperto; SSH o sudo possono chiedere la password nel terminale.")
                 });
             }
         }

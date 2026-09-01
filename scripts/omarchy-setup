@@ -68,7 +68,7 @@ load_config() {
   ensure_config_value OMARCHY_VM_ADDRESS 'indirizzo IP LAN della VM' ''
   ensure_config_value OMARCHY_CLIENT_ADDRESS 'indirizzo IP LAN di questo PC client' ''
   ensure_config_value OMARCHY_RTP_PORT 'porta UDP RTP del microfono' '40100'
-  if [[ "$command_scope" == onboard || ( "$command_scope" == client && "$client_scope" == fedora ) ]]; then
+  if [[ "$command_scope" == onboard || "$command_scope" == guest || ( "$command_scope" == client && "$client_scope" == fedora ) ]]; then
     ensure_config_default OMARCHY_MIC_DEVICE 'Microphone (USB Audio Device)'
   else
     ensure_config_value OMARCHY_MIC_DEVICE 'nome microfono DirectShow Windows' 'Microphone (USB Audio Device)'
@@ -80,6 +80,12 @@ load_config() {
     ensure_config_default OMARCHY_FEDORA_MIC_SOURCE '@DEFAULT_SOURCE@'
   fi
   if [[ "$command_scope" == onboard || ( "$command_scope" == client && "$client_scope" == fedora ) ]]; then
+    [[ "$OMARCHY_RTP_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && (( OMARCHY_RTP_PORT <= 65535 )) || die 'OMARCHY_RTP_PORT non valida'
+    [[ "$OMARCHY_CLIENT_ADDRESS" =~ ^[0-9a-fA-F:.]+$ ]] || die 'OMARCHY_CLIENT_ADDRESS non valida'
+    return 0
+  fi
+  if [[ "$command_scope" == guest ]]; then
+    ensure_config_default OMARCHY_STREAM_MODE '1920x1200@60'
     [[ "$OMARCHY_RTP_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && (( OMARCHY_RTP_PORT <= 65535 )) || die 'OMARCHY_RTP_PORT non valida'
     [[ "$OMARCHY_CLIENT_ADDRESS" =~ ^[0-9a-fA-F:.]+$ ]] || die 'OMARCHY_CLIENT_ADDRESS non valida'
     return 0

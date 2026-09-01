@@ -7,7 +7,7 @@ contesti distinti e avvia la procedura nel contesto giusto.
 | Area | Cosa fa l'app |
 | --- | --- |
 | Client locale | Salva il file `omarchy.env` privato, rileva rete e dipendenze, mostra il comando di installazione corretto e avvia l'automazione Windows/Fedora. Su macOS installa e avvia Moonlight, ma non espone un setup microfono incompleto. |
-| VM Omarchy | Verifica l'accesso SSH e il receiver RTP. Una password temporanea puo' autorizzare la chiave dedicata e installare il receiver quando manca. |
+| VM Omarchy | Verifica l'accesso SSH e il receiver RTP. Una password temporanea puo' autorizzare la chiave dedicata; da Fedora puo' anche riallineare idempotentemente driver NVIDIA 580xx, Sunshine headless e receiver. |
 | PVE | Non invia comandi al nodo: GPU/VFIO restano un'operazione amministrativa esplicita del nodo, non una pressione accidentale nella GUI client. |
 
 ## Uso
@@ -52,8 +52,14 @@ manuale puo' distinguere `OMARCHY_SSH_PASSWORD`, `OMARCHY_SUDO_PASSWORD` e
 
 Il pulsante **Prova accesso SSH** distingue tre casi: receiver pronto,
 autenticazione riuscita ma receiver mancante, oppure credenziale/host non
-valido. **Configura questo client** salva prima i valori rilevati, poi apre il
-wizard `onboard`. Su Fedora il wizard limita automaticamente le porte KDE
+valido. Dopo il primo onboarding la verifica usa la stessa chiave SSH ristretta
+del microfono e il solo comando in lettura `voxtype-remote-mic-status`. La
+chiave non puo' aprire una shell o eseguire comandi arbitrari. In precedenza la
+GUI provava invece un comando shell non autorizzato dalla chiave: il receiver
+restava attivo, ma al ritorno del focus appariva falsamente disconnesso.
+
+**Configura questo client** salva prima i valori rilevati, poi apre il wizard
+`onboard`. Su Fedora il wizard limita automaticamente le porte KDE
 Connect al solo IP della VM, scopre i dispositivi e invia richieste di pairing
 incrociate usando la sessione SSH gia' autenticata. In questo modo il consenso
 e' ristretto ai due ID appena rilevati senza chiedere una seconda password o un
@@ -61,6 +67,15 @@ clic; se il demone KDE remoto non risponde, l'app mostra il fallback manuale con
 notifica sul desktop Omarchy. Su macOS il pulsante di setup completo e' disabilitato
 con una spiegazione, mentre installazione e avvio Moonlight funzionano; il tunnel
 microfono RTP macOS non e' ancora implementato.
+
+Il pulsante Fedora **Sincronizza Omarchy** trasferisce in una directory
+temporanea privata della VM gli script inclusi nel pacchetto e avvia via SSH
+`omarchy-setup guest all --apply`. La stessa operazione puo' essere ripetuta:
+la guardia NVIDIA 580xx, l'output Sunshine/Hyprland headless e il receiver
+microfono vengono verificati e aggiornati senza duplicare file o regole. La
+directory temporanea viene eliminata al termine. Non viene usato Ansible:
+l'orchestratore idempotente del progetto esiste gia' e resta l'unica fonte di
+verita'. Il pulsante non modifica PVE, VFIO, VBIOS, SSDT, vTPM o LUKS.
 
 Su Windows l'app cerca Moonlight, FFmpeg e KDE Connect anche nei percorsi
 WinGet, Chocolatey e `Program Files`, quindi un'installazione appena conclusa
@@ -94,7 +109,7 @@ npm run tauri build -- --bundles nsis
 
 Il backend Rust espone soltanto operazioni nominate: ispezione, discovery,
 verifica receiver, salvataggio, avvio Moonlight, installazione di una
-dipendenza conosciuta e onboarding. L'installer accetta solo identificatori
+dipendenza conosciuta, onboarding e sincronizzazione guest. L'installer accetta solo identificatori
 presenti nella lista interna e non espone un comando shell arbitrario alla
 WebView.
 

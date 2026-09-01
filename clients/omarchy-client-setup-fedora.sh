@@ -18,7 +18,7 @@ Uso:
   clients/omarchy-client-setup-fedora.sh --config FILE [opzioni]
 
 Opzioni:
-  --module onboard|all|check|moonlight|microphone|kde-connect|show
+  --module onboard|all|guest|check|moonlight|microphone|kde-connect|show
   --install-key                 autorizza una volta la chiave SSH del microfono
   --configure-kde-firewall      consente KDE Connect solo dall'IP della VM
 
@@ -38,7 +38,7 @@ while (( $# )); do
     *) die "opzione sconosciuta: $1" ;;
   esac
 done
-case "$module" in onboard|all|check|moonlight|microphone|kde-connect|show) ;; *) die 'modulo: onboard, all, check, moonlight, microphone, kde-connect oppure show' ;; esac
+case "$module" in onboard|all|guest|check|moonlight|microphone|kde-connect|show) ;; *) die 'modulo: onboard, all, guest, check, moonlight, microphone, kde-connect oppure show' ;; esac
 [[ $EUID -ne 0 ]] || die 'esegui come utente desktop Fedora: il servizio deve appartenere al tuo account'
 
 [[ -r /etc/os-release ]] || die '/etc/os-release mancante'
@@ -353,10 +353,14 @@ vm_receiver_present() {
     'test -x ~/.local/bin/voxtype-remote-mic-ssh-dispatch && test -x ~/.local/bin/voxtype-remote-mic-rtp-receive && test -f ~/.config/systemd/user/voxtype-remote-mic-rtp.service'
 }
 
-bootstrap_vm_microphone() (
-  local local_stage remote_stage source destination
+sync_vm_guest() (
+  local scope=${1:-microphone} local_stage remote_stage source destination
+  local guest_args=(guest microphone install)
+  [[ "$scope" == all ]] && guest_args=(guest all)
   local sources=(
     scripts/omarchy-setup
+    scripts/omarchy-gtx-primary
+    scripts/omarchy-nvidia-pascal-branch
     scripts/voxtype-remote-mic-rtp-receive
     scripts/voxtype-remote-mic-control-follow
     scripts/voxtype-remote-mic-demand
@@ -384,19 +388,19 @@ bootstrap_vm_microphone() (
   done
   install -m 0600 "$config_file" "$local_stage/config/omarchy.env"
 
-  note 'ricevitore VM assente: trasferisco soltanto gli script del microfono e la configurazione privata temporanea'
+  note 'sincronizzo gli script del ricevitore e la configurazione privata temporanea nella VM'
   remote_stage="$(ssh_run "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" 'umask 077; mktemp -d /tmp/omarchy-guest-bootstrap.XXXXXX')" || die 'impossibile creare la directory temporanea nella VM via SSH'
   [[ "$remote_stage" =~ ^/tmp/omarchy-guest-bootstrap\.[A-Za-z0-9]+$ ]] || die 'directory temporanea VM non valida: bootstrap annullato'
   scp_run "${remote_ssh_options[@]}" -pr "$local_stage/." "$OMARCHY_USER@$OMARCHY_VM_HOST:$remote_stage/" || die 'trasferimento del ricevitore alla VM fallito'
 
-  note 'VM: installo il ricevitore, il servizio utente, la regola UFW e i binding PTT esistenti'
-  remote_sudo bash "$remote_stage/scripts/omarchy-setup" --config "$remote_stage/config/omarchy.env" guest microphone install --apply || \
-    die 'bootstrap microfono VM fallito: leggi l errore precedente. Servono VoxType, ffmpeg, PipeWire/Pulse, pw-cat, systemd utente e ufw gia disponibili nella VM Omarchy'
+  note "VM: applico idempotentemente il modulo guest $scope"
+  remote_sudo bash "$remote_stage/scripts/omarchy-setup" --config "$remote_stage/config/omarchy.env" "${guest_args[@]}" --apply || \
+    die "configurazione guest $scope fallita: leggi l errore precedente"
   ssh_run "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" "rm -rf -- $remote_stage"
   remote_stage=''
   trap - EXIT
   rm -rf -- "$local_stage"
-  note 'ricevitore microfono VM installato e configurato automaticamente'
+  note "configurazione guest $scope applicata e verificabile"
 )
 
 ensure_vm_microphone_receiver() {
@@ -404,11 +408,20 @@ ensure_vm_microphone_receiver() {
   prepare_remote_ssh
   note "VM Omarchy: controllo il ricevitore RTP su $OMARCHY_VM_HOST"
   if vm_receiver_present; then
-    note 'ricevitore microfono VM: gia installato'
+    note 'ricevitore microfono VM presente: riallineo idempotentemente script e servizio'
   else
-    bootstrap_vm_microphone
+    note 'ricevitore microfono VM assente: lo installo'
   fi
+  sync_vm_guest microphone
   configure_vm_rtp_firewall
+  cleanup_remote_ssh
+}
+
+configure_vm_guest() {
+  validate_onboard_config
+  prepare_remote_ssh
+  note 'Sincronizzo Omarchy: guardia NVIDIA 580xx, Sunshine headless e receiver microfono'
+  sync_vm_guest all
   cleanup_remote_ssh
 }
 
@@ -463,6 +476,7 @@ show() {
 case "$module" in
   check) check_dependencies ;;
   onboard) onboard ;;
+  guest) configure_vm_guest ;;
   moonlight) install_moonlight ;;
   microphone) install_microphone ;;
   kde-connect) install_kde_connect ;;

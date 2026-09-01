@@ -213,7 +213,7 @@ scorciatoie effettive (`Caps Lock` e' `SUPER` in questo setup).
 
 Moonlight/Sunshine inviano tastiera, mouse e l'audio del guest, ma non trasformano il microfono del PC client in una sorgente PipeWire della VM. Per il dettato realtime nella VM esistono [voxtype-windows-mic-rtp.ps1](clients/voxtype-windows-mic-rtp.ps1) e [voxtype-fedora-mic-rtp.sh](clients/voxtype-fedora-mic-rtp.sh): FFmpeg cattura la sorgente locale e invia Opus/RTP a pacchetti da 20 ms; [voxtype-remote-mic-rtp-receive](scripts/voxtype-remote-mic-rtp-receive) lo pubblica nella VM come `voxtype_remote_mic.monitor`. Il watcher parte al login ma apre FFmpeg soltanto quando Moonlight e la VM richiedono il microfono: PTT VoxType oppure un client PipeWire come Discord. La porta UDP e' limitata nel firewall all'IP del PC client; il controllo `active/idle` viaggia in una SSH dedicata e ristretta. Il precedente tunnel SSH cifrato resta come fallback. Vedi la guida completa [Microfono Windows in VoxType via Moonlight](docs/voxtype-moonlight-microphone.md), inclusi IP/porta configurabili, configurazione di un secondo PC, VAD e verifiche.
 
-Per applicare o ripetere il setup senza IP fissati nel codice, usare la CLI [omarchy-setup](scripts/omarchy-setup) con il file locale ignorato `config/omarchy.env`; il lato client usa [omarchy-client-setup.ps1](clients/omarchy-client-setup.ps1) su Windows oppure, su un nuovo PC Fedora, il pacchetto online `omarchy-fedora-client`: `sudo dnf install -y https://raw.githubusercontent.com/daubog44/proxmox-gtx1050-mobile-passthrough/main/releases/omarchy-fedora-client-latest.noarch.rpm`, poi `omarchy-onboard --apply`. Il wizard crea il file `.env` se manca, installa e verifica Moonlight/microfono/KDE Connect; controlla anche il ricevitore microfono della VM e, se manca, lo trasferisce e configura automaticamente via SSH prima della regola RTP. I moduli separano correttamente nodo PVE (GPU/VFIO), guest Omarchy (Sunshine e ricevitore microfono) e client (Moonlight, chiave e autostart). La [guida CLI centralizzata](docs/centralized-setup-cli.md) contiene percorsi effettivi, comunicazione tra processi, comandi per un secondo PC e le prove versionate di HEVC/NVENC, trascrizione e VRAM VoxType. Gli errori ACPI periodici del nodo HP sono distinti dalla VM e spiegati in [diagnosi ACPI PVE](docs/proxmox-host-acpi.md).
+Per applicare o ripetere il setup senza IP fissati nel codice, usare la CLI [omarchy-setup](scripts/omarchy-setup) con il file locale ignorato `config/omarchy.env`; il lato client usa [omarchy-client-setup.ps1](clients/omarchy-client-setup.ps1) su Windows oppure, su un nuovo PC Fedora, il pacchetto online `omarchy-fedora-client`: `sudo dnf install -y https://raw.githubusercontent.com/daubog44/proxmox-gtx1050-mobile-passthrough/main/releases/omarchy-fedora-client-latest.noarch.rpm`, poi `omarchy-onboard --apply`. Il wizard crea il file `.env` se manca, installa e verifica Moonlight/microfono/KDE Connect; riallinea idempotentemente il ricevitore microfono della VM via SSH anche quando era gia' installato. Da Omarchy Control su Fedora, **Sincronizza Omarchy** applica con lo stesso orchestratore anche guardia NVIDIA 580xx e Sunshine/Hyprland headless, senza modificare PVE. La verifica successiva usa un comando di stato in sola lettura autorizzato dalla chiave SSH ristretta, eliminando il falso “receiver disconnesso” che appariva alla chiusura del wizard. I moduli separano correttamente nodo PVE (GPU/VFIO), guest Omarchy (Sunshine e ricevitore microfono) e client (Moonlight, chiave e autostart). La [guida CLI centralizzata](docs/centralized-setup-cli.md) contiene percorsi effettivi, comunicazione tra processi, comandi per un secondo PC e le prove versionate di HEVC/NVENC, trascrizione e VRAM VoxType. Gli errori ACPI periodici del nodo HP sono distinti dalla VM e spiegati in [diagnosi ACPI PVE](docs/proxmox-host-acpi.md).
 
 ### Installare Omarchy Control
 
@@ -231,30 +231,30 @@ da approvare. Non serve clonare questa repository.
 **Fedora x86_64:**
 
 ```bash
-curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.4/omarchy-control-0.2.4-linux-x86_64.rpm
-sudo dnf install ./omarchy-control-0.2.4-linux-x86_64.rpm
+curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.5/omarchy-control-0.2.5-linux-x86_64.rpm
+sudo dnf install ./omarchy-control-0.2.5-linux-x86_64.rpm
 omarchy-control
 ```
 
 **Windows x64 (PowerShell):**
 
 ```powershell
-$installer = "$env:TEMP\omarchy-control-0.2.4-windows-x64-setup.exe"
-Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.4/omarchy-control-0.2.4-windows-x64-setup.exe" -OutFile $installer
+$installer = "$env:TEMP\omarchy-control-0.2.5-windows-x64-setup.exe"
+Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.5/omarchy-control-0.2.5-windows-x64-setup.exe" -OutFile $installer
 Start-Process $installer -Wait
 ```
 
 **macOS Apple Silicon:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.4/omarchy-control-0.2.4-darwin-aarch64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.5/omarchy-control-0.2.5-darwin-aarch64.dmg
 open Omarchy-Control.dmg
 ```
 
 **macOS Intel:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.4/omarchy-control-0.2.4-darwin-x64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.5/omarchy-control-0.2.5-darwin-x64.dmg
 open Omarchy-Control.dmg
 ```
 

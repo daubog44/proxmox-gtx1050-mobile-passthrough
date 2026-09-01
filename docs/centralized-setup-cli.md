@@ -335,8 +335,8 @@ sudo dnf install -y https://raw.githubusercontent.com/daubog44/proxmox-gtx1050-m
 omarchy-onboard --apply
 
 # Unico comando per un nuovo client: se manca, apre il wizard per il file .env;
-# installa Moonlight e dipendenze, controlla via SSH il ricevitore della VM e,
-# se assente, trasferisce e avvia automaticamente il modulo guest del pacchetto.
+# installa Moonlight e dipendenze, controlla via SSH il ricevitore della VM e
+# riallinea sempre il modulo guest del pacchetto, anche se era gia installato.
 # Poi configura firewall RTP, chiave SSH ristretta, watcher e verifiche. Questo
 # percorso non chiede VMID, BDF GPU o VBIOS: sono variabili del nodo PVE, non
 # del client Fedora.
@@ -362,6 +362,11 @@ scripts/omarchy-setup --config config/omarchy.env \
 
 # Diagnosi senza modifiche e lista delle sorgenti PipeWire/Pulse.
 scripts/omarchy-setup --config config/omarchy.env client fedora show
+
+# Dalla GUI Fedora il pulsante "Sincronizza Omarchy" equivale a questo modulo:
+# riallinea NVIDIA 580xx, Sunshine headless e receiver senza toccare PVE.
+/usr/libexec/omarchy-fedora-client/clients/omarchy-client-setup-fedora.sh \
+  --config ~/.config/omarchy/omarchy.env --module guest
 clients/voxtype-fedora-mic-rtp.sh --list-sources
 ```
 
@@ -397,9 +402,15 @@ non include password o indirizzi: il wizard li salva localmente con permessi
 
 Non esiste piu' un prerequisito nascosto `guest microphone install --apply`:
 durante `omarchy-onboard --apply` il client controlla in SSH che la VM abbia
-dispatcher, ricevitore RTP e servizio utente. Se mancano, copia in una
+dispatcher, ricevitore RTP e servizio utente. A ogni esecuzione copia in una
 directory temporanea privata della VM gli stessi script guest contenuti
-nell'RPM, esegue il modulo guest con `sudo`, poi elimina quella directory. Il
+nell'RPM, esegue il modulo guest microfono con `sudo`, poi elimina quella
+directory. In questo modo aggiorna anche un dispatcher gia' installato ma
+vecchio. Il pulsante GUI **Sincronizza Omarchy** usa lo stesso percorso con
+`guest all`: applica inoltre la guardia del ramo NVIDIA 580xx e la configurazione
+Sunshine/Hyprland headless. Non e' necessario un secondo motore come Ansible e
+la sincronizzazione non comprende il nodo PVE, VFIO, VBIOS, SSDT, vTPM o LUKS.
+Il
 terminale, in assenza della credenziale temporanea, puo' chiedere la password
 SSH e quella sudo della VM, ma non le salva. Se la VM non ha gia' i programmi che il ricevitore usa (`voxtype`,
 `ffmpeg`, `pactl`, `pw-cat`, `systemd --user`, `ufw`), il comando termina con
