@@ -366,10 +366,20 @@ clients/voxtype-fedora-mic-rtp.sh --list-sources
 Il modulo Fedora installa Moonlight come Flatpak utente
 `com.moonlight_stream.Moonlight`, quindi non modifica file di configurazione
 Qt non documentati: risoluzione, codec e bitrate vanno scelti nella GUI una
-volta associato Sunshine. KDE Connect richiede sempre il pairing approvato su
-entrambi i lati. Il servizio microfono parte dopo il login grafico Fedora e
+volta associato Sunshine. Durante `onboard` KDE Connect viene rilevato, il
+firewall viene limitato automaticamente all'IP Omarchy e la richiesta di
+pairing viene inviata al dispositivo trovato. Sul desktop Omarchy va comunque
+approvata la notifica: e' il consenso reciproco previsto da KDE Connect. Il
+servizio microfono parte dopo il login grafico Fedora e
 non usa `sudo` a ogni avvio: l'unico `sudo` possibile e' quello esplicito per
 installare pacchetti o, se richiesto, le due regole firewall.
+
+Se il wizard parte dalla GUI e le password coincidono, il singolo campo
+temporaneo viene riutilizzato per SSH, `sudo` della VM e `sudo` Fedora mediante
+`SSH_ASKPASS`/stdin; non compare nelle righe di comando e viene eliminato
+dall'ambiente alla fine. Se sono diverse, usare separatamente
+`OMARCHY_SSH_PASSWORD`, `OMARCHY_SUDO_PASSWORD` e
+`OMARCHY_LOCAL_SUDO_PASSWORD` in una sessione manuale protetta.
 
 L'RPM `latest` e' costruito su Fedora 44; l'hash SHA-256 della copia corrente
 e' pubblicato in [`releases/SHA256SUMS`](../releases/SHA256SUMS). Il pacchetto
@@ -381,8 +391,8 @@ durante `omarchy-onboard --apply` il client controlla in SSH che la VM abbia
 dispatcher, ricevitore RTP e servizio utente. Se mancano, copia in una
 directory temporanea privata della VM gli stessi script guest contenuti
 nell'RPM, esegue il modulo guest con `sudo`, poi elimina quella directory. Il
-terminale puo' chiedere la password SSH e quella sudo della VM, ma non le
-salva. Se la VM non ha gia' i programmi che il ricevitore usa (`voxtype`,
+terminale, in assenza della credenziale temporanea, puo' chiedere la password
+SSH e quella sudo della VM, ma non le salva. Se la VM non ha gia' i programmi che il ricevitore usa (`voxtype`,
 `ffmpeg`, `pactl`, `pw-cat`, `systemd --user`, `ufw`), il comando termina con
 l'errore del programma mancante: e' una dipendenza della VM, non un requisito
 implicito del client Fedora.

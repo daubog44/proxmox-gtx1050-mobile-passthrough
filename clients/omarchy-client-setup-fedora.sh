@@ -74,6 +74,15 @@ confirm() {
   done
 }
 
+local_sudo() {
+  local secret="${OMARCHY_LOCAL_SUDO_PASSWORD:-${OMARCHY_SUDO_PASSWORD:-${OMARCHY_SSH_PASSWORD:-}}}"
+  if [[ -n "$secret" ]]; then
+    printf '%s\n' "$secret" | sudo -S -p '' -- "$@"
+  else
+    sudo -- "$@"
+  fi
+}
+
 install_rpms() {
   local packages=("$@")
   local missing=()
@@ -83,10 +92,10 @@ install_rpms() {
   note "dipendenze Fedora mancanti: ${missing[*]}"
   print_install_command "${missing[@]}"
   if command -v rpm-ostree >/dev/null && rpm-ostree status --json >/dev/null 2>&1; then
-    sudo rpm-ostree install "${missing[@]}"
+    local_sudo rpm-ostree install "${missing[@]}"
     die 'pacchetti aggiunti alla prossima deployment rpm-ostree: riavvia Fedora, poi riesegui questo comando'
   fi
-  sudo dnf install -y "${missing[@]}"
+  local_sudo dnf install -y "${missing[@]}"
 }
 
 has_ffmpeg_opus() {
@@ -204,13 +213,59 @@ install_kde_connect() {
     local protocol rule
     for protocol in tcp udp; do
       rule="rule family=ipv4 source address=$OMARCHY_VM_ADDRESS port port=1714-1764 protocol=$protocol accept"
-      sudo firewall-cmd --permanent --query-rich-rule="$rule" >/dev/null || \
-        sudo firewall-cmd --permanent --add-rich-rule="$rule"
+      local_sudo firewall-cmd --permanent --query-rich-rule="$rule" >/dev/null || \
+        local_sudo firewall-cmd --permanent --add-rich-rule="$rule"
     done
-    sudo firewall-cmd --reload
+    local_sudo firewall-cmd --reload
     note "firewall KDE Connect: TCP/UDP 1714-1764 ammessi soltanto dalla VM $OMARCHY_VM_ADDRESS"
   fi
-  note 'apri KDE Connect su Fedora e Omarchy, effettua il pairing e abilita Clipboard su entrambi: il consenso non viene automatizzato'
+  guide_kde_pairing
+}
+
+guide_kde_pairing() {
+  local paired=() discovered=() device_id line candidate
+  mapfile -t paired < <(kdeconnect-cli --list-available --id-only 2>/dev/null || true)
+  if ((${#paired[@]})); then
+    note "KDE Connect: pairing gia attivo con ${#paired[@]} dispositivo/i"
+    kdeconnect-cli --list-available || true
+    return 0
+  fi
+
+  note 'KDE Connect: cerco Omarchy nella LAN (puo richiedere alcuni secondi)'
+  kdeconnect-cli --refresh >/dev/null 2>&1 || true
+  sleep 2
+  while IFS= read -r line; do
+    [[ "$line" == *"$OMARCHY_VM_ADDRESS"* ]] || continue
+    candidate=$(grep -Eo '[0-9a-fA-F]{32}' <<<"$line" | head -n 1 || true)
+    [[ -n "$candidate" ]] && { device_id=$candidate; break; }
+  done < <(kdeconnect-cli --list-devices 2>/dev/null || true)
+  mapfile -t discovered < <(kdeconnect-cli --list-devices --id-only 2>/dev/null || true)
+  if ((${#discovered[@]} == 0)); then
+    note 'nessun dispositivo rilevato: apri KDE Connect su Omarchy e Fedora, poi usa kdeconnect-cli --refresh'
+    return 0
+  fi
+  if [[ -n "$device_id" ]]; then
+    note "Omarchy rilevato automaticamente all IP $OMARCHY_VM_ADDRESS (ID $device_id)"
+  elif ((${#discovered[@]} == 1)); then
+    device_id=${discovered[0]}
+  else
+    kdeconnect-cli --list-devices --id-name-only || true
+    read -r -p 'Incolla l ID del dispositivo Omarchy da associare (vuoto per saltare): ' device_id
+    [[ -n "$device_id" ]] || return 0
+  fi
+  if ! kdeconnect-cli --pair --device "$device_id"; then
+    note 'KDE Connect non ha inviato la richiesta: apri le due GUI e riprova solo il pairing'
+    return 0
+  fi
+  note 'richiesta inviata: approva la notifica Pairing request sul desktop Omarchy; il wizard attende fino a 45 secondi'
+  for _ in {1..15}; do
+    sleep 3
+    kdeconnect-cli --list-available --id-only 2>/dev/null | grep -Fxq -- "$device_id" && {
+      note 'pairing KDE Connect completato; abilita il plugin Clipboard nelle due GUI se non e gia attivo'
+      return 0
+    }
+  done
+  note 'pairing non ancora approvato: apri KDE Connect su Omarchy e accetta la richiesta; non serve ripetere il resto del setup'
 }
 
 remote_ssh_options=()
@@ -236,8 +291,10 @@ remote_sudo() {
   if [[ -n "$secret" ]]; then
     # No PTY in automated mode: a remote terminal could echo piped input
     # before sudo disables echo. sudo -S works through the encrypted stdin.
+    local remote_command="sudo -S -p '' --" argument
+    for argument in "$@"; do printf -v remote_command '%s %q' "$remote_command" "$argument"; done
     printf '%s\n' "$secret" | ssh_run -T "${remote_ssh_options[@]}" \
-      "$OMARCHY_USER@$OMARCHY_VM_HOST" sudo -S -- "$@"
+      "$OMARCHY_USER@$OMARCHY_VM_HOST" "$remote_command"
   else
     ssh_run -tt "${remote_ssh_options[@]}" \
       "$OMARCHY_USER@$OMARCHY_VM_HOST" sudo "$@"
@@ -338,7 +395,11 @@ configure_vm_rtp_firewall() {
     owns_connection=1
   fi
   note "VM Omarchy: verifico il ricevitore e autorizzo UDP $OMARCHY_RTP_PORT da $OMARCHY_CLIENT_ADDRESS"
-  note 'il terminale puo chiedere prima la password SSH e poi sudo della VM; nessuna password viene salvata'
+  if [[ -n "${OMARCHY_SSH_PASSWORD:-}" ]]; then
+    note 'uso la credenziale temporanea della GUI per SSH e sudo VM; non viene salvata e non serve reinserirla'
+  else
+    note 'il terminale puo chiedere prima la password SSH e poi sudo della VM; nessuna password viene salvata'
+  fi
   vm_receiver_present || die 'ricevitore VM assente dopo il bootstrap: esegui omarchy-onboard --apply e riporta l errore completo'
   remote_sudo ufw allow from "$OMARCHY_CLIENT_ADDRESS" to any port "$OMARCHY_RTP_PORT" proto udp comment Omarchy-Voxtype-RTP-microphone
   if (( owns_connection )); then cleanup_remote_ssh; fi
@@ -358,10 +419,8 @@ onboard() {
   install_key=1
   install_microphone
 
-  note '4/5: installo KDE Connect; il pairing Clipboard resta un consenso manuale nelle due GUI'
-  if confirm 'Limitare il firewall locale di KDE Connect al solo IP della VM?'; then
-    configure_kde_firewall=1
-  fi
+  note '4/5: installo KDE Connect, limito il firewall alla VM e avvio il pairing guidato'
+  configure_kde_firewall=1
   install_kde_connect
 
   note '5/5: verifico dipendenze, Moonlight e watcher'

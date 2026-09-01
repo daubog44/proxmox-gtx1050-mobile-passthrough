@@ -57,6 +57,35 @@ jobs:
         working-directory: apps/omarchy-control
         run: npm ci
 
+      - name: Validate frontend
+        working-directory: apps/omarchy-control
+        run: npm run build
+
+      - name: Run platform Rust tests
+        working-directory: apps/omarchy-control/src-tauri
+        run: cargo test --all-targets
+
+      - name: Parse Windows client scripts
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem clients -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File): $($_.Message)" }
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Parse shell client scripts
+        if: matrix.platform != 'windows-latest'
+        shell: bash
+        run: bash -n clients/omarchy-client-setup-fedora.sh clients/voxtype-fedora-mic-rtp.sh
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

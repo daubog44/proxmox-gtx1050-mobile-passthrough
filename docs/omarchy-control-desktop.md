@@ -6,7 +6,7 @@ contesti distinti e avvia la procedura nel contesto giusto.
 
 | Area | Cosa fa l'app |
 | --- | --- |
-| Client locale | Salva il file `omarchy.env` privato, rileva rete e dipendenze, mostra il comando di installazione corretto e avvia l'automazione Windows/Fedora. |
+| Client locale | Salva il file `omarchy.env` privato, rileva rete e dipendenze, mostra il comando di installazione corretto e avvia l'automazione Windows/Fedora. Su macOS installa e avvia Moonlight, ma non espone un setup microfono incompleto. |
 | VM Omarchy | Verifica l'accesso SSH e il receiver RTP. Una password temporanea puo' autorizzare la chiave dedicata e installare il receiver quando manca. |
 | PVE | Non invia comandi al nodo: GPU/VFIO restano un'operazione amministrativa esplicita del nodo, non una pressione accidentale nella GUI client. |
 
@@ -23,7 +23,8 @@ In condizioni normali bastano **hostname Omarchy** e **utente SSH**. L'app:
 3. usa `40100/UDP` e la sorgente PipeWire predefinita come valori portabili;
 4. controlla Moonlight, OpenSSH, FFmpeg/Opus, PipeWire e KDE Connect;
 5. per ogni dipendenza mancante mostra il comando adatto a Windows, Fedora o
-   macOS e, dove supportato, lo apre nel terminale nativo.
+   macOS e lo apre nel terminale nativo. Su macOS rileva Homebrew anche nei
+   percorsi Apple Silicon e Intel, non soltanto nel `PATH` della GUI.
 
 **Salva localmente** scrive soltanto indirizzi e preferenze. Tutti i pulsanti
 nel form sono esplicitamente `type=button`: il salvataggio non invia il form,
@@ -38,20 +39,34 @@ Il receiver puo' essere sbloccato in tre modi, in ordine di precedenza:
 3. stessa variabile aggiunta deliberatamente dall'utente al file locale
    `omarchy.env`, protetto con permessi `0600` su Unix.
 
-La GUI non scrive e non mostra mai la password. Il backend configura
+La GUI non scrive e non mostra mai la password. Se password SSH, `sudo` della
+VM e `sudo` del client Fedora coincidono, il campo **Password temporanea SSH +
+sudo** basta per tutto l'onboarding: il backend configura
 `SSH_ASKPASS` sul solo processo figlio: OpenSSH richiama lo stesso eseguibile in
 modalita' helper, riceve la password dall'ambiente e autorizza la chiave SSH
-dedicata. Se `OMARCHY_SUDO_PASSWORD` non e' definita, il wizard Fedora usa la
-password SSH anche per `sudo -S` nella VM; al termine rimuove entrambe le
-variabili dal terminale. L'esecuzione manuale dello script fuori dalla GUI puo'
-usare `sshpass -e`, ma soltanto quando la password e' stata esplicitamente
-fornita nell'ambiente.
+dedicata. Lo stesso segreto viene fornito tramite stdin a `sudo -S`, mai nella
+riga di comando. Il wizard non mostra prompt interattivi duplicati e al termine
+rimuove le variabili dal terminale. Se le password sono diverse, l'esecuzione
+manuale puo' distinguere `OMARCHY_SSH_PASSWORD`, `OMARCHY_SUDO_PASSWORD` e
+`OMARCHY_LOCAL_SUDO_PASSWORD`; non vanno aggiunte alla repository.
 
 Il pulsante **Prova accesso SSH** distingue tre casi: receiver pronto,
 autenticazione riuscita ma receiver mancante, oppure credenziale/host non
 valido. **Configura questo client** salva prima i valori rilevati, poi apre il
-wizard `onboard`; su macOS avvia e verifica Moonlight, ma segnala che l'adapter
-microfono RTP non e' ancora implementato.
+wizard `onboard`. Su Fedora il wizard limita automaticamente le porte KDE
+Connect al solo IP della VM, scopre i dispositivi, invia la richiesta di
+pairing e attende l'approvazione sul desktop Omarchy. Quell'approvazione resta
+intenzionalmente visibile: e' il consenso di sicurezza di KDE Connect, non una
+password da automatizzare. Su macOS il pulsante di setup completo e' disabilitato
+con una spiegazione, mentre installazione e avvio Moonlight funzionano; il tunnel
+microfono RTP macOS non e' ancora implementato.
+
+Su Windows l'app cerca Moonlight, FFmpeg e KDE Connect anche nei percorsi
+WinGet, Chocolatey e `Program Files`, quindi un'installazione appena conclusa
+non resta erroneamente gialla per il `PATH` non aggiornato. Prima del wizard
+ricarica inoltre il `PATH` macchina+utente. Se Moonlight non e' mai stato aperto
+e il profilo Registry non esiste, il setup lascia i valori predefiniti e spiega
+di aprirlo una volta, senza interrompere microfono e chiave SSH.
 
 Dopo l'installazione l'app compare nel menu grafico come **Omarchy Control**.
 I pacchetti contengono gia' gli script necessari: Node, Rust e Git non servono
@@ -84,4 +99,18 @@ WebView.
 
 Tauri produce bundle nativi dalla stessa sorgente. La pipeline di release crea
 RPM x86_64, NSIS x64 e DMG macOS per Apple Silicon e Intel sulla rispettiva
-piattaforma CI. I DMG usano una firma ad-hoc e non sono notarizzati da Apple.
+piattaforma CI. Prima di impacchettare esegue build TypeScript, test Rust sulla
+piattaforma nativa, parser di tutti gli script PowerShell su Windows e `bash -n`
+degli script client Linux su Linux/macOS. I DMG usano una firma ad-hoc e non
+sono notarizzati da Apple; la CI non sostituisce una prova di microfono su un
+Mac fisico.
+
+## Confine multi-utente
+
+Il setup corrente e' **multi-client ma a sessione singola**: piu' PC possono
+essere autorizzati, ma Sunshine trasmette il desktop Hyprland dell'utente
+Omarchy gia' autenticato. Un guest read-only, un amministratore e stream
+simultanei richiedono un livello diverso: identita' separate, policy Sunshine,
+sessioni grafiche isolate e routing del microfono verso la sessione corretta.
+Non e' sicuro ottenerlo riusando la stessa password o lo stesso desktop. Questo
+resta una fase successiva esplicita, non una capacita' nascosta della release.

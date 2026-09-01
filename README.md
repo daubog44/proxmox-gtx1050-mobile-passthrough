@@ -221,40 +221,43 @@ Per applicare o ripetere il setup senza IP fissati nel codice, usare la CLI [oma
 `omarchy.local`, rileva automaticamente IP della VM e del client, verifica
 Moonlight/SSH/receiver e mostra per ogni dipendenza mancante il comando adatto
 al sistema operativo. La password SSH puo' essere inserita nella GUI o fornita
-con `OMARCHY_SSH_PASSWORD`: viene passata soltanto ai processi SSH/sudo figli e
-non viene salvata dall'app. Non serve clonare questa repository.
+con `OMARCHY_SSH_PASSWORD`: quando coincide anche con `sudo` locale/remoto viene
+riutilizzata per l'intero wizard, passata soltanto ai processi figli tramite
+askpass/stdin e mai salvata dall'app. KDE Connect viene scoperto e la richiesta
+di pairing viene avviata dal wizard; resta da approvare la notifica sul desktop
+Omarchy. Non serve clonare questa repository.
 
 **Fedora x86_64:**
 
 ```bash
-curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.3/omarchy-control-0.2.3-linux-x86_64.rpm
-sudo dnf install ./omarchy-control-0.2.3-linux-x86_64.rpm
+curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.4/omarchy-control-0.2.4-linux-x86_64.rpm
+sudo dnf install ./omarchy-control-0.2.4-linux-x86_64.rpm
 omarchy-control
 ```
 
 **Windows x64 (PowerShell):**
 
 ```powershell
-$installer = "$env:TEMP\omarchy-control-0.2.3-windows-x64-setup.exe"
-Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.3/omarchy-control-0.2.3-windows-x64-setup.exe" -OutFile $installer
+$installer = "$env:TEMP\omarchy-control-0.2.4-windows-x64-setup.exe"
+Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.4/omarchy-control-0.2.4-windows-x64-setup.exe" -OutFile $installer
 Start-Process $installer -Wait
 ```
 
 **macOS Apple Silicon:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.3/omarchy-control-0.2.3-darwin-aarch64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.4/omarchy-control-0.2.4-darwin-aarch64.dmg
 open Omarchy-Control.dmg
 ```
 
 **macOS Intel:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.3/omarchy-control-0.2.3-darwin-x64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.4/omarchy-control-0.2.4-darwin-x64.dmg
 open Omarchy-Control.dmg
 ```
 
-Nel DMG trascinare **Omarchy Control** in **Applications**. I DMG sono firmati ad-hoc ma non notarizzati: al primo avvio macOS puo' richiedere **Impostazioni di Sistema → Privacy e Sicurezza → Apri comunque**. Su macOS la GUI verifica e avvia Moonlight, ma non configura ancora il tunnel microfono RTP.
+Nel DMG trascinare **Omarchy Control** in **Applications**. I DMG sono firmati ad-hoc ma non notarizzati: al primo avvio macOS puo' richiedere **Impostazioni di Sistema → Privacy e Sicurezza → Apri comunque**. Su macOS la GUI rileva Homebrew nei percorsi Intel/Apple Silicon, apre Terminale per installare Moonlight e lo avvia; il setup completo resta chiaramente disabilitato perche' il tunnel microfono RTP macOS non e' ancora implementato.
 
 Per una GTX Pascal con il ramo NVIDIA `580xx`, l'azione Omarchy **Gaming → Steam** e' corretta localmente dal modulo `guest steam fix`: fa risolvere a Pacman `lib32-nvidia-580xx-utils` nella stessa transazione di Steam, invece del provider generico che dipende da NVIDIA 610 e va in conflitto. Il comando aggiuntivo `guest nvidia pin --apply` protegge invece **tutto il sistema**: permette aggiornamenti del ramo `580xx`, ma blocca prima della transazione una sostituzione con il ramo generico/open o 610. Hyprland resta il desktop Wayland sulla GTX e XWayland e' soltanto un fallback mirato per un'applicazione che abbia dimostrato un difetto nel backend nativo. Il modulo `guest steam fallback enable Sandustry --apply` salva e modifica esclusivamente le Launch Options dell'AppID richiesto, con rollback esatto; accetta anche il nome esatto del gioco installato e non forza X11 alle altre app Electron o Steam. Nella shell della VM basta `steam-x11 Sandustry`: l'alias gestisce i privilegi solo internamente. Un hook Pacman riapplica la correzione Steam dopo ogni aggiornamento di Omarchy. Se un mirror restituisce un `404`, aggiornare la VM con `omarchy update` (non con `pacman -Syu` diretto): Omarchy aggiunge snapshot, keyring, migrazioni e hook, poi si riapre l'azione Gaming → Steam.
 

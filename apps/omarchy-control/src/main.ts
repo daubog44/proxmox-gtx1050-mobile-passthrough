@@ -146,7 +146,10 @@ function render(data: Dashboard) {
   const credential = $("#credential-source");
   credential.textContent = data.ssh_password_source
     ? `Credenziale disponibile da ${data.ssh_password_source === "config" ? "omarchy.env" : "variabile d'ambiente"}`
-    : "Nessuna password memorizzata";
+    : "Se coincide per SSH e sudo basta inserirla una volta; non viene salvata";
+  const configure = $<HTMLButtonElement>("#configure");
+  configure.disabled = data.checks.setup.state === "blocked";
+  configure.title = configure.disabled ? data.checks.setup.detail : "";
 }
 
 async function refresh() {
@@ -238,6 +241,10 @@ async function launchMoonlight() {
 }
 
 async function configureClient() {
+  if (dashboard?.checks.setup.state === "blocked") {
+    setMessage(dashboard.checks.setup.detail, "error");
+    return;
+  }
   const button = $<HTMLButtonElement>("#configure");
   setBusy(button, true, "Preparo…");
   try {
@@ -293,7 +300,7 @@ $("#app").innerHTML = `
           <div class="field-grid primary-fields">
             <label><span>Hostname Omarchy</span><input name="vm_host" placeholder="omarchy.local" autocomplete="off" /><small>Risolto automaticamente in IP</small></label>
             <label><span>Utente SSH</span><input name="user" placeholder="utente" autocomplete="username" /><small>Precompilato con l’utente locale</small></label>
-            <label><span>Password SSH temporanea</span><input id="ssh-password" type="password" autocomplete="current-password" placeholder="Non viene salvata" /><small id="credential-source">Nessuna password memorizzata</small></label>
+            <label><span>Password temporanea SSH + sudo</span><input id="ssh-password" type="password" autocomplete="current-password" placeholder="Non viene salvata" /><small id="credential-source">Usata una volta dal wizard, solo se coincide sui due PC</small></label>
           </div>
           <div class="connection-actions">
             <button type="button" class="quiet" id="check-receiver">Prova accesso SSH</button>

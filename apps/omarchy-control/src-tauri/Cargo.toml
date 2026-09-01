@@ -1,6 +1,6 @@
 [package]
 name = "omarchy-control"
-version = "0.2.3"
+version = "0.2.4"
 description = "Cross-platform control plane for an Omarchy remote desktop"
 authors = ["Omarchy setup"]
 edition = "2021"

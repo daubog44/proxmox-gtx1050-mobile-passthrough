@@ -81,8 +81,12 @@ install_key() {
   remote_line="restrict,command=\"/home/$OMARCHY_USER/.local/bin/voxtype-remote-mic-ssh-dispatch\" $public_key"
   encoded="$(printf %s "$remote_line" | base64 -w 0)"
   remote_command="umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; line=\$(printf %s '$encoded' | base64 -d); grep -qxF \"\$line\" ~/.ssh/authorized_keys || printf '%s\\n' \"\$line\" >> ~/.ssh/authorized_keys"
-  note 'inserisci una sola volta la password SSH della VM per autorizzare la chiave dedicata del client Fedora'
-  ssh -tt "$OMARCHY_USER@$OMARCHY_VM_HOST" "$remote_command"
+  if [[ -n "${OMARCHY_SSH_PASSWORD:-}" ]]; then
+    note 'autorizzo la chiave con la credenziale temporanea della GUI; non viene salvata'
+  else
+    note 'inserisci una sola volta la password SSH della VM per autorizzare la chiave dedicata del client Fedora'
+  fi
+  ssh -T -o StrictHostKeyChecking=accept-new "$OMARCHY_USER@$OMARCHY_VM_HOST" "$remote_command"
   note 'chiave installata: puo eseguire solo il dispatcher microfono active/idle nella VM'
 }
 

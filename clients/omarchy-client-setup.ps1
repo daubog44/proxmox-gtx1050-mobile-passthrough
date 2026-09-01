@@ -52,13 +52,6 @@ function Require-Setting {
     return [string]$Settings[$Name]
 }
 
-function Invoke-RepositoryScript {
-    param([Parameter(Mandatory)] [string] $Path, [Parameter(Mandatory)] [object[]] $Arguments)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Script repository mancante: $Path" }
-    & $Path @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "$([IO.Path]::GetFileName($Path)) e terminato con codice $LASTEXITCODE." }
-}
-
 $settings = Read-OmarchyConfig -Path $ConfigPath
 $vmAddress = Require-Setting -Settings $settings -Name 'OMARCHY_VM_ADDRESS'
 $vmHost = Require-Setting -Settings $settings -Name 'OMARCHY_VM_HOST'
@@ -87,24 +80,28 @@ if ($Module -eq 'Show') {
 
 function Install-Microphone {
     if ($InstallKey) {
-        Invoke-RepositoryScript -Path $microphone -Arguments @('-InstallKey', '-VmHost', $vmHost, '-User', $user)
+        & $microphone -InstallKey -VmHost $vmHost -User $user
     }
-    Invoke-RepositoryScript -Path $microphone -Arguments @(
-        '-InstallAutostart', '-VmAddress', $vmAddress, '-VmHost', $vmHost,
-        '-User', $user, '-RtpPort', $port, '-Device', $device
-    )
+    & $microphone -InstallAutostart -VmAddress $vmAddress -VmHost $vmHost `
+        -User $user -RtpPort $port -Device $device
 }
 
 function Install-Moonlight {
-    $arguments = @()
-    if ($CloseMoonlight) { $arguments += '-CloseMoonlight' }
-    Invoke-RepositoryScript -Path $moonlight -Arguments $arguments
+    if (-not (Test-Path -LiteralPath 'HKCU:\Software\Moonlight Game Streaming Project\Moonlight')) {
+        Write-Warning 'Moonlight e installato ma non ancora inizializzato: aprilo una volta. Le preferenze verranno lasciate ai valori predefiniti.'
+        return
+    }
+    if (-not $CloseMoonlight -and (Get-Process -Name Moonlight -ErrorAction SilentlyContinue)) {
+        Write-Warning 'Moonlight e aperto: non forzo la chiusura di uno stream attivo. Salto solo le preferenze; microfono e chiave continuano a essere configurati.'
+        return
+    }
+    if ($CloseMoonlight) { & $moonlight -CloseMoonlight }
+    else { & $moonlight }
 }
 
 function Install-KdeConnect {
-    $arguments = @()
-    if ($ConfigureKdeFirewall) { $arguments += @('-ConfigureFirewall', '-PeerAddress', $vmAddress) }
-    Invoke-RepositoryScript -Path $kdeConnect -Arguments $arguments
+    if ($ConfigureKdeFirewall) { & $kdeConnect -ConfigureFirewall -PeerAddress $vmAddress }
+    else { & $kdeConnect }
 }
 
 switch ($Module) {

@@ -184,10 +184,8 @@ fn directshow_microphones(output: &str) -> Vec<String> {
 }
 
 fn detect_windows_microphone() -> Option<String> {
-    if !cfg!(target_os = "windows") || !command_exists("ffmpeg") {
-        return None;
-    }
-    let output = Command::new("ffmpeg")
+    let ffmpeg = windows_ffmpeg_path()?;
+    let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
             "-list_devices",
@@ -353,7 +351,10 @@ fn flatpak_installed(application: &str) -> bool {
 }
 
 fn ffmpeg_has_opus() -> bool {
-    let Ok(output) = Command::new("ffmpeg")
+    let Some(ffmpeg) = ffmpeg_path() else {
+        return false;
+    };
+    let Ok(output) = Command::new(ffmpeg)
         .args(["-hide_banner", "-encoders"])
         .output()
     else {
@@ -362,6 +363,79 @@ fn ffmpeg_has_opus() -> bool {
     output.status.success()
         && (String::from_utf8_lossy(&output.stdout).contains("libopus")
             || String::from_utf8_lossy(&output.stderr).contains("libopus"))
+}
+
+fn windows_path(variable: &str, relative: &[&str]) -> Option<PathBuf> {
+    let mut path = PathBuf::from(env::var_os(variable)?);
+    for component in relative {
+        path.push(component);
+    }
+    path.is_file().then_some(path)
+}
+
+fn windows_ffmpeg_path() -> Option<PathBuf> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    command_output("where", &["ffmpeg.exe"])
+        .and_then(|output| output.lines().next().map(PathBuf::from))
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            windows_path(
+                "LOCALAPPDATA",
+                &["Microsoft", "WinGet", "Links", "ffmpeg.exe"],
+            )
+        })
+        .or_else(|| windows_path("ProgramData", &["chocolatey", "bin", "ffmpeg.exe"]))
+}
+
+fn ffmpeg_path() -> Option<PathBuf> {
+    if cfg!(target_os = "windows") {
+        windows_ffmpeg_path()
+    } else {
+        command_exists("ffmpeg").then(|| PathBuf::from("ffmpeg"))
+    }
+}
+
+fn windows_kdeconnect_path() -> Option<PathBuf> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    command_output("where", &["kdeconnect-cli.exe"])
+        .and_then(|output| output.lines().next().map(PathBuf::from))
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            windows_path(
+                "ProgramFiles",
+                &["KDE Connect", "bin", "kdeconnect-cli.exe"],
+            )
+        })
+}
+
+fn macos_brew_path() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    command_output("sh", &["-lc", "command -v brew"])
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| path.is_file())
+        })
+}
+
+fn macos_moonlight_path() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let mut candidates = vec![PathBuf::from("/Applications/Moonlight.app")];
+    if let Some(home) = env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join("Applications/Moonlight.app"));
+    }
+    candidates.into_iter().find(|path| path.is_dir())
 }
 
 fn windows_moonlight_path() -> Option<PathBuf> {
@@ -410,6 +484,7 @@ fn dependency(
 
 fn dependencies() -> Vec<Dependency> {
     if cfg!(target_os = "windows") {
+        let ffmpeg_available = ffmpeg_path().is_some();
         vec![
             dependency(
                 "moonlight",
@@ -434,27 +509,52 @@ fn dependencies() -> Vec<Dependency> {
                 "FFmpeg",
                 ffmpeg_has_opus(),
                 "Acquisizione audio Opus disponibile",
-                "FFmpeg con encoder libopus richiesto per il tunnel microfono",
-                Some("winget install --id Gyan.FFmpeg -e"),
+                if ffmpeg_available {
+                    "FFmpeg presente ma senza libopus: aggiorna la distribuzione gia installata"
+                } else {
+                    "FFmpeg con encoder libopus richiesto per il tunnel microfono"
+                },
+                (!ffmpeg_available).then_some("winget install --id Gyan.FFmpeg -e"),
             ),
             dependency(
                 "kdeconnect",
                 "KDE Connect",
-                command_exists("kdeconnect-cli"),
+                windows_kdeconnect_path().is_some(),
                 "Clipboard bidirezionale disponibile",
                 "Opzionale: abilita clipboard e file",
                 Some("winget install --id KDE.KDEConnect -e"),
             ),
         ]
     } else if cfg!(target_os = "macos") {
-        vec![
+        let brew = macos_brew_path();
+        let brew_ready = brew.is_some();
+        let moonlight_ready = macos_moonlight_path().is_some();
+        let moonlight_install = brew
+            .as_ref()
+            .map(|path| format!("'{}' install --cask moonlight", path.display()));
+        let mut result = Vec::new();
+        if !moonlight_ready && !brew_ready {
+            result.push(dependency(
+                "homebrew",
+                "Homebrew",
+                false,
+                "Gestore pacchetti disponibile",
+                "Richiesto per installare Moonlight dalla GUI",
+                Some("open https://brew.sh"),
+            ));
+        }
+        result.extend([
             dependency(
                 "moonlight",
                 "Moonlight",
-                Path::new("/Applications/Moonlight.app").exists(),
+                moonlight_ready,
                 "Moonlight.app disponibile",
-                "Moonlight.app non installata",
-                Some("brew install --cask moonlight"),
+                if brew_ready {
+                    "Moonlight.app non installata"
+                } else {
+                    "Installa prima Homebrew"
+                },
+                moonlight_install.as_deref(),
             ),
             dependency(
                 "ssh",
@@ -464,7 +564,8 @@ fn dependencies() -> Vec<Dependency> {
                 "SSH non rilevato",
                 None,
             ),
-        ]
+        ]);
+        result
     } else {
         let ffmpeg_available = command_exists("ffmpeg");
         vec![
@@ -664,6 +765,17 @@ fn open_linux_terminal(command_line: &str) -> AppResult<()> {
     Err("Nessun terminale grafico trovato (kgx, gnome-terminal, konsole, xterm)".into())
 }
 
+fn open_macos_terminal(command_line: &str) -> AppResult<()> {
+    let escaped = command_line.replace('\\', "\\\\").replace('"', "\\\"");
+    let script =
+        format!("tell application \"Terminal\"\nactivate\ndo script \"{escaped}\"\nend tell");
+    Command::new("osascript")
+        .args(["-e", &script])
+        .spawn()
+        .map_err(|error| format!("Impossibile aprire Terminale: {error}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn inspect_setup(app: AppHandle) -> AppResult<Dashboard> {
     let path = config_path(&app)?;
@@ -789,8 +901,12 @@ fn install_dependency(dependency_id: String) -> AppResult<String> {
             "{install}; status=$?; echo; read -r -p 'Premi Invio per chiudere…'; exit $status"
         );
         open_linux_terminal(&instruction)?;
+    } else if cfg!(target_os = "macos") {
+        open_macos_terminal(&install)?;
     } else {
-        return Err(format!("Apri Terminale ed esegui: {install}"));
+        return Err(format!(
+            "Piattaforma non supportata. Esegui manualmente: {install}"
+        ));
     }
     Ok(format!("Installer di {} aperto nel terminale", entry.name))
 }
@@ -811,7 +927,7 @@ fn run_setup_in_terminal(app: AppHandle, ssh_password: Option<String>) -> AppRes
     if cfg!(target_os = "windows") {
         let script = asset(&app, "clients/omarchy-client-setup.ps1")?;
         let instruction = format!(
-            "try {{ & {} -ConfigPath {} -Module All -InstallKey }} finally {{ Remove-Item Env:OMARCHY_SSH_PASSWORD,Env:OMARCHY_SUDO_PASSWORD,Env:OMARCHY_ASKPASS_MODE -ErrorAction SilentlyContinue }}",
+            "$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User'); try {{ & {} -ConfigPath {} -Module All -InstallKey }} finally {{ Remove-Item Env:OMARCHY_SSH_PASSWORD,Env:OMARCHY_SUDO_PASSWORD,Env:OMARCHY_ASKPASS_MODE -ErrorAction SilentlyContinue }}",
             powershell_quote(&script),
             powershell_quote(&path)
         );
@@ -925,5 +1041,18 @@ mod tests {
             directshow_microphones(sample),
             vec!["Microphone Array (Realtek Audio)", "USB Microphone"]
         );
+    }
+
+    #[test]
+    fn ready_dependencies_never_offer_an_install_action() {
+        for dependency in dependencies() {
+            if dependency.state == "ready" {
+                assert!(
+                    dependency.install_command.is_none(),
+                    "{} is ready but still offers an installer",
+                    dependency.name
+                );
+            }
+        }
     }
 }
