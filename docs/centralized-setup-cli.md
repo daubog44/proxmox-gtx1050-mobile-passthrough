@@ -337,7 +337,9 @@ omarchy-onboard --apply
 # Unico comando per un nuovo client: se manca, apre il wizard per il file .env;
 # installa Moonlight e dipendenze, controlla via SSH il ricevitore della VM e,
 # se assente, trasferisce e avvia automaticamente il modulo guest del pacchetto.
-# Poi configura firewall RTP, chiave SSH ristretta, watcher e verifiche.
+# Poi configura firewall RTP, chiave SSH ristretta, watcher e verifiche. Questo
+# percorso non chiede VMID, BDF GPU o VBIOS: sono variabili del nodo PVE, non
+# del client Fedora.
 scripts/omarchy-setup onboard --apply
 
 # Anteprima della stessa CLI centrale: non modifica nulla.
