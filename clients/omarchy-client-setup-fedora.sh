@@ -237,7 +237,7 @@ remote_sudo() {
     # No PTY in automated mode: a remote terminal could echo piped input
     # before sudo disables echo. sudo -S works through the encrypted stdin.
     printf '%s\n' "$secret" | ssh_run -T "${remote_ssh_options[@]}" \
-      "$OMARCHY_USER@$OMARCHY_VM_HOST" sudo -S -p '' "$@"
+      "$OMARCHY_USER@$OMARCHY_VM_HOST" sudo -S -- "$@"
   else
     ssh_run -tt "${remote_ssh_options[@]}" \
       "$OMARCHY_USER@$OMARCHY_VM_HOST" sudo "$@"
