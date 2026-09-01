@@ -217,35 +217,40 @@ Per applicare o ripetere il setup senza IP fissati nel codice, usare la CLI [oma
 
 ### Installare Omarchy Control
 
-[Omarchy Control](docs/omarchy-control-desktop.md) e' la GUI Tauri che salva la configurazione privata, verifica Moonlight/SSH/receiver e avvia l'automazione client nel terminale nativo senza intercettare password. Non serve clonare questa repository.
+[Omarchy Control](docs/omarchy-control-desktop.md) e' la GUI Tauri che risolve
+`omarchy.local`, rileva automaticamente IP della VM e del client, verifica
+Moonlight/SSH/receiver e mostra per ogni dipendenza mancante il comando adatto
+al sistema operativo. La password SSH puo' essere inserita nella GUI o fornita
+con `OMARCHY_SSH_PASSWORD`: viene passata soltanto ai processi SSH/sudo figli e
+non viene salvata dall'app. Non serve clonare questa repository.
 
 **Fedora x86_64:**
 
 ```bash
-curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.1.1/omarchy-control-0.1.1-linux-x86_64.rpm
-sudo dnf install ./omarchy-control-0.1.1-linux-x86_64.rpm
+curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.0/omarchy-control-0.2.0-linux-x86_64.rpm
+sudo dnf install ./omarchy-control-0.2.0-linux-x86_64.rpm
 omarchy-control
 ```
 
 **Windows x64 (PowerShell):**
 
 ```powershell
-$installer = "$env:TEMP\omarchy-control-0.1.1-windows-x64-setup.exe"
-Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.1.1/omarchy-control-0.1.1-windows-x64-setup.exe" -OutFile $installer
+$installer = "$env:TEMP\omarchy-control-0.2.0-windows-x64-setup.exe"
+Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.0/omarchy-control-0.2.0-windows-x64-setup.exe" -OutFile $installer
 Start-Process $installer -Wait
 ```
 
 **macOS Apple Silicon:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.1.1/omarchy-control-0.1.1-darwin-aarch64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.0/omarchy-control-0.2.0-darwin-aarch64.dmg
 open Omarchy-Control.dmg
 ```
 
 **macOS Intel:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.1.1/omarchy-control-0.1.1-darwin-x64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.0/omarchy-control-0.2.0-darwin-x64.dmg
 open Omarchy-Control.dmg
 ```
 

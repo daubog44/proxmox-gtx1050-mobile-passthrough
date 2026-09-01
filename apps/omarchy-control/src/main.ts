@@ -1,13 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import "./style.css";
 
-type Check = { state: "ready" | "missing" | "blocked" | "unknown"; detail: string };
-type Dashboard = {
-  platform: string;
-  config_path: string;
-  config: SetupConfig;
-  checks: { moonlight: Check; ssh: Check; guest_receiver: Check; setup: Check };
-};
+type State = "ready" | "missing" | "blocked" | "unknown";
+type Check = { state: State; detail: string; install_command?: string | null };
+type Dependency = Check & { id: string; name: string };
 type SetupConfig = {
   vm_host: string;
   vm_address: string;
@@ -17,6 +13,15 @@ type SetupConfig = {
   microphone: string;
   fedora_source: string;
 };
+type Dashboard = {
+  platform: string;
+  config_path: string;
+  config: SetupConfig;
+  checks: { moonlight: Check; ssh: Check; guest_receiver: Check; setup: Check };
+  dependencies: Dependency[];
+  ssh_password_source?: "environment" | "config" | null;
+};
+type SaveResult = { path: string; config: SetupConfig };
 
 const defaults: SetupConfig = {
   vm_host: "",
@@ -27,6 +32,10 @@ const defaults: SetupConfig = {
   microphone: "",
   fedora_source: "@DEFAULT_SOURCE@",
 };
+
+let dirty = false;
+let hydrated = false;
+let dashboard: Dashboard | null = null;
 
 const $ = <T extends HTMLElement>(selector: string) => {
   const element = document.querySelector<T>(selector);
@@ -40,10 +49,25 @@ function escapeHtml(value: string) {
   })[character] ?? character);
 }
 
+function labelFor(state: State) {
+  return ({ ready: "Pronto", missing: "Manca", blocked: "Bloccato", unknown: "Da verificare" })[state];
+}
+
 function setMessage(message: string, level: "ok" | "error" | "info" = "info") {
   const target = $("#message");
   target.textContent = message;
   target.dataset.level = level;
+}
+
+function setBusy(button: HTMLButtonElement, busy: boolean, busyLabel = "Attendi…") {
+  if (busy) {
+    button.dataset.label = button.textContent ?? "";
+    button.textContent = busyLabel;
+    button.disabled = true;
+  } else {
+    button.textContent = button.dataset.label ?? button.textContent;
+    button.disabled = false;
+  }
 }
 
 function input(name: keyof SetupConfig) {
@@ -62,6 +86,11 @@ function readForm(): SetupConfig {
   };
 }
 
+function password() {
+  const value = $<HTMLInputElement>("#ssh-password").value;
+  return value.length ? value : null;
+}
+
 function writeForm(config: Partial<SetupConfig>) {
   for (const [key, value] of Object.entries({ ...defaults, ...config })) {
     const element = document.querySelector<HTMLInputElement>(`[name="${key}"]`);
@@ -69,103 +98,233 @@ function writeForm(config: Partial<SetupConfig>) {
   }
 }
 
-function checkCard(title: string, check: Check) {
-  return `<article class="check ${check.state}">
-    <p>${escapeHtml(title)}</p>
-    <strong>${escapeHtml(check.state)}</strong>
-    <span>${escapeHtml(check.detail)}</span>
-  </article>`;
+function statusRow(title: string, check: Check) {
+  return `<div class="status-row">
+    <span class="status-dot ${check.state}" aria-hidden="true"></span>
+    <div><strong>${escapeHtml(title)}</strong><p>${escapeHtml(check.detail)}</p></div>
+    <span class="state ${check.state}">${labelFor(check.state)}</span>
+  </div>`;
 }
 
-function render(dashboard: Dashboard) {
-  writeForm(dashboard.config);
-  $("#platform").textContent = dashboard.platform;
-  $("#config-path").textContent = dashboard.config_path;
-  $("#checks").innerHTML = [
-    checkCard("Moonlight", dashboard.checks.moonlight),
-    checkCard("SSH client", dashboard.checks.ssh),
-    checkCard("Receiver Omarchy", dashboard.checks.guest_receiver),
-    checkCard("Automazione client", dashboard.checks.setup),
+function renderDependencies(dependencies: Dependency[]) {
+  $("#dependencies").innerHTML = dependencies.map((dependency) => `
+    <div class="dependency-row">
+      <span class="status-dot ${dependency.state}" aria-hidden="true"></span>
+      <div class="dependency-copy">
+        <div><strong>${escapeHtml(dependency.name)}</strong><span>${labelFor(dependency.state)}</span></div>
+        <p>${escapeHtml(dependency.detail)}</p>
+        ${dependency.install_command ? `<code>${escapeHtml(dependency.install_command)}</code>` : ""}
+      </div>
+      ${dependency.install_command ? `<button type="button" class="quiet install-dependency" data-id="${escapeHtml(dependency.id)}">Installa</button>` : ""}
+    </div>`).join("");
+
+  document.querySelectorAll<HTMLButtonElement>(".install-dependency").forEach((button) => {
+    button.addEventListener("click", () => void installDependency(button));
+  });
+}
+
+function render(data: Dashboard) {
+  dashboard = data;
+  if (!hydrated || !dirty) {
+    writeForm(data.config);
+    hydrated = true;
+    dirty = false;
+  }
+  $("#platform").textContent = data.platform;
+  $("#config-path").textContent = data.config_path;
+  $("#overview-status").innerHTML = [
+    statusRow("Moonlight", data.checks.moonlight),
+    statusRow("SSH locale", data.checks.ssh),
+    statusRow("Receiver Omarchy", data.checks.guest_receiver),
+    statusRow("Automazione client", data.checks.setup),
   ].join("");
+  renderDependencies(data.dependencies);
+  const ready = Object.values(data.checks).filter((check) => check.state === "ready").length;
+  $("#readiness").textContent = `${ready}/4 pronti`;
+  $("#readiness").dataset.state = ready === 4 ? "ready" : "attention";
+  const credential = $("#credential-source");
+  credential.textContent = data.ssh_password_source
+    ? `Credenziale disponibile da ${data.ssh_password_source === "config" ? "omarchy.env" : "variabile d'ambiente"}`
+    : "Nessuna password memorizzata";
 }
 
 async function refresh() {
-  setMessage("Verifica in corso…");
+  const button = $<HTMLButtonElement>("#refresh");
+  setBusy(button, true, "Verifico…");
+  setMessage("Controllo configurazione, software locale e receiver…");
   try {
-    const dashboard = await invoke<Dashboard>("inspect_setup");
-    render(dashboard);
-    setMessage("Verifica completata.", "ok");
+    const data = await invoke<Dashboard>("inspect_setup");
+    render(data);
+    setMessage("Stato aggiornato.", "ok");
   } catch (error) {
     setMessage(String(error), "error");
+  } finally {
+    setBusy(button, false);
   }
 }
 
-async function save() {
+async function discover() {
+  const button = $<HTMLButtonElement>("#discover");
+  setBusy(button, true, "Rilevo…");
   try {
-    const path = await invoke<string>("save_config", { config: readForm() });
-    $("#config-path").textContent = path;
-    setMessage("Configurazione salvata localmente. Nessuna password viene memorizzata.", "ok");
+    const config = readForm();
+    config.vm_address = "";
+    config.client_address = "";
+    const detected = await invoke<SetupConfig>("discover_config", { config });
+    writeForm(detected);
+    dirty = true;
+    setMessage("Hostname risolto e indirizzi di rete rilevati. Controlla i valori e salva.", "ok");
   } catch (error) {
     setMessage(String(error), "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function save(): Promise<boolean> {
+  const button = $<HTMLButtonElement>("#save");
+  setBusy(button, true, "Salvo…");
+  try {
+    const result = await invoke<SaveResult>("save_config", { config: readForm() });
+    writeForm(result.config);
+    $("#config-path").textContent = result.path;
+    dirty = false;
+    setMessage("Configurazione salvata. La password inserita nella GUI non è stata scritta su disco.", "ok");
+    return true;
+  } catch (error) {
+    setMessage(String(error), "error");
+    return false;
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function checkReceiver() {
+  const button = $<HTMLButtonElement>("#check-receiver");
+  setBusy(button, true, "Connetto…");
+  setMessage("Connessione SSH a Omarchy…");
+  try {
+    const check = await invoke<Check>("check_receiver", {
+      config: readForm(),
+      sshPassword: password(),
+    });
+    if (dashboard) {
+      dashboard.checks.guest_receiver = check;
+      render(dashboard);
+    }
+    setMessage(check.detail, check.state === "ready" || check.state === "missing" ? "ok" : "error");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(button, false);
   }
 }
 
 async function launchMoonlight() {
+  const button = $<HTMLButtonElement>("#moonlight");
+  setBusy(button, true, "Apro…");
   try {
     await invoke("launch_moonlight");
     setMessage("Moonlight avviato.", "ok");
   } catch (error) {
     setMessage(String(error), "error");
+  } finally {
+    setBusy(button, false);
   }
 }
 
 async function configureClient() {
+  const button = $<HTMLButtonElement>("#configure");
+  setBusy(button, true, "Preparo…");
   try {
-    await save();
-    const detail = await invoke<string>("run_setup_in_terminal");
+    if (!await save()) return;
+    const detail = await invoke<string>("run_setup_in_terminal", { sshPassword: password() });
     setMessage(detail, "ok");
   } catch (error) {
     setMessage(String(error), "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function installDependency(button: HTMLButtonElement) {
+  setBusy(button, true, "Apro…");
+  try {
+    const detail = await invoke<string>("install_dependency", { dependencyId: button.dataset.id });
+    setMessage(detail, "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(button, false);
   }
 }
 
 $("#app").innerHTML = `
-  <main>
-    <header>
-      <div><p class="eyebrow">REMOTE DESKTOP CONTROL PLANE</p><h1>Omarchy Control</h1></div>
-      <div class="platform"><span>Platform</span><strong id="platform">…</strong></div>
-    </header>
-    <section class="hero">
-      <div><h2>Un solo pannello, tre confini chiari.</h2><p>Client locale, VM Omarchy e nodo PVE restano separati. Questa app prepara il client, verifica il receiver nella VM e apre Moonlight senza memorizzare credenziali.</p></div>
-      <div class="actions"><button id="refresh" class="secondary">Verifica</button><button id="moonlight">Apri Moonlight</button></div>
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">O</span><div><strong>Omarchy</strong><span>Control</span></div></div>
+      <nav aria-label="Sezioni">
+        <a href="#overview" class="active"><span>01</span> Stato</a>
+        <a href="#connection"><span>02</span> Connessione</a>
+        <a href="#requirements"><span>03</span> Dipendenze</a>
+      </nav>
+      <div class="sidebar-foot"><span>Client locale</span><strong id="platform">Rilevamento…</strong><small id="config-path">…</small></div>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar">
+        <div><p class="eyebrow">REMOTE DESKTOP CONTROL PLANE</p><h1>Configura. Verifica. Connettiti.</h1></div>
+        <div class="top-actions"><span id="readiness" data-state="attention">Verifica in corso</span><button type="button" class="quiet" id="refresh">Aggiorna stato</button></div>
+      </header>
+
+      <section id="overview" class="section overview">
+        <div class="section-heading"><div><p class="eyebrow">STATO DEL SISTEMA</p><h2>Il percorso fino a Omarchy</h2></div><button type="button" id="moonlight">Apri Moonlight <span>↗</span></button></div>
+        <div id="overview-status" class="status-list" aria-live="polite"></div>
+      </section>
+
+      <section id="connection" class="section">
+        <div class="section-heading"><div><p class="eyebrow">CONNESSIONE</p><h2>Rete e accesso SSH</h2><p>Inserisci soltanto hostname e utente: gli indirizzi vengono ricavati dalla route locale.</p></div><button type="button" class="quiet" id="discover">Rileva rete</button></div>
+        <form id="connection-form">
+          <div class="field-grid primary-fields">
+            <label><span>Hostname Omarchy</span><input name="vm_host" placeholder="omarchy.local" autocomplete="off" /><small>Risolto automaticamente in IP</small></label>
+            <label><span>Utente SSH</span><input name="user" placeholder="utente" autocomplete="username" /><small>Precompilato con l’utente locale</small></label>
+            <label><span>Password SSH temporanea</span><input id="ssh-password" type="password" autocomplete="current-password" placeholder="Non viene salvata" /><small id="credential-source">Nessuna password memorizzata</small></label>
+          </div>
+          <div class="connection-actions">
+            <button type="button" class="quiet" id="check-receiver">Prova accesso SSH</button>
+            <button type="button" class="quiet" id="save">Salva localmente</button>
+            <button type="button" id="configure">Configura questo client</button>
+          </div>
+          <details>
+            <summary>Impostazioni rilevate e audio</summary>
+            <div class="field-grid advanced-fields">
+              <label><span>IP VM</span><input name="vm_address" placeholder="rilevato dal hostname" inputmode="decimal" /></label>
+              <label><span>IP client</span><input name="client_address" placeholder="rilevato dalla route" inputmode="decimal" /></label>
+              <label><span>Porta RTP</span><input name="rtp_port" inputmode="numeric" /></label>
+              <label><span>Microfono Windows</span><input name="microphone" placeholder="rilevato dallo script FFmpeg" /></label>
+              <label><span>Sorgente Fedora</span><input name="fedora_source" /></label>
+            </div>
+          </details>
+        </form>
+      </section>
+
+      <section id="requirements" class="section dependencies-section">
+        <div class="section-heading"><div><p class="eyebrow">DIPENDENZE LOCALI</p><h2>Software richiesto</h2><p>I comandi cambiano automaticamente in base al sistema operativo.</p></div></div>
+        <div id="dependencies" class="dependency-list"></div>
+      </section>
+
+      <div id="message" data-level="info" role="status">Avvio dei controlli…</div>
     </section>
-    <section id="checks" class="checks" aria-live="polite"></section>
-    <section class="grid">
-      <form class="panel" onsubmit="return false">
-        <div class="panel-heading"><div><p class="eyebrow">CONFIGURAZIONE</p><h2>Connessione Omarchy</h2></div><span class="file" id="config-path">…</span></div>
-        <div class="fields">
-          <label>Host o IP SSH VM<input name="vm_host" placeholder="omarchy.local" /></label>
-          <label>IP LAN VM<input name="vm_address" placeholder="192.168.x.x" /></label>
-          <label>Utente VM<input name="user" placeholder="utente" /></label>
-          <label>IP di questo client<input name="client_address" placeholder="192.168.x.x" /></label>
-          <label>Porta RTP<input name="rtp_port" inputmode="numeric" /></label>
-          <label>Microfono Windows<input name="microphone" placeholder="necessario su Windows" /></label>
-          <label>Sorgente PipeWire Fedora<input name="fedora_source" /></label>
-        </div>
-        <div class="form-actions"><button id="save" class="secondary">Salva localmente</button><button id="configure">Configura questo client</button></div>
-      </form>
-      <aside class="panel guide">
-        <p class="eyebrow">COME FUNZIONA</p>
-        <h2>Privilegi e password restano visibili.</h2>
-        <ol><li>L’app salva soltanto indirizzi e preferenze nel profilo locale.</li><li>Per setup, SSH e sudo apre il terminale nativo: la password non passa nella GUI né su disco.</li><li>Il terminale esegue gli script versionati e poi puoi tornare qui per verificare.</li></ol>
-        <p class="muted">Windows e Fedora eseguono l’automazione già inclusa nella repository. macOS può verificare e avviare Moonlight, ma non ha ancora un adapter microfono RTP: l’app lo dichiara esplicitamente, senza fingere che sia configurato.</p>
-      </aside>
-    </section>
-    <div id="message" data-level="info" role="status">Pronto.</div>
   </main>`;
 
+$("#connection-form").addEventListener("submit", (event) => event.preventDefault());
+$("#connection-form").addEventListener("input", (event) => {
+  if ((event.target as HTMLElement).id !== "ssh-password") dirty = true;
+});
 $("#save").addEventListener("click", () => void save());
 $("#refresh").addEventListener("click", () => void refresh());
+$("#discover").addEventListener("click", () => void discover());
+$("#check-receiver").addEventListener("click", () => void checkReceiver());
 $("#moonlight").addEventListener("click", () => void launchMoonlight());
 $("#configure").addEventListener("click", () => void configureClient());
 

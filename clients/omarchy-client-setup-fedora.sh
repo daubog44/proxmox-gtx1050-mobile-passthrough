@@ -195,6 +195,34 @@ install_kde_connect() {
 
 remote_ssh_options=()
 remote_control_dir=''
+ssh_auth_prefix=()
+
+configure_ssh_password() {
+  [[ -n "${OMARCHY_SSH_PASSWORD:-}" ]] || return 0
+  # Omarchy Control provides its own in-memory SSH_ASKPASS executable. A
+  # standalone shell can obtain the same non-interactive behavior via sshpass.
+  if [[ -z "${SSH_ASKPASS:-}" ]]; then
+    command -v sshpass >/dev/null || die 'OMARCHY_SSH_PASSWORD richiede sshpass: sudo dnf install -y sshpass'
+    export SSHPASS="$OMARCHY_SSH_PASSWORD"
+    ssh_auth_prefix=(sshpass -e)
+  fi
+}
+
+ssh_run() { "${ssh_auth_prefix[@]}" ssh "$@"; }
+scp_run() { "${ssh_auth_prefix[@]}" scp "$@"; }
+
+remote_sudo() {
+  local secret="${OMARCHY_SUDO_PASSWORD:-${OMARCHY_SSH_PASSWORD:-}}"
+  if [[ -n "$secret" ]]; then
+    # No PTY in automated mode: a remote terminal could echo piped input
+    # before sudo disables echo. sudo -S works through the encrypted stdin.
+    printf '%s\n' "$secret" | ssh_run -T "${remote_ssh_options[@]}" \
+      "$OMARCHY_USER@$OMARCHY_VM_HOST" sudo -S -p '' "$@"
+  else
+    ssh_run -tt "${remote_ssh_options[@]}" \
+      "$OMARCHY_USER@$OMARCHY_VM_HOST" sudo "$@"
+  fi
+}
 
 cleanup_remote_ssh() {
   [[ -n "$remote_control_dir" ]] || return 0
@@ -206,6 +234,7 @@ prepare_remote_ssh() {
   [[ -n "$remote_control_dir" ]] && return 0
   command -v ssh >/dev/null || die 'ssh mancante: installa openssh-clients prima di configurare la VM'
   command -v scp >/dev/null || die 'scp mancante: installa openssh-clients prima di configurare la VM'
+  configure_ssh_password
   remote_control_dir="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/omarchy-ssh.XXXXXX")"
   chmod 0700 "$remote_control_dir"
   remote_ssh_options=(
@@ -218,7 +247,7 @@ prepare_remote_ssh() {
 }
 
 vm_receiver_present() {
-  ssh "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" \
+  ssh_run "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" \
     'test -x ~/.local/bin/voxtype-remote-mic-ssh-dispatch && test -x ~/.local/bin/voxtype-remote-mic-rtp-receive && test -f ~/.config/systemd/user/voxtype-remote-mic-rtp.service'
 }
 
@@ -243,7 +272,7 @@ bootstrap_vm_microphone() (
   cleanup_bootstrap() {
     rm -rf -- "$local_stage"
     [[ "$remote_stage" =~ ^/tmp/omarchy-guest-bootstrap\.[A-Za-z0-9]+$ ]] || return 0
-    ssh -o BatchMode=yes "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" "rm -rf -- $remote_stage" >/dev/null 2>&1 || true
+    ssh_run "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" "rm -rf -- $remote_stage" >/dev/null 2>&1 || true
   }
   trap cleanup_bootstrap EXIT
   install -d -m 0700 "$local_stage/scripts" "$local_stage/systemd" "$local_stage/config"
@@ -254,14 +283,15 @@ bootstrap_vm_microphone() (
   install -m 0600 "$config_file" "$local_stage/config/omarchy.env"
 
   note 'ricevitore VM assente: trasferisco soltanto gli script del microfono e la configurazione privata temporanea'
-  remote_stage="$(ssh "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" 'umask 077; mktemp -d /tmp/omarchy-guest-bootstrap.XXXXXX')" || die 'impossibile creare la directory temporanea nella VM via SSH'
+  remote_stage="$(ssh_run "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" 'umask 077; mktemp -d /tmp/omarchy-guest-bootstrap.XXXXXX')" || die 'impossibile creare la directory temporanea nella VM via SSH'
   [[ "$remote_stage" =~ ^/tmp/omarchy-guest-bootstrap\.[A-Za-z0-9]+$ ]] || die 'directory temporanea VM non valida: bootstrap annullato'
-  scp "${remote_ssh_options[@]}" -pr "$local_stage/." "$OMARCHY_USER@$OMARCHY_VM_HOST:$remote_stage/" || die 'trasferimento del ricevitore alla VM fallito'
+  scp_run "${remote_ssh_options[@]}" -pr "$local_stage/." "$OMARCHY_USER@$OMARCHY_VM_HOST:$remote_stage/" || die 'trasferimento del ricevitore alla VM fallito'
 
   note 'VM: installo il ricevitore, il servizio utente, la regola UFW e i binding PTT esistenti'
-  ssh -tt "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" \
-    "trap 'rm -rf -- $remote_stage' EXIT; sudo bash $remote_stage/scripts/omarchy-setup --config $remote_stage/config/omarchy.env guest microphone install --apply" || \
+  remote_sudo bash "$remote_stage/scripts/omarchy-setup" --config "$remote_stage/config/omarchy.env" guest microphone install --apply || \
     die 'bootstrap microfono VM fallito: leggi l errore precedente. Servono VoxType, ffmpeg, PipeWire/Pulse, pw-cat, systemd utente e ufw gia disponibili nella VM Omarchy'
+  ssh_run "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" "rm -rf -- $remote_stage"
+  remote_stage=''
   trap - EXIT
   rm -rf -- "$local_stage"
   note 'ricevitore microfono VM installato e configurato automaticamente'
@@ -290,8 +320,7 @@ configure_vm_rtp_firewall() {
   note "VM Omarchy: verifico il ricevitore e autorizzo UDP $OMARCHY_RTP_PORT da $OMARCHY_CLIENT_ADDRESS"
   note 'il terminale puo chiedere prima la password SSH e poi sudo della VM; nessuna password viene salvata'
   vm_receiver_present || die 'ricevitore VM assente dopo il bootstrap: esegui omarchy-onboard --apply e riporta l errore completo'
-  ssh -tt "${remote_ssh_options[@]}" "$OMARCHY_USER@$OMARCHY_VM_HOST" \
-    "sudo ufw allow from $OMARCHY_CLIENT_ADDRESS to any port $OMARCHY_RTP_PORT proto udp comment 'Omarchy Voxtype RTP microphone'"
+  remote_sudo ufw allow from "$OMARCHY_CLIENT_ADDRESS" to any port "$OMARCHY_RTP_PORT" proto udp comment Omarchy-Voxtype-RTP-microphone
   (( owns_connection )) && cleanup_remote_ssh
 }
 
