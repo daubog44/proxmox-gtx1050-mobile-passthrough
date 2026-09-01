@@ -196,7 +196,11 @@ install_microphone() {
   local target_unit="$HOME/.config/systemd/user/voxtype-fedora-mic-rtp.service"
   install -d -m 0700 "$HOME/.config/omarchy" "$HOME/.config/systemd/user"
   install -Dm755 "$script_dir/voxtype-fedora-mic-rtp.sh" "$target_bin"
-  install -Dm600 "$config_file" "$target_config"
+  if [[ "$(readlink -f -- "$config_file")" != "$(readlink -f -- "$target_config")" ]]; then
+    install -Dm600 "$config_file" "$target_config"
+  else
+    chmod 0600 "$target_config"
+  fi
   install -Dm644 "$repo_root/systemd/voxtype-fedora-mic-rtp.service" "$target_unit"
   if (( install_key )); then "$target_bin" --config "$target_config" --install-key; fi
   systemctl --user daemon-reload
