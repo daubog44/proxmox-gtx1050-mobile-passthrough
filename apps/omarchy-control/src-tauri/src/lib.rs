@@ -350,6 +350,18 @@ fn flatpak_installed(application: &str) -> bool {
             .is_ok_and(|output| output.status.success())
 }
 
+fn flatpak_running(application: &str) -> bool {
+    Command::new("flatpak")
+        .args(["ps", "--columns=application"])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.trim() == application)
+        })
+}
+
 fn ffmpeg_has_opus() -> bool {
     let Some(ffmpeg) = ffmpeg_path() else {
         return false;
@@ -679,12 +691,16 @@ fn receiver_check(config: &SetupConfig, password: Option<&str>) -> Check {
         "-o",
         "NumberOfPasswordPrompts=1",
     ]);
-    let dedicated_key = password
-        .is_none()
-        .then(receiver_key_path)
-        .flatten()
-        .filter(|path| path.is_file());
-    if let Some(secret) = password {
+    // Once installed, the restricted key is the receiver's canonical health
+    // channel. Do not replace a working key check with a password merely
+    // because the password field still contains its temporary value.
+    let dedicated_key = receiver_key_path().filter(|path| path.is_file());
+    if let Some(key) = dedicated_key.as_ref() {
+        command
+            .arg("-i")
+            .arg(key)
+            .args(["-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"]);
+    } else if let Some(secret) = password {
         if let Err(error) = prepare_askpass(&mut command, secret) {
             return Check {
                 state: "blocked",
@@ -692,11 +708,6 @@ fn receiver_check(config: &SetupConfig, password: Option<&str>) -> Check {
                 install_command: None,
             };
         }
-    } else if let Some(key) = dedicated_key.as_ref() {
-        command
-            .arg("-i")
-            .arg(key)
-            .args(["-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"]);
     } else {
         command.args(["-o", "BatchMode=yes"]);
     }
@@ -774,10 +785,6 @@ fn asset(app: &AppHandle, relative: &str) -> AppResult<PathBuf> {
         .is_file()
         .then_some(candidate)
         .ok_or_else(|| format!("asset applicazione mancante: {relative}"))
-}
-
-fn shell_quote(value: &Path) -> String {
-    format!("'{}'", value.display().to_string().replace('\'', "'\"'\"'"))
 }
 
 fn powershell_quote(value: &Path) -> String {
@@ -898,7 +905,10 @@ fn save_config(app: AppHandle, config: SetupConfig) -> AppResult<SaveResult> {
 }
 
 #[tauri::command]
-fn launch_moonlight() -> AppResult<()> {
+fn launch_moonlight() -> AppResult<String> {
+    if cfg!(target_os = "linux") && flatpak_running("com.moonlight_stream.Moonlight") {
+        return Ok("Moonlight e gia aperto; non avvio una seconda istanza".into());
+    }
     if cfg!(target_os = "windows") {
         if let Some(path) = windows_moonlight_path() {
             Command::new(path).spawn()
@@ -915,7 +925,7 @@ fn launch_moonlight() -> AppResult<()> {
             .spawn()
     }
     .map_err(|error| format!("Impossibile avviare Moonlight: {error}"))?;
-    Ok(())
+    Ok("Moonlight avviato".into())
 }
 
 #[tauri::command]
@@ -951,7 +961,7 @@ fn install_dependency(dependency_id: String) -> AppResult<String> {
 }
 
 #[tauri::command]
-fn run_setup_in_terminal(
+async fn run_setup_in_terminal(
     app: AppHandle,
     ssh_password: Option<String>,
     setup_scope: Option<String>,
@@ -967,7 +977,9 @@ fn run_setup_in_terminal(
     let configure_askpass = |command: &mut Command| -> AppResult<()> {
         if let Some(secret) = password.as_deref() {
             prepare_askpass(command, secret)?;
-            command.env("OMARCHY_SUDO_PASSWORD", secret);
+            command
+                .env("OMARCHY_SUDO_PASSWORD", secret)
+                .env("OMARCHY_LOCAL_SUDO_PASSWORD", secret);
         }
         Ok(())
     };
@@ -996,40 +1008,41 @@ fn run_setup_in_terminal(
             .map_err(|error| format!("Impossibile aprire PowerShell: {error}"))?;
         Ok("PowerShell aperto. La password SSH resta soltanto nella memoria del processo; eventuale sudo viene mostrato nel terminale.".into())
     } else if cfg!(target_os = "linux") {
+        if password.is_none() {
+            return Err("Inserisci una volta la password temporanea SSH + sudo: il setup Fedora viene eseguito direttamente e non apre altri prompt".into());
+        }
         let script = asset(&app, "clients/omarchy-client-setup-fedora.sh")?;
         let module = if setup_scope == "guest" {
             "guest"
         } else {
             "onboard"
         };
-        let instruction = format!(
-            "{} --config {} --module {}; status=$?; unset OMARCHY_SSH_PASSWORD OMARCHY_SUDO_PASSWORD OMARCHY_LOCAL_SUDO_PASSWORD OMARCHY_ASKPASS_MODE; echo; read -r -p 'Premi Invio per chiudere…'; exit $status",
-            shell_quote(&script),
-            shell_quote(&path),
-            module
-        );
-        let terminals: [(&str, &[&str]); 4] = [
-            ("kgx", &["--", "bash", "-lc"]),
-            ("gnome-terminal", &["--", "bash", "-lc"]),
-            ("konsole", &["-e", "bash", "-lc"]),
-            ("xterm", &["-e", "bash", "-lc"]),
-        ];
-        for (terminal, arguments) in terminals {
-            if command_exists(terminal) {
-                let mut command = Command::new(terminal);
-                command.args(arguments).arg(&instruction);
-                configure_askpass(&mut command)?;
-                command
-                    .spawn()
-                    .map_err(|error| format!("Impossibile aprire {terminal}: {error}"))?;
-                return Ok(if password.is_some() {
-                    format!("Setup {setup_scope} aperto con credenziale SSH temporanea; non viene scritta nel file locale.")
-                } else {
-                    format!("Setup {setup_scope} aperto; SSH o sudo possono chiedere la password nel terminale.")
-                });
-            }
+        let mut command = Command::new("bash");
+        command
+            .arg(script)
+            .arg("--config")
+            .arg(path)
+            .arg("--module")
+            .arg(module);
+        configure_askpass(&mut command)?;
+        let output = tauri::async_runtime::spawn_blocking(move || command.output())
+            .await
+            .map_err(|error| format!("Esecuzione setup Fedora interrotta: {error}"))?
+            .map_err(|error| format!("Impossibile avviare il setup Fedora: {error}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            let detail = format!("{stdout}\n{stderr}");
+            let detail = detail.trim();
+            return Err(if detail.is_empty() {
+                format!("Setup {setup_scope} fallito con stato {}", output.status)
+            } else {
+                format!("Setup {setup_scope} fallito:\n{detail}")
+            });
         }
-        Err("Nessun terminale grafico trovato (kgx, gnome-terminal, konsole, xterm)".into())
+        Ok(format!(
+            "Setup {setup_scope} completato con una sola credenziale temporanea; password non salvata"
+        ))
     } else {
         Err("macOS non ha ancora l'adapter RTP microfono in questa release".into())
     }

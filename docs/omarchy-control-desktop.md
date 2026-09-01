@@ -41,12 +41,14 @@ Il receiver puo' essere sbloccato in tre modi, in ordine di precedenza:
 
 La GUI non scrive e non mostra mai la password. Se password SSH, `sudo` della
 VM e `sudo` del client Fedora coincidono, il campo **Password temporanea SSH +
-sudo** basta per tutto l'onboarding: il backend configura
+sudo** basta per tutto l'onboarding: su Fedora il backend esegue direttamente
+lo script, senza passare da un terminale grafico gia' aperto che potrebbe
+perdere le variabili del nuovo processo. Configura
 `SSH_ASKPASS` sul solo processo figlio: OpenSSH richiama lo stesso eseguibile in
 modalita' helper, riceve la password dall'ambiente e autorizza la chiave SSH
 dedicata. Lo stesso segreto viene fornito tramite stdin a `sudo -S`, mai nella
-riga di comando. Il wizard non mostra prompt interattivi duplicati e al termine
-rimuove le variabili dal terminale. Se le password sono diverse, l'esecuzione
+riga di comando. La stessa credenziale alimenta `sudo` locale e remoto via
+stdin: non compaiono altri prompt e il campo viene svuotato al termine. Se le password sono diverse, l'esecuzione
 manuale puo' distinguere `OMARCHY_SSH_PASSWORD`, `OMARCHY_SUDO_PASSWORD` e
 `OMARCHY_LOCAL_SUDO_PASSWORD`; non vanno aggiunte alla repository.
 
@@ -57,6 +59,11 @@ del microfono e il solo comando in lettura `voxtype-remote-mic-status`. La
 chiave non puo' aprire una shell o eseguire comandi arbitrari. In precedenza la
 GUI provava invece un comando shell non autorizzato dalla chiave: il receiver
 restava attivo, ma al ritorno del focus appariva falsamente disconnesso.
+La chiave dedicata ha sempre precedenza sull'eventuale testo rimasto nel campo
+password: una credenziale temporanea non puo' piu' sostituire e bloccare un
+controllo receiver gia' funzionante. Al termine del setup la GUI attende il
+risultato e aggiorna lo stato, evitando il controllo intermedio mentre i file
+guest vengono riallineati.
 
 **Configura questo client** salva prima i valori rilevati, poi apre il wizard
 `onboard`. Su Fedora il wizard limita automaticamente le porte KDE
@@ -67,6 +74,13 @@ clic; se il demone KDE remoto non risponde, l'app mostra il fallback manuale con
 notifica sul desktop Omarchy. Su macOS il pulsante di setup completo e' disabilitato
 con una spiegazione, mentre installazione e avvio Moonlight funzionano; il tunnel
 microfono RTP macOS non e' ancora implementato.
+
+Su Fedora il wizard abilita inoltre il servizio firewalld `mdns`: apre soltanto
+`5353/UDP` verso i gruppi multicast `224.0.0.251` e `ff02::fb`. Questo consente
+a Moonlight di ricevere l'annuncio Sunshine `_nvstream._tcp`. Senza la regola,
+le porte Sunshine potevano essere raggiungibili via IP ma la GUI restava su
+“ricerca di host compatibili”. **Apri Moonlight** non crea piu' istanze duplicate
+se il Flatpak e' gia' in esecuzione.
 
 Il pulsante Fedora **Sincronizza Omarchy** trasferisce in una directory
 temporanea privata della VM gli script inclusi nel pacchetto e avvia via SSH

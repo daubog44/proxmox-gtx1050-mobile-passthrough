@@ -223,7 +223,11 @@ Moonlight/SSH/receiver e mostra per ogni dipendenza mancante il comando adatto
 al sistema operativo. La password SSH puo' essere inserita nella GUI o fornita
 con `OMARCHY_SSH_PASSWORD`: quando coincide anche con `sudo` locale/remoto viene
 riutilizzata per l'intero wizard, passata soltanto ai processi figli tramite
-askpass/stdin e mai salvata dall'app. Su Fedora KDE Connect viene scoperto e
+askpass/stdin e mai salvata dall'app. Su Fedora il backend esegue direttamente
+il setup e attende il risultato: una sola credenziale, nessun terminale che
+perde l'ambiente e refresh receiver soltanto al termine. La chiave ristretta ha
+precedenza sul campo temporaneo. Il wizard abilita anche mDNS in firewalld,
+cosi' Moonlight riceve l'annuncio `_nvstream._tcp` di Sunshine. KDE Connect viene scoperto e
 abbinato automaticamente tramite la stessa sessione SSH autenticata; se il
 demone remoto non e' raggiungibile, il wizard mostra il fallback con notifica
 da approvare. Non serve clonare questa repository.
@@ -231,30 +235,30 @@ da approvare. Non serve clonare questa repository.
 **Fedora x86_64:**
 
 ```bash
-curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.5/omarchy-control-0.2.5-linux-x86_64.rpm
-sudo dnf install ./omarchy-control-0.2.5-linux-x86_64.rpm
+curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.6/omarchy-control-0.2.6-linux-x86_64.rpm
+sudo dnf install ./omarchy-control-0.2.6-linux-x86_64.rpm
 omarchy-control
 ```
 
 **Windows x64 (PowerShell):**
 
 ```powershell
-$installer = "$env:TEMP\omarchy-control-0.2.5-windows-x64-setup.exe"
-Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.5/omarchy-control-0.2.5-windows-x64-setup.exe" -OutFile $installer
+$installer = "$env:TEMP\omarchy-control-0.2.6-windows-x64-setup.exe"
+Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.6/omarchy-control-0.2.6-windows-x64-setup.exe" -OutFile $installer
 Start-Process $installer -Wait
 ```
 
 **macOS Apple Silicon:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.5/omarchy-control-0.2.5-darwin-aarch64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.6/omarchy-control-0.2.6-darwin-aarch64.dmg
 open Omarchy-Control.dmg
 ```
 
 **macOS Intel:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.5/omarchy-control-0.2.5-darwin-x64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.6/omarchy-control-0.2.6-darwin-x64.dmg
 open Omarchy-Control.dmg
 ```
 

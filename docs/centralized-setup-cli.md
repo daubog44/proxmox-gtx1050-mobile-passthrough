@@ -373,7 +373,10 @@ clients/voxtype-fedora-mic-rtp.sh --list-sources
 Il modulo Fedora installa Moonlight come Flatpak utente
 `com.moonlight_stream.Moonlight`, quindi non modifica file di configurazione
 Qt non documentati: risoluzione, codec e bitrate vanno scelti nella GUI una
-volta associato Sunshine. Durante `onboard` KDE Connect viene rilevato, il
+volta associato Sunshine. Il setup abilita idempotentemente il servizio
+firewalld `mdns` (`5353/UDP` limitato ai gruppi multicast standard), necessario
+per ricevere l'annuncio Sunshine `_nvstream._tcp`; non apre la porta a unicast
+generico. Durante `onboard` KDE Connect viene rilevato, il
 firewall viene limitato automaticamente all'IP Omarchy e la richiesta di
 pairing viene inviata al dispositivo trovato. Il wizard usa la sessione SSH
 gia' autenticata per inviare anche la richiesta reciproca da Omarchy: i due ID
@@ -386,8 +389,10 @@ installare pacchetti o, se richiesto, le due regole firewall.
 
 Se il wizard parte dalla GUI e le password coincidono, il singolo campo
 temporaneo viene riutilizzato per SSH, `sudo` della VM e `sudo` Fedora mediante
-`SSH_ASKPASS`/stdin; non compare nelle righe di comando e viene eliminato
-dall'ambiente alla fine. Se sono diverse, usare separatamente
+`SSH_ASKPASS`/stdin. Su Fedora lo script viene eseguito direttamente dal backend
+Tauri: non attraversa il server di un terminale grafico, quindi l'ambiente non
+si perde e non compaiono prompt duplicati. Il segreto non compare nelle righe
+di comando, viene eliminato alla fine e il campo viene svuotato. Se le password sono diverse, usare separatamente
 `OMARCHY_SSH_PASSWORD`, `OMARCHY_SUDO_PASSWORD` e
 `OMARCHY_LOCAL_SUDO_PASSWORD` in una sessione manuale protetta.
 
@@ -410,9 +415,9 @@ vecchio. Il pulsante GUI **Sincronizza Omarchy** usa lo stesso percorso con
 `guest all`: applica inoltre la guardia del ramo NVIDIA 580xx e la configurazione
 Sunshine/Hyprland headless. Non e' necessario un secondo motore come Ansible e
 la sincronizzazione non comprende il nodo PVE, VFIO, VBIOS, SSDT, vTPM o LUKS.
-Il
-terminale, in assenza della credenziale temporanea, puo' chiedere la password
-SSH e quella sudo della VM, ma non le salva. Se la VM non ha gia' i programmi che il ricevitore usa (`voxtype`,
+La GUI richiede il singolo campo temporaneo prima di una mutazione privilegiata;
+la CLI manuale, in sua assenza, puo' chiedere la password SSH e quella sudo
+della VM, ma non le salva. Se la VM non ha gia' i programmi che il ricevitore usa (`voxtype`,
 `ffmpeg`, `pactl`, `pw-cat`, `systemd --user`, `ufw`), il comando termina con
 l'errore del programma mancante: e' una dipendenza della VM, non un requisito
 implicito del client Fedora.
@@ -423,7 +428,7 @@ Il file [packaging/build-fedora-rpm.sh](../packaging/build-fedora-rpm.sh)
 richiede solo `rpmbuild` (su Fedora: `sudo dnf install -y rpm-build`) e avvia:
 
 ```bash
-OMARCHY_RPM_OUTPUT=/tmp/out packaging/build-fedora-rpm.sh 0.1.4
+OMARCHY_RPM_OUTPUT=/tmp/out packaging/build-fedora-rpm.sh 0.1.7
 ```
 
 Lo script crea un `rpmbuild` temporaneo, passa alla specifica

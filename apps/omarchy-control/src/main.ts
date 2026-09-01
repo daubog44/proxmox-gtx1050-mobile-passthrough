@@ -236,8 +236,8 @@ async function launchMoonlight() {
   const button = $<HTMLButtonElement>("#moonlight");
   setBusy(button, true, "Apro…");
   try {
-    await invoke("launch_moonlight");
-    setMessage("Moonlight avviato.", "ok");
+    const detail = await invoke<string>("launch_moonlight");
+    setMessage(detail, "ok");
   } catch (error) {
     setMessage(String(error), "error");
   } finally {
@@ -258,6 +258,8 @@ async function configureClient() {
       sshPassword: password(),
       setupScope: "client",
     });
+    await refresh();
+    $<HTMLInputElement>("#ssh-password").value = "";
     setMessage(detail, "ok");
   } catch (error) {
     setMessage(String(error), "error");
@@ -275,6 +277,8 @@ async function configureGuest() {
       sshPassword: password(),
       setupScope: "guest",
     });
+    await refresh();
+    $<HTMLInputElement>("#ssh-password").value = "";
     setMessage(detail, "ok");
   } catch (error) {
     setMessage(String(error), "error");

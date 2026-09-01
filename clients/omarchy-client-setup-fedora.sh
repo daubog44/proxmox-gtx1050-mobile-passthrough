@@ -181,11 +181,28 @@ install_moonlight() {
   install_rpms flatpak
   if flatpak info com.moonlight_stream.Moonlight >/dev/null 2>&1; then
     note 'Moonlight gia installato'
+    configure_moonlight_discovery
     return 0
   fi
   flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
   flatpak install --user -y flathub com.moonlight_stream.Moonlight
+  configure_moonlight_discovery
   note 'Moonlight installato. Aprilo dal menu o con: flatpak run com.moonlight_stream.Moonlight'
+}
+
+configure_moonlight_discovery() {
+  command -v firewall-cmd >/dev/null || {
+    note 'firewalld non presente: nessuna regola locale mDNS da applicare'
+    return 0
+  }
+  if firewall-cmd --query-service=mdns >/dev/null 2>&1; then
+    note 'discovery Moonlight mDNS: gia consentito dal firewall Fedora'
+    return 0
+  fi
+  local_sudo firewall-cmd --permanent --add-service=mdns
+  local_sudo firewall-cmd --reload
+  firewall-cmd --query-service=mdns >/dev/null || die 'mDNS non attivo dopo il reload firewalld'
+  note 'discovery Moonlight mDNS abilitato: Sunshine puo pubblicare _nvstream._tcp'
 }
 
 install_microphone() {
