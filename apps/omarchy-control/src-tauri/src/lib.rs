@@ -5,8 +5,10 @@ use std::{
     net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    thread,
+    time::Duration,
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct SetupConfig {
@@ -57,6 +59,30 @@ struct Dashboard {
 struct SaveResult {
     path: String,
     config: SetupConfig,
+}
+
+#[derive(Serialize)]
+struct DisplayInfo {
+    index: usize,
+    name: String,
+    width: u32,
+    height: u32,
+    scale_factor: f64,
+}
+
+#[derive(Clone, Copy)]
+enum MoonlightSetting {
+    Integer(u32),
+    Boolean(bool),
+}
+
+impl MoonlightSetting {
+    fn ini_value(self) -> String {
+        match self {
+            Self::Integer(value) => value.to_string(),
+            Self::Boolean(value) => value.to_string(),
+        }
+    }
 }
 
 type AppResult<T> = Result<T, String>;
@@ -473,6 +499,219 @@ fn windows_moonlight_path() -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|path| path.is_file())
+}
+
+fn moonlight_default_bitrate_kbps(width: u32, height: u32, fps: u32) -> u32 {
+    let table = [
+        (640_u64 * 360, 1.0),
+        (854_u64 * 480, 2.0),
+        (1280_u64 * 720, 5.0),
+        (1920_u64 * 1080, 10.0),
+        (2560_u64 * 1440, 20.0),
+        (3840_u64 * 2160, 40.0),
+    ];
+    let pixels = u64::from(width) * u64::from(height);
+    let mut resolution_factor = table.last().expect("tabella bitrate vuota").1;
+    for (index, &(limit, factor)) in table.iter().enumerate() {
+        if pixels == limit {
+            resolution_factor = factor;
+            break;
+        }
+        if pixels < limit {
+            resolution_factor = if index == 0 {
+                factor
+            } else {
+                let (previous_limit, previous_factor) = table[index - 1];
+                let ratio = (pixels - previous_limit) as f64 / (limit - previous_limit) as f64;
+                previous_factor + ratio * (factor - previous_factor)
+            };
+            break;
+        }
+    }
+    let frame_factor = if fps <= 60 {
+        f64::from(fps) / 30.0
+    } else {
+        (f64::from(fps) / 60.0).sqrt() * 2.0
+    };
+    (resolution_factor * frame_factor).round() as u32 * 1000
+}
+
+fn moonlight_gaming_settings(width: u32, height: u32) -> BTreeMap<&'static str, MoonlightSetting> {
+    let window_mode = if cfg!(target_os = "windows") { 0 } else { 1 };
+    BTreeMap::from([
+        ("audiocfg", MoonlightSetting::Integer(0)),
+        ("autoadjustbitrate", MoonlightSetting::Boolean(true)),
+        (
+            "bitrate",
+            MoonlightSetting::Integer(moonlight_default_bitrate_kbps(width, height, 60)),
+        ),
+        ("capturesyskeys", MoonlightSetting::Integer(1)),
+        ("fps", MoonlightSetting::Integer(60)),
+        ("framepacing", MoonlightSetting::Boolean(true)),
+        ("gameopts", MoonlightSetting::Boolean(true)),
+        ("hdr", MoonlightSetting::Boolean(false)),
+        ("height", MoonlightSetting::Integer(height)),
+        ("hostaudio", MoonlightSetting::Boolean(false)),
+        ("keepawake", MoonlightSetting::Boolean(true)),
+        ("mdns", MoonlightSetting::Boolean(true)),
+        ("multicontroller", MoonlightSetting::Boolean(true)),
+        ("showperfoverlay", MoonlightSetting::Boolean(false)),
+        ("unlockbitrate", MoonlightSetting::Boolean(false)),
+        ("videocfg", MoonlightSetting::Integer(0)),
+        ("videodec", MoonlightSetting::Integer(0)),
+        ("vsync", MoonlightSetting::Boolean(true)),
+        ("width", MoonlightSetting::Integer(width)),
+        ("windowmode", MoonlightSetting::Integer(window_mode)),
+        ("yuv444", MoonlightSetting::Boolean(false)),
+    ])
+}
+
+fn update_ini_general(contents: &str, settings: &BTreeMap<&str, MoonlightSetting>) -> String {
+    let mut pending = settings.clone();
+    let mut output = Vec::new();
+    let mut in_general = false;
+    let mut found_general = false;
+
+    let append_pending = |output: &mut Vec<String>,
+                          pending: &mut BTreeMap<&str, MoonlightSetting>| {
+        for (key, value) in std::mem::take(pending) {
+            output.push(format!("{key}={}", value.ini_value()));
+        }
+    };
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_general {
+                append_pending(&mut output, &mut pending);
+            }
+            in_general = trimmed == "[General]";
+            found_general |= in_general;
+            output.push(line.to_string());
+            continue;
+        }
+        if in_general {
+            if let Some((key, _)) = line.split_once('=') {
+                if let Some(value) = pending.remove(key.trim()) {
+                    output.push(format!("{}={}", key.trim(), value.ini_value()));
+                    continue;
+                }
+            }
+        }
+        output.push(line.to_string());
+    }
+    if in_general {
+        append_pending(&mut output, &mut pending);
+    } else if !found_general {
+        if output.last().is_some_and(|line| !line.is_empty()) {
+            output.push(String::new());
+        }
+        output.push("[General]".into());
+        append_pending(&mut output, &mut pending);
+    }
+    format!("{}\n", output.join("\n"))
+}
+
+fn ensure_command_success(command: &mut Command, context: &str) -> AppResult<()> {
+    let output = command
+        .output()
+        .map_err(|error| format!("{context}: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        Err(format!("{context}: {}", detail.trim()))
+    }
+}
+
+fn stop_moonlight() -> AppResult<()> {
+    if cfg!(target_os = "linux") {
+        if flatpak_running("com.moonlight_stream.Moonlight") {
+            ensure_command_success(
+                Command::new("flatpak").args(["kill", "com.moonlight_stream.Moonlight"]),
+                "Impossibile chiudere Moonlight Flatpak",
+            )?;
+        }
+    } else if cfg!(target_os = "windows") {
+        let running = command_output("tasklist", &["/FI", "IMAGENAME eq Moonlight.exe", "/NH"])
+            .is_some_and(|output| output.to_ascii_lowercase().contains("moonlight.exe"));
+        if running {
+            ensure_command_success(
+                Command::new("taskkill").args(["/IM", "Moonlight.exe"]),
+                "Impossibile chiudere Moonlight",
+            )?;
+        }
+    } else if cfg!(target_os = "macos")
+        && Command::new("pgrep")
+            .args(["-x", "Moonlight"])
+            .status()
+            .is_ok_and(|status| status.success())
+    {
+        ensure_command_success(
+            Command::new("osascript").args(["-e", "tell application \"Moonlight\" to quit"]),
+            "Impossibile chiudere Moonlight",
+        )?;
+    }
+    thread::sleep(Duration::from_millis(350));
+    Ok(())
+}
+
+fn write_moonlight_settings(settings: &BTreeMap<&str, MoonlightSetting>) -> AppResult<()> {
+    if cfg!(target_os = "windows") {
+        let key = r"HKCU\Software\Moonlight Game Streaming Project\Moonlight";
+        for (name, value) in settings {
+            let data = match value {
+                MoonlightSetting::Integer(value) => value.to_string(),
+                MoonlightSetting::Boolean(value) => u8::from(*value).to_string(),
+            };
+            ensure_command_success(
+                Command::new("reg").args([
+                    "add",
+                    key,
+                    "/v",
+                    name,
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    &data,
+                    "/f",
+                ]),
+                &format!("Impossibile salvare la preferenza Moonlight {name}"),
+            )?;
+        }
+    } else if cfg!(target_os = "macos") {
+        for (name, value) in settings {
+            let (kind, data) = match value {
+                MoonlightSetting::Integer(value) => ("-int", value.to_string()),
+                MoonlightSetting::Boolean(value) => ("-bool", value.to_string()),
+            };
+            ensure_command_success(
+                Command::new("defaults").args([
+                    "write",
+                    "com.moonlight-stream.Moonlight",
+                    name,
+                    kind,
+                    &data,
+                ]),
+                &format!("Impossibile salvare la preferenza Moonlight {name}"),
+            )?;
+        }
+    } else {
+        let home = env::var_os("HOME").ok_or_else(|| "HOME non disponibile".to_string())?;
+        let path = PathBuf::from(home)
+            .join(".var/app/com.moonlight_stream.Moonlight/config/Moonlight Game Streaming Project/Moonlight.conf");
+        let contents = fs::read_to_string(&path).map_err(|_| {
+            "Profilo Moonlight mancante: avvia Moonlight una volta, chiudilo e riprova".to_string()
+        })?;
+        let backup = path.with_extension("conf.omarchy-control.bak");
+        if !backup.exists() {
+            fs::copy(&path, &backup)
+                .map_err(|error| format!("Backup Moonlight fallito: {error}"))?;
+        }
+        fs::write(&path, update_ini_general(&contents, settings))
+            .map_err(|error| format!("Scrittura preferenze Moonlight fallita: {error}"))?;
+    }
+    Ok(())
 }
 
 fn dependency(
@@ -929,6 +1168,61 @@ fn launch_moonlight() -> AppResult<String> {
 }
 
 #[tauri::command]
+fn list_displays(window: WebviewWindow) -> AppResult<Vec<DisplayInfo>> {
+    let monitors = window
+        .available_monitors()
+        .map_err(|error| format!("Impossibile rilevare gli schermi: {error}"))?;
+    Ok(monitors
+        .into_iter()
+        .enumerate()
+        .map(|(index, monitor)| DisplayInfo {
+            index,
+            name: monitor
+                .name()
+                .cloned()
+                .unwrap_or_else(|| format!("Schermo {}", index + 1)),
+            width: monitor.size().width,
+            height: monitor.size().height,
+            scale_factor: monitor.scale_factor(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn configure_moonlight_gaming(
+    window: WebviewWindow,
+    display_index: usize,
+    quality_mode: String,
+) -> AppResult<String> {
+    let monitors = window
+        .available_monitors()
+        .map_err(|error| format!("Impossibile rilevare gli schermi: {error}"))?;
+    let monitor = monitors.get(display_index).ok_or_else(|| {
+        "Lo schermo selezionato non e piu disponibile: aggiorna l'elenco".to_string()
+    })?;
+    let (width, height, profile) = match quality_mode.as_str() {
+        "performance" => (1920, 1080, "Prestazioni 1080p"),
+        "native" => (
+            monitor.size().width.min(3840),
+            monitor.size().height.min(2160),
+            "Qualita nativa",
+        ),
+        _ => return Err("Profilo gaming non valido".into()),
+    };
+    if width < 640 || height < 480 {
+        return Err(format!("Risoluzione schermo non valida: {width}x{height}"));
+    }
+    let bitrate = moonlight_default_bitrate_kbps(width, height, 60);
+    stop_moonlight()?;
+    write_moonlight_settings(&moonlight_gaming_settings(width, height))?;
+    launch_moonlight()?;
+    Ok(format!(
+        "Moonlight: {profile}, {width}x{height}@60 e {:.0} Mbps automatici; modalita schermo intero, V-Sync e frame pacing attivi, HDR e YUV 4:4:4 disattivati",
+        f64::from(bitrate) / 1000.0
+    ))
+}
+
+#[tauri::command]
 fn install_dependency(dependency_id: String) -> AppResult<String> {
     let entry = dependencies()
         .into_iter()
@@ -1056,6 +1350,8 @@ pub fn run() {
             check_receiver,
             save_config,
             launch_moonlight,
+            list_displays,
+            configure_moonlight_gaming,
             install_dependency,
             run_setup_in_terminal
         ])
@@ -1122,5 +1418,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn moonlight_profile_uses_upstream_default_bitrates() {
+        assert_eq!(moonlight_default_bitrate_kbps(1920, 1080, 60), 20_000);
+        assert_eq!(moonlight_default_bitrate_kbps(3840, 2160, 60), 80_000);
+    }
+
+    #[test]
+    fn moonlight_ini_update_preserves_hosts_and_replaces_general_values() {
+        let settings = BTreeMap::from([
+            ("width", MoonlightSetting::Integer(3840)),
+            ("vsync", MoonlightSetting::Boolean(true)),
+        ]);
+        let updated = update_ini_general(
+            "[General]\nwidth=1280\n\n[hosts]\n1\\hostname=omarchy\n",
+            &settings,
+        );
+        assert!(updated.contains("width=3840\n"));
+        assert!(updated.contains("vsync=true\n"));
+        assert!(updated.contains("[hosts]\n1\\hostname=omarchy\n"));
     }
 }

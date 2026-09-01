@@ -371,9 +371,10 @@ clients/voxtype-fedora-mic-rtp.sh --list-sources
 ```
 
 Il modulo Fedora installa Moonlight come Flatpak utente
-`com.moonlight_stream.Moonlight`, quindi non modifica file di configurazione
-Qt non documentati: risoluzione, codec e bitrate vanno scelti nella GUI una
-volta associato Sunshine. Il setup abilita idempotentemente il servizio
+`com.moonlight_stream.Moonlight`. In Omarchy Control, la sezione **Gaming**
+rileva gli schermi fisici e applica in modo esplicito un profilo 1080p60/20
+Mbps oppure nativo fino a 4K60/80 Mbps; conserva host e pairing e riavvia il
+client per rendere effettive le preferenze. Il setup abilita idempotentemente il servizio
 firewalld `mdns` (`5353/UDP` limitato ai gruppi multicast standard), necessario
 per ricevere l'annuncio Sunshine `_nvstream._tcp`; non apre la porta a unicast
 generico. Durante `onboard` KDE Connect viene rilevato, il
@@ -428,7 +429,7 @@ Il file [packaging/build-fedora-rpm.sh](../packaging/build-fedora-rpm.sh)
 richiede solo `rpmbuild` (su Fedora: `sudo dnf install -y rpm-build`) e avvia:
 
 ```bash
-OMARCHY_RPM_OUTPUT=/tmp/out packaging/build-fedora-rpm.sh 0.1.7
+OMARCHY_RPM_OUTPUT=/tmp/out packaging/build-fedora-rpm.sh 0.1.8
 ```
 
 Lo script crea un `rpmbuild` temporaneo, passa alla specifica

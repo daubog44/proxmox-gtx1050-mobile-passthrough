@@ -199,9 +199,9 @@ Per il PCI ID di questo progetto (`10de:1c8d`) lo script cerca esplicitamente il
 
 ### Omarchy: desktop Wayland e Moonlight sulla GTX, senza assumere un monitor fisico
 
-La GTX mobile di questa VM non ha un connettore HDMI/DP guest collegato. Non forzare un EDID sul connettore disconnesso: il test ha lasciato il guest non raggiungibile e i parametri sono stati rimossi. La soluzione verificata usa invece Hyprland in modalita' headless sulla GTX e un'uscita Wayland virtuale `omarchy-gtx`. Il fallback inattivo e' 1920x1200/60, ma Desktop di Moonlight passa a Sunshine W×H×FPS richiesti: un hook idempotente usa `hyprctl eval` e `hl.monitor(...)` per cambiare quell'unico output prima della cattura. Durante Moonlight il campione HEVC ha mostrato 60.19 FPS, 7.9 ms di latenza host media, 0% drop e `sunshine enc=28` in `nvidia-smi pmon`: NVENC e' quindi attivo. I file PVE e guest, il loro significato, il comando idempotente di risoluzione e la prova riproducibile sono in [setup Omarchy PVE/guest](docs/omarchy-proxmox-guest-setup.md).
+La GTX mobile di questa VM non ha un connettore HDMI/DP guest collegato. Non forzare un EDID sul connettore disconnesso: il test ha lasciato il guest non raggiungibile e i parametri sono stati rimossi. La soluzione verificata usa invece Hyprland in modalita' headless sulla GTX e un'uscita Wayland virtuale `omarchy-gtx`. Il fallback inattivo e' ora **1920x1080/60, 16:9**, ma ogni app Sunshine passa W×H×FPS richiesti dal client: un hook idempotente usa `hyprctl eval` e `hl.monitor(...)` per cambiare quell'unico output prima della cattura. Vale sia per **Desktop** sia per **Steam Big Picture**; dopo aver aggiunto una futura app Sunshine basta rieseguire **Sincronizza Omarchy** per includerla. Durante Moonlight il campione storico HEVC 1920x1200 ha mostrato 60.19 FPS, 7.9 ms di latenza host media, 0% drop e `sunshine enc=28` in `nvidia-smi pmon`: NVENC e' quindi attivo. I file PVE e guest, il loro significato, il comando idempotente di risoluzione e la prova riproducibile sono in [setup Omarchy PVE/guest](docs/omarchy-proxmox-guest-setup.md).
 
-Lo strumento guest idempotente e' [scripts/omarchy-gtx-primary](scripts/omarchy-gtx-primary): crea l'uscita prima di Sunshine, conserva i backup, installa le funzioni Bash `omarchy_stream_resolution` e `omarchy_stream_health` e offre verifica, controllo fallback e rollback. A ogni nuova apertura Desktop, Moonlight comunica W×H×FPS e il relativo hook Sunshine applica quella modalita' al solo output headless GTX; non crea due desktop distinti per due client contemporanei. Questa integrazione e' volutamente specifica: Sunshine passa i parametri a un prep command ma non puo' conoscere in modo universale l'API e l'output headless di ogni compositor Wayland. Il tool Windows [moonlight-windows-settings.ps1](clients/moonlight-windows-settings.ps1) replica il bitrate predefinito Moonlight (46 Mbps per il profilo attuale 1920x1200/60/YUV 4:4:4) oppure permette un valore fisso. Per un altro PC Fedora, [omarchy-client-setup-fedora.sh](clients/omarchy-client-setup-fedora.sh) installa Moonlight Flatpak, KDE Connect e il watcher microfono senza IP o password nel codice. Su Fedora il pairing KDE Connect usa richieste incrociate tra client e VM attraverso la sessione SSH gia' autenticata; Windows e macOS conservano il consenso manuale previsto dalle rispettive GUI. Non cambia VFIO, VBIOS, SSDT, kernel o Limine. La guida completa, inclusa la cronologia RDP -> Sunshine -> HEVC, la spiegazione della CPU residua (`GPU -> RAM -> GPU` nel build compatibile), clipboard, TV, la prova del fallimento del pacchetto Sunshine ufficiale e i comandi riproducibili e' in [Sunshine/Moonlight su Omarchy](docs/sunshine-moonlight-omarchy.md).
+Lo strumento guest idempotente e' [scripts/omarchy-gtx-primary](scripts/omarchy-gtx-primary): crea l'uscita prima di Sunshine, conserva i backup, installa le funzioni Bash `omarchy_stream_resolution` e `omarchy_stream_health` e offre verifica, controllo fallback e rollback. A ogni nuova apertura di un'app Sunshine, Moonlight comunica W×H×FPS e l'hook applica quella modalita' al solo output headless GTX; non crea due desktop distinti per due client contemporanei. Omarchy Control rileva invece i pixel fisici dei monitor del **client** e configura Moonlight su Fedora, Windows o macOS: **Prestazioni 1080p** a 20 Mbps e' il profilo consigliato per giocare con la GTX 1050; **Qualita' nativa** usa 4K60/80 Mbps su una TV 3840x2160 ed e' indicato per desktop e giochi leggeri. Entrambi abilitano V-Sync, frame pacing e bitrate automatico; codec e decoder restano automatici, HDR e YUV 4:4:4 spenti. Il tool Windows [moonlight-windows-settings.ps1](clients/moonlight-windows-settings.ps1) resta disponibile per regolazioni manuali. Per un altro PC Fedora, [omarchy-client-setup-fedora.sh](clients/omarchy-client-setup-fedora.sh) installa Moonlight Flatpak, KDE Connect e il watcher microfono senza IP o password nel codice. Non cambia VFIO, VBIOS, SSDT, kernel o Limine. La guida completa, inclusa la cronologia RDP -> Sunshine -> HEVC, la spiegazione della CPU residua (`GPU -> RAM -> GPU` nel build compatibile), clipboard, TV, la prova del fallimento del pacchetto Sunshine ufficiale e i comandi riproducibili e' in [Sunshine/Moonlight su Omarchy](docs/sunshine-moonlight-omarchy.md).
 
 ![Omarchy tiling: Sandustry sulla GTX, nvtop e btop nello stesso workspace](evidence/omarchy-tiling-sandustry-nvtop.png)
 
@@ -230,35 +230,38 @@ precedenza sul campo temporaneo. Il wizard abilita anche mDNS in firewalld,
 cosi' Moonlight riceve l'annuncio `_nvstream._tcp` di Sunshine. KDE Connect viene scoperto e
 abbinato automaticamente tramite la stessa sessione SSH autenticata; se il
 demone remoto non e' raggiungibile, il wizard mostra il fallback con notifica
-da approvare. Non serve clonare questa repository.
+da approvare. La sezione **Gaming** rileva notebook, monitor e TV collegati al
+client e scrive il profilo Moonlight senza perdere pairing o host salvati;
+chiude e riapre Moonlight per evitare che una vecchia configurazione in memoria
+sovrascriva i nuovi valori. Non serve clonare questa repository.
 
 **Fedora x86_64:**
 
 ```bash
-curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.6/omarchy-control-0.2.6-linux-x86_64.rpm
-sudo dnf install ./omarchy-control-0.2.6-linux-x86_64.rpm
+curl -fLO https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.7/omarchy-control-0.2.7-linux-x86_64.rpm
+sudo dnf install ./omarchy-control-0.2.7-linux-x86_64.rpm
 omarchy-control
 ```
 
 **Windows x64 (PowerShell):**
 
 ```powershell
-$installer = "$env:TEMP\omarchy-control-0.2.6-windows-x64-setup.exe"
-Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.6/omarchy-control-0.2.6-windows-x64-setup.exe" -OutFile $installer
+$installer = "$env:TEMP\omarchy-control-0.2.7-windows-x64-setup.exe"
+Invoke-WebRequest "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.7/omarchy-control-0.2.7-windows-x64-setup.exe" -OutFile $installer
 Start-Process $installer -Wait
 ```
 
 **macOS Apple Silicon:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.6/omarchy-control-0.2.6-darwin-aarch64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.7/omarchy-control-0.2.7-darwin-aarch64.dmg
 open Omarchy-Control.dmg
 ```
 
 **macOS Intel:**
 
 ```bash
-curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.6/omarchy-control-0.2.6-darwin-x64.dmg
+curl -fLo Omarchy-Control.dmg https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.2.7/omarchy-control-0.2.7-darwin-x64.dmg
 open Omarchy-Control.dmg
 ```
 

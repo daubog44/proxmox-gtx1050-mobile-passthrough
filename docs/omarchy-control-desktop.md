@@ -102,6 +102,37 @@ Dopo l'installazione l'app compare nel menu grafico come **Omarchy Control**.
 I pacchetti contengono gia' gli script necessari: Node, Rust e Git non servono
 sul computer client.
 
+## Gaming, schermo 4K e risoluzione dinamica
+
+La sezione **Gaming** legge gli schermi fisici dal sistema operativo tramite
+Tauri. Se il portatile Fedora e' collegato via HDMI a una TV, nell'elenco
+compaiono per esempio `eDP-1 — 1920×1080` e `HDMI-A-1 — 3840×2160`: non sono
+output della VM. L'utente sceglie dove verra' mostrato Moonlight e uno dei due
+profili:
+
+- **Prestazioni 1080p**, consigliato per la GTX 1050: 1920×1080@60 e bitrate
+  automatico Moonlight da 20 Mbps. La TV 4K esegue l'upscaling senza bande,
+  perche' il formato resta 16:9.
+- **Qualita' nativa**: usa i pixel fisici fino a 3840×2160@60 e 80 Mbps. E'
+  adatto al desktop e ai giochi leggeri; un gioco moderno deve renderizzare
+  quattro volte i pixel del 1080p e puo' non mantenere 60 FPS sulla GTX 1050.
+
+Il pulsante chiude Moonlight, crea una sola copia di backup del profilo, cambia
+soltanto le preferenze `[General]`/Registry/defaults e riavvia il client. Host,
+certificati e pairing restano intatti. Abilita V-Sync, frame pacing,
+ottimizzazioni gioco, keep-awake e bitrate automatico; codec e decoder restano
+automatici, mentre HDR, YUV 4:4:4 e audio sull'host restano spenti. Le scelte
+sono applicate su Linux Flatpak, Windows e macOS con il rispettivo archivio
+nativo delle preferenze.
+
+Quando parte lo stream, Moonlight passa larghezza, altezza e FPS a Sunshine.
+Il modulo guest installa lo stesso hook `omarchy-moonlight-mode` su **tutte** le
+app Sunshine, compresa Steam Big Picture: Hyprland porta l'output virtuale
+`omarchy-gtx` alla stessa modalita' prima della cattura e lo ripristina a
+1920×1080@60 alla chiusura. La risoluzione e' quindi dinamica tra una sessione
+e la successiva, non durante uno stream gia' aperto. Dopo aver creato una nuova
+app Sunshine, **Sincronizza Omarchy** applica idempotentemente lo stesso hook.
+
 ## Perche' Moonlight non e' incorporato
 
 Moonlight Qt e' un client completo Qt/C++ GPL-3.0: gestisce decoder hardware,
@@ -122,7 +153,7 @@ npm run tauri build -- --bundles nsis
 ```
 
 Il backend Rust espone soltanto operazioni nominate: ispezione, discovery,
-verifica receiver, salvataggio, avvio Moonlight, installazione di una
+elenco schermi, profilo gaming Moonlight, verifica receiver, salvataggio, avvio Moonlight, installazione di una
 dipendenza conosciuta, onboarding e sincronizzazione guest. L'installer accetta solo identificatori
 presenti nella lista interna e non espone un comando shell arbitrario alla
 WebView.

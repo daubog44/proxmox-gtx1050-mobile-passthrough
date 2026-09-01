@@ -22,6 +22,7 @@ type Dashboard = {
   ssh_password_source?: "environment" | "config" | null;
 };
 type SaveResult = { path: string; config: SetupConfig };
+type DisplayInfo = { index: number; name: string; width: number; height: number; scale_factor: number };
 
 const defaults: SetupConfig = {
   vm_host: "",
@@ -37,6 +38,7 @@ let dirty = false;
 let hydrated = false;
 let refreshing = false;
 let dashboard: Dashboard | null = null;
+let displays: DisplayInfo[] = [];
 
 const $ = <T extends HTMLElement>(selector: string) => {
   const element = document.querySelector<T>(selector);
@@ -245,6 +247,36 @@ async function launchMoonlight() {
   }
 }
 
+async function loadDisplays() {
+  try {
+    displays = await invoke<DisplayInfo[]>("list_displays");
+    const select = $<HTMLSelectElement>("#gaming-display");
+    select.innerHTML = displays.map((display) =>
+      `<option value="${display.index}">${escapeHtml(display.name)} — ${display.width}×${display.height}</option>`,
+    ).join("");
+    const fourK = displays.find((display) => display.width === 3840 && display.height === 2160);
+    if (fourK) select.value = String(fourK.index);
+    $<HTMLButtonElement>("#configure-gaming").disabled = displays.length === 0;
+  } catch (error) {
+    setMessage(String(error), "error");
+  }
+}
+
+async function configureGaming() {
+  const button = $<HTMLButtonElement>("#configure-gaming");
+  const displayIndex = Number($<HTMLSelectElement>("#gaming-display").value);
+  const qualityMode = $<HTMLSelectElement>("#gaming-quality").value;
+  setBusy(button, true, "Ottimizzo…");
+  try {
+    const detail = await invoke<string>("configure_moonlight_gaming", { displayIndex, qualityMode });
+    setMessage(detail, "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
 async function configureClient() {
   if (dashboard?.checks.setup.state === "blocked") {
     setMessage(dashboard.checks.setup.detail, "error");
@@ -307,7 +339,8 @@ $("#app").innerHTML = `
       <nav aria-label="Sezioni">
         <a href="#overview" class="active"><span>01</span> Stato</a>
         <a href="#connection"><span>02</span> Connessione</a>
-        <a href="#requirements"><span>03</span> Dipendenze</a>
+        <a href="#streaming"><span>03</span> Gaming</a>
+        <a href="#requirements"><span>04</span> Dipendenze</a>
       </nav>
       <div class="sidebar-foot"><span>Client locale</span><strong id="platform">Rilevamento…</strong><small id="config-path">…</small></div>
     </aside>
@@ -321,6 +354,16 @@ $("#app").innerHTML = `
       <section id="overview" class="section overview">
         <div class="section-heading"><div><p class="eyebrow">STATO DEL SISTEMA</p><h2>Il percorso fino a Omarchy</h2></div><button type="button" id="moonlight">Apri Moonlight <span>↗</span></button></div>
         <div id="overview-status" class="status-list" aria-live="polite"></div>
+      </section>
+
+      <section id="streaming" class="section">
+        <div class="section-heading"><div><p class="eyebrow">MOONLIGHT GAMING</p><h2>Adatta lo stream allo schermo</h2><p>Seleziona il pannello su cui giocherai. Il profilo usa i pixel fisici, 60 FPS, bitrate automatico, V-Sync e frame pacing; riavvia Moonlight senza toccare l’associazione a Omarchy.</p></div></div>
+        <div class="gaming-profile">
+          <label><span>Schermo di destinazione</span><select id="gaming-display" aria-label="Schermo di destinazione"></select><small>Una TV 4K viene configurata come 3840×2160@60; il notebook resta disponibile come profilo 1080p.</small></label>
+          <label><span>Profilo</span><select id="gaming-quality" aria-label="Profilo gaming"><option value="performance">Prestazioni 1080p — consigliato GTX 1050</option><option value="native">Qualità nativa — desktop e giochi leggeri</option></select><small>Entrambi sono 16:9 e riempiono la TV. Il 4K nativo richiede quattro volte i pixel del 1080p.</small></label>
+          <button type="button" id="configure-gaming" disabled>Ottimizza e riavvia Moonlight</button>
+        </div>
+        <p class="profile-note">HEVC resta automatico perché viene usato solo se encoder e decoder lo supportano. HDR e YUV 4:4:4 restano spenti: sono meno affidabili e non migliorano il movimento nei giochi.</p>
       </section>
 
       <section id="connection" class="section">
@@ -368,10 +411,15 @@ $("#refresh").addEventListener("click", () => void refresh());
 $("#discover").addEventListener("click", () => void discover());
 $("#check-receiver").addEventListener("click", () => void checkReceiver());
 $("#moonlight").addEventListener("click", () => void launchMoonlight());
+$("#configure-gaming").addEventListener("click", () => void configureGaming());
 $("#configure").addEventListener("click", () => void configureClient());
 $("#configure-guest").addEventListener("click", () => void configureGuest());
 window.addEventListener("focus", () => {
-  if (hydrated) void refresh();
+  if (hydrated) {
+    void refresh();
+    void loadDisplays();
+  }
 });
 
 void refresh();
+void loadDisplays();

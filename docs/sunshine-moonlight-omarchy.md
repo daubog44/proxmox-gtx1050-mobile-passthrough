@@ -232,14 +232,18 @@ non da `enc` isolatamente.
 La schermata iniziale aveva Moonlight impostato a 1920x1200 mentre la regola
 Hyprland e i log `GBM request` erano ancora 1920x1080. Era un mismatch fra la
 dimensione richiesta al client e la superficie realmente catturata: Sunshine
-poteva scalare/letterboxare il desktop e lasciare aree nere. La modalita'
-di fallback e' **1920x1200@60**, uguale al desktop Windows 16:10 usato nel
-testo; non e' piu' obbligatorio configurarla manualmente per ogni client.
+poteva scalare/letterboxare il desktop e lasciare aree nere. Sul nuovo client
+Fedora il profilo Moonlight non conteneva invece larghezza/altezza e ricadeva
+nel default upstream 1280x720. La modalita' di fallback gestita e' quindi ora
+**1920x1080@60**, 16:9 come notebook e TV; il vecchio 1920x1200 resta una prova
+storica valida ma viene migrato automaticamente se appartiene al blocco dello
+script.
 
 La build Sunshine attiva espone `SUNSHINE_CLIENT_WIDTH`,
 `SUNSHINE_CLIENT_HEIGHT` e `SUNSHINE_CLIENT_FPS` al comando di preparazione
-dell'app `Desktop`. Lo script installa in modo idempotente un solo hook in
-`~/.config/sunshine/apps.json`:
+delle app. Lo script installa in modo idempotente lo stesso hook in
+`~/.config/sunshine/apps.json` su **ogni** app, inclusa `Steam Big Picture`,
+conservando gli altri comandi `do`/`undo` gia' presenti:
 
 ```json
 {
@@ -255,11 +259,12 @@ da Hyprland 0.55+:
 hyprctl eval 'hl.monitor({ output = "omarchy-gtx", mode = "<W>x<H>@<FPS>", position = "0x0", scale = 1 })'
 ```
 
-Il test runtime ha applicato 1920x1080@60 e ripristinato 1920x1200@60 senza
-riavviare Hyprland. Alla chiusura di Desktop, `restore` riporta il display
-headless alla modalita' fallback salvata. Quindi un notebook 16:10, un monitor
-FHD e una TV 16:9 possono aprire **uno alla volta** Desktop con il proprio
-formato richiesto. Sunshine documenta queste variabili per i prep command e
+Il test storico runtime ha applicato 1920x1080@60 e ripristinato
+1920x1200@60 senza riavviare Hyprland. La configurazione corrente ripristina
+invece 1920x1080@60. Alla chiusura di Desktop o Steam Big Picture, `restore`
+riporta il display headless alla modalita' fallback salvata. Quindi notebook,
+monitor FHD e TV 4K possono aprire **uno alla volta** l'app Sunshine con il
+proprio formato richiesto. Sunshine documenta queste variabili per i prep command e
 Hyprland documenta `hl.monitor` come sintassi Lua corrente. [Sunshine app
 examples](https://github.com/LizardByte/Sunshine/blob/master/docs/app_examples.md),
 [Hyprland monitors](https://wiki.hypr.land/Configuring/Basics/Monitors/).
@@ -287,10 +292,7 @@ disponibile, usare:
 
 ```bash
 # Funzione installata nei dotfiles (~/.bashrc). Imposta il fallback idle,
-# non disabilita la scelta dinamica della prossima apertura Desktop.
-omarchy_stream_resolution 1920x1200@60
-
-# Per una TV FHD 16:9, fallback esplicito quando nessuno stream e' connesso:
+# non disabilita la scelta dinamica della prossima app Sunshine.
 omarchy_stream_resolution 1920x1080@60
 omarchy-stream-resolution status
 
@@ -307,8 +309,9 @@ screen e' dovuto a `bash ./.bashrc`: una `.bashrc` contiene intenzionalmente
 `return` per interrompere le shell non interattive. Il file non era corrotto;
 va usato `source ~/.bashrc` oppure si apre un nuovo terminale.
 
-Se dopo la scelta dinamica restano bande, aprire **Desktop** una volta dopo
-avere impostato risoluzione/FPS nel client Moonlight, poi controllare che
+Se dopo la scelta dinamica restano bande, aprire **Desktop** o **Steam Big
+Picture** una volta dopo avere impostato risoluzione/FPS nel client Moonlight,
+poi controllare che
 `GBM request`, `hyprctl monitors all` e l'overlay Moonlight riportino gli
 stessi W×H e FPS. La modalita' "fill/stretch" del client puo' riempire il
 pannello Windows, ma ritaglia o deforma: non e' una correzione lato server.
@@ -365,17 +368,22 @@ DLNA serve a inviare media registrati a un televisore; non trasporta input,
 desktop interattivo, bassa latenza o la negoziazione NVENC/GameStream. Per
 questa architettura la strada corretta e' un client **Moonlight** sulla TV
 (Android/Google TV, Fire TV o Apple TV, se disponibile sul dispositivo),
-aggiunto come un nuovo client Sunshine e associato con PIN. HEVC 1080p60 e' il
-profilo iniziale sicuro per una GTX 1050; 4K deve essere provato a parte per
-qualita', latenza e decoder della TV.
+oppure un computer Fedora/Windows/macOS collegato alla TV via HDMI. Omarchy
+Control rileva i pixel fisici di quest'ultimo e offre due scelte: HEVC
+1080p60/20 Mbps e' il profilo gaming sicuro per la GTX 1050; il profilo nativo
+4K60/80 Mbps e' destinato al desktop e ai giochi leggeri. Il 4K richiede
+quattro volte i pixel del 1080p: NVENC puo' codificare HEVC, ma il gioco deve
+anche riuscire a renderizzare quella scena a 3840x2160.
 
 La TV vedra' lo **stesso** desktop headless: e' un secondo punto di vista
 (mirror), non un secondo monitor indipendente. Per avere due desktop separati
 servirebbero una seconda uscita headless e una seconda istanza/cattura Sunshine
 con porte, app e risorse NVENC separate; non e' configurato qui, non e' stato
 validato sull'hardware Pascal e potrebbe peggiorare la latenza. Prima prova
-raccomandata: collegare la TV con Moonlight e lasciare che il nuovo Desktop
-negozi 1920x1080@60, con il PC Windows scollegato.
+raccomandata: collegare la TV, scegliere **Prestazioni 1080p** nella sezione
+Gaming di Omarchy Control e lasciare che Desktop o Steam Big Picture negozi
+1920x1080@60, con l'altro client scollegato. Provare **Qualita' nativa** solo
+dopo avere verificato 60 FPS, drop e latenza nell'overlay Moonlight.
 
 ## Verifica riproducibile dopo una modifica
 

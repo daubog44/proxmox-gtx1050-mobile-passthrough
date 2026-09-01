@@ -18,7 +18,8 @@ readonly BASHRC="$USER_HOME/.bashrc"
 readonly SUNSHINE_SERVICE='app-dev.lizardbyte.app.Sunshine.service'
 readonly BACKUP_DIR='/root/omarchy-gtx-headless-backup'
 readonly STALE_EDID='/usr/lib/firmware/edid/omarchy-1920x1200.bin'
-readonly DEFAULT_STREAM_MODE='1920x1200@60'
+readonly DEFAULT_STREAM_MODE='1920x1080@60'
+readonly LEGACY_STREAM_MODE='1920x1200@60'
 
 die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
 note() { printf '==> %s\n' "$*"; }
@@ -58,7 +59,7 @@ replace_or_append() {
 validate_stream_mode() {
   local mode=$1 width height refresh
   [[ "$mode" =~ ^([0-9]{3,5})x([0-9]{3,5})@([0-9]{2,3})$ ]] || \
-    die 'modalita non valida: usare larghezzaxaltezza@Hz, per esempio 1920x1200@60'
+    die 'modalita non valida: usare larghezzaxaltezza@Hz, per esempio 1920x1080@60'
   width=$((10#${BASH_REMATCH[1]}))
   height=$((10#${BASH_REMATCH[2]}))
   refresh=$((10#${BASH_REMATCH[3]}))
@@ -72,6 +73,7 @@ write_monitor_block() {
   printf '%s\n' \
     '' \
     '-- BEGIN sunshine-virtual-display (managed locally)' \
+    '-- schema: 2 (16:9 default; explicit user modes are preserved)' \
     '-- GTX-only Wayland output for Sunshine/Moonlight; no VirtIO display ownership.' \
     "hl.monitor({ output = \"omarchy-gtx\", mode = \"$mode\", position = \"0x0\", scale = 1 })" \
     '-- END sunshine-virtual-display' \
@@ -108,12 +110,12 @@ usage() {
 Uso: omarchy-stream-resolution <larghezzaxaltezza@Hz|status|help>
 
 Esempi:
-  omarchy-stream-resolution 1920x1200@60
   omarchy-stream-resolution 1920x1080@60
+  omarchy-stream-resolution 3840x2160@60
   omarchy-stream-resolution status
 
 Il cambio imposta il fallback dell'output headless omarchy-gtx e riavvia
-Sunshine; uno stream attivo termina. Alla prossima apertura Desktop, Moonlight
+Sunshine; uno stream attivo termina. Alla prossima app Sunshine, Moonlight
 puo' sostituire il fallback con la propria modalita dinamica richiesta.
 USAGE
 }
@@ -138,7 +140,7 @@ case "${1:-}" in
     cat <<'USAGE'
 Uso: omarchy-stream-health [status|watch]
 
-Con Moonlight Desktop aperto, `watch` aggiorna una volta al secondo:
+Con uno stream Moonlight aperto, `watch` aggiorna una volta al secondo:
 - enc > 0: NVENC sta codificando in hardware;
 - enc assente: stream inattivo oppure encoder non attivo; non basta da solo
   per dire che esista un fallback;
@@ -188,7 +190,7 @@ die() { printf 'omarchy-moonlight-mode: %s\n' "$*" >&2; exit 1; }
 fallback_mode() {
   local mode
   mode="$(sed -n 's/.*output = "omarchy-gtx", mode = "\([0-9][0-9]*x[0-9][0-9]*@[0-9][0-9]*\)".*/\1/p' "$MONITORS_FILE" | tail -n 1)"
-  [[ "$mode" =~ ^[0-9]{3,5}x[0-9]{3,5}@[0-9]{2,3}$ ]] || mode='1920x1200@60'
+  [[ "$mode" =~ ^[0-9]{3,5}x[0-9]{3,5}@[0-9]{2,3}$ ]] || mode='1920x1080@60'
   printf '%s\n' "$mode"
 }
 
@@ -229,7 +231,7 @@ case "${1:-help}" in
     cat <<'USAGE'
 Uso: omarchy-moonlight-mode <apply|restore|status>
 
-`apply` e `restore` sono invocati automaticamente da Sunshine per Desktop.
+`apply` e `restore` sono invocati automaticamente dalle app Sunshine gestite.
 `apply` legge SUNSHINE_CLIENT_WIDTH/HEIGHT/FPS e imposta omarchy-gtx con
 l'API Lua di Hyprland; `restore` riporta la modalita di fallback configurata.
 USAGE
@@ -241,9 +243,9 @@ EOF
   chown "$USER_NAME:$USER_NAME" "$DYNAMIC_MODE_HELPER"
 
   # Keep every pre-existing Sunshine application and prep command. Add one
-  # precisely identifiable command to Desktop, replacing only a former copy
-  # created by this script. Sunshine injects SUNSHINE_CLIENT_WIDTH/HEIGHT/FPS
-  # into these commands for the client that opened Desktop.
+  # precisely identifiable command to every entry, replacing only a former
+  # copy created by this script. This also covers Steam Big Picture and future
+  # launchers after the next idempotent sync. Sunshine injects the client mode.
   python3 - "$APPS_FILE" "$DYNAMIC_MODE_HELPER" <<'PY'
 import json
 import pathlib
@@ -253,16 +255,15 @@ path = pathlib.Path(sys.argv[1])
 helper = sys.argv[2]
 data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 apps = data.setdefault("apps", [])
-desktop = next((app for app in apps if app.get("name") == "Desktop"), None)
-if desktop is None:
-    desktop = {"name": "Desktop", "image-path": "desktop.png", "prep-cmd": []}
-    apps.insert(0, desktop)
-commands = desktop.setdefault("prep-cmd", [])
-commands[:] = [
-    command for command in commands
-    if not (isinstance(command, dict) and command.get("do") == f"{helper} apply")
-]
-commands.append({"do": f"{helper} apply", "undo": f"{helper} restore"})
+if not any(app.get("name") == "Desktop" for app in apps):
+    apps.insert(0, {"name": "Desktop", "image-path": "desktop.png", "prep-cmd": []})
+for app in apps:
+    commands = app.setdefault("prep-cmd", [])
+    commands[:] = [
+        command for command in commands
+        if not (isinstance(command, dict) and command.get("do") == f"{helper} apply")
+    ]
+    commands.append({"do": f"{helper} apply", "undo": f"{helper} restore"})
 path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
   chown "$USER_NAME:$USER_NAME" "$APPS_FILE"
@@ -304,10 +305,10 @@ prepare_headless() {
 
   # Keep one managed block, so running the script again is idempotent and does
   # not duplicate monitor rules after upgrades of the Omarchy defaults. A new
-  # installation starts at 16:10, while an existing valid user selection is
+  # installation starts at 1080p 16:9, while an existing valid user selection is
   # intentionally preserved across repeated prepare-headless invocations.
   selected_mode="$(managed_stream_mode)"
-  if [[ -z "$selected_mode" ]]; then
+  if [[ -z "$selected_mode" ]] || { [[ "$selected_mode" == "$LEGACY_STREAM_MODE" ]] && ! grep -Fq -- '-- schema: 2 ' "$MONITORS_FILE"; }; then
     selected_mode="$DEFAULT_STREAM_MODE"
   else
     validate_stream_mode "$selected_mode"
@@ -380,7 +381,15 @@ verify_headless() {
   grep -Fxq "ExecStartPre=$HEADLESS_HELPER" "$SUNSHINE_DROPIN" || die 'pre-start Sunshine mancante'
   [[ -x "$RESOLUTION_COMMAND" && -x "$HEALTH_COMMAND" ]] || die 'comandi utente stream mancanti'
   grep -Fq 'omarchy_stream_resolution()' "$BASHRC" || die 'funzione Bash di risoluzione mancante'
-  grep -Fq 'omarchy-moonlight-mode apply' "$APPS_FILE" || die 'hook dinamico Desktop/Sunshine mancante'
+  python3 - "$APPS_FILE" "$DYNAMIC_MODE_HELPER" <<'PY' || die 'hook dinamico mancante in una o piu applicazioni Sunshine'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+command = f"{sys.argv[2]} apply"
+apps = data.get("apps", [])
+raise SystemExit(0 if apps and all(any(item.get("do") == command for item in app.get("prep-cmd", []) if isinstance(item, dict)) for app in apps) else 1)
+PY
   note "configurazione headless GTX coerente ($mode); controllare a runtime renderer, omarchy-gtx e NVENC"
 }
 
@@ -388,7 +397,7 @@ status_runtime() {
   require_root
   local user_id
   user_id="$(id -u "$USER_NAME")"
-  note "stato runtime Omarchy/GTX: fallback $(managed_stream_mode); Desktop Moonlight applica dinamicamente la modalita richiesta (enc aumenta solo durante uno stream)"
+  note "stato runtime Omarchy/GTX: fallback $(managed_stream_mode); le app Moonlight applicano dinamicamente la modalita richiesta (enc aumenta solo durante uno stream)"
   runuser -u "$USER_NAME" -- env \
     XDG_RUNTIME_DIR="/run/user/$user_id" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$user_id/bus" \
@@ -448,12 +457,12 @@ stream_health_once() {
   esac
   grep -Fxq 'encoder = nvenc' "$SUNSHINE_FILE" && echo 'Encoder richiesto: NVENC' || echo 'ATTENZIONE: encoder=nvenc non configurato'
   grep -Fxq 'nvenc_preset = 3' "$SUNSHINE_FILE" && echo 'Preset NVENC: P3 (qualita equilibrata)' || echo 'ATTENZIONE: preset NVENC P3 non configurato'
-  grep -Fq 'omarchy-moonlight-mode apply' "$APPS_FILE" && echo 'Risoluzione Moonlight: dinamica per ogni nuova apertura Desktop' || echo 'ATTENZIONE: hook risoluzione dinamica non configurato'
+  grep -Fq 'omarchy-moonlight-mode apply' "$APPS_FILE" && echo 'Risoluzione Moonlight: dinamica nelle app Sunshine gestite' || echo 'ATTENZIONE: hook risoluzione dinamica non configurato'
   if [[ -n "$last_gbm" ]]; then
     echo "Ultima cattura: $last_gbm"
     [[ "$last_gbm" == *"${mode%@*}"* ]] || echo 'ATTENZIONE: superficie GBM e modalita configurata non coincidono; riaprire Moonlight dopo il cambio'
   else
-    echo 'Nessuna cattura GBM recente: aprire Desktop da Moonlight prima di valutare il runtime'
+    echo 'Nessuna cattura GBM recente: aprire una app da Moonlight prima di valutare il runtime'
   fi
   if grep -Eqi 'libx264|software encoder|couldn.t import rgb image|couldn.t scale frame|invalid argument' <<<"$recent_logs"; then
     echo 'ATTENZIONE: il journal recente contiene fallback software o un errore di import/scala:'
@@ -469,7 +478,7 @@ stream_health_once() {
       echo 'NVENC NON OSSERVATO in questo campione: puo essere semplicemente stream inattivo; non e da solo una prova di fallback'
     fi
   else
-    echo 'Processo Sunshine non visto in nvidia-smi pmon: aprire Desktop e rieseguire'
+    echo 'Processo Sunshine non visto in nvidia-smi pmon: aprire uno stream e rieseguire'
   fi
 }
 
@@ -498,7 +507,7 @@ rollback_guest() {
   [[ -e "$BACKUP_DIR$HEALTH_COMMAND" ]] && cp -a "$BACKUP_DIR$HEALTH_COMMAND" "$HEALTH_COMMAND" || rm -f "$HEALTH_COMMAND"
   [[ -e "$BACKUP_DIR$APPS_FILE" ]] && cp -a "$BACKUP_DIR$APPS_FILE" "$APPS_FILE"
   [[ -e "$BASHRC" ]] && sed -i '/# BEGIN omarchy-gtx-primary commands/,/# END omarchy-gtx-primary commands/d' "$BASHRC"
-  note 'file guest, hook Desktop e comandi ripristinati; systemctl --user daemon-reload; sul nodo lasciare o riportare: qm set 1002 --vga virtio'
+  note 'file guest, hook delle app Sunshine e comandi ripristinati; systemctl --user daemon-reload; sul nodo lasciare o riportare: qm set 1002 --vga virtio'
 }
 
 usage() {
@@ -506,22 +515,22 @@ usage() {
 Uso: omarchy-gtx-primary <prepare-headless|verify-headless|status-runtime|set-resolution|stream-health|rollback-guest>
 
   prepare-headless  prepara Hyprland sulla GTX senza display fisico usando
-                    AQ_NO_KMS_REQUIREMENT e omarchy-gtx 1920x1200@60 per una
+                    AQ_NO_KMS_REQUIREMENT e omarchy-gtx 1920x1080@60 per una
                     nuova installazione; conserva una modalita gia' scelta.
                     Installa un pre-start idempotente: Sunshine avvia la sua
                     cattura solo dopo che l'uscita virtuale esiste.
                     Configura wlr + NVENC sulla GTX, HEVC in rilevamento
                     automatico e AV1 non pubblicizzato (Pascal non lo codifica).
-                    Per ogni nuova apertura Desktop, Sunshine passa le dimensioni
+                    Per ogni app Sunshine gestita, il server passa le dimensioni
                     richieste da Moonlight al helper Lua di Hyprland: omarchy-gtx
                     cambia modalita senza riavviare Sunshine. Installa anche i
                     comandi Bash omarchy_stream_resolution e omarchy_stream_health.
                     Non modifica kernel, Limine, VBIOS, SSDT o Proxmox.
   verify-headless   controlla i file predisposti prima del riavvio della sessione.
   status-runtime    mostra uscita virtuale, servizio Sunshine e processi NVIDIA.
-  set-resolution M  salva e applica M (es. 1920x1200@60) come fallback dopo
+  set-resolution M  salva e applica M (es. 1920x1080@60) come fallback dopo
                     disconnessione, poi riavvia Sunshine. Una nuova apertura
-                    Desktop la sostituisce con la modalita richiesta da Moonlight.
+                    di una app Sunshine la sostituisce con la modalita richiesta da Moonlight.
   stream-health     mostra build, risoluzione GBM, NVENC runtime e fallback;
                     con --watch aggiorna una volta al secondo durante lo stream.
   rollback-guest    ripristina i tre file utente; rimuove (o ripristina) helper
@@ -531,8 +540,8 @@ Flusso sicuro:
   1. prepare-headless; riavvia SDDM lasciando per ora vga: virtio.
   2. status-runtime; verifica renderer NVIDIA, omarchy-gtx e Sunshine/NVENC
      da SSH/Moonlight. In Moonlight scegli la stessa modalita dell'output.
-  3. Desktop Moonlight sceglie dinamicamente risoluzione/FPS; usare
-     omarchy_stream_resolution 1920x1200@60 solo per il fallback idle.
+  3. Moonlight sceglie dinamicamente risoluzione/FPS per Desktop e Steam;
+     usare omarchy_stream_resolution 1920x1080@60 solo per il fallback idle.
      omarchy_stream_health watch rende visibili fallback/errori.
   4. Solo se il test e' valido: qm set 1002 --vga none e reboot pulito.
 

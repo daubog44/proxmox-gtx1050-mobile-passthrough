@@ -123,7 +123,7 @@ nere dovute a una risoluzione diversa dalla superficie catturata.
 ```lua
 -- BEGIN sunshine-virtual-display (managed locally)
 -- GTX-only Wayland output for Sunshine/Moonlight; no VirtIO display ownership.
-hl.monitor({ output = "omarchy-gtx", mode = "1920x1200@60", position = "0x0", scale = 1 })
+hl.monitor({ output = "omarchy-gtx", mode = "1920x1080@60", position = "0x0", scale = 1 })
 -- END sunshine-virtual-display
 ```
 
@@ -147,7 +147,7 @@ causava catture nere/corrotte dopo boot o restart.
 ```bash
 # Cambio persistente/idempotente: aggiorna omarchy-gtx e riavvia Sunshine.
 # Il Desktop Moonlight corrente viene chiuso e va riaperto.
-omarchy_stream_resolution 1920x1200@60
+omarchy_stream_resolution 1920x1080@60
 
 # Durante Desktop Moonlight: rende visibili NVENC, GBM e fallback.
 omarchy_stream_health watch
@@ -159,9 +159,10 @@ apertura di Desktop, `omarchy-moonlight-mode apply` legge le variabili
 all'output `omarchy-gtx` tramite l'API Lua di Hyprland. Non riavvia Sunshine e
 non tocca VirtIO; una sola uscita significa una sola modalita' condivisa, non
 due schermi indipendenti per client simultanei. Eseguire di nuovo
-`prepare-headless` non duplica ne' l'hook Desktop ne' regole; per usare il
+`prepare-headless` non duplica gli hook di Desktop, Steam Big Picture e delle
+altre app Sunshine ne' le regole; per usare il
 comando con trattini senza riaprire la shell:
-`omarchy-stream-resolution 1920x1200@60`. La `.bashrc` va caricata con
+`omarchy-stream-resolution 1920x1080@60`. La `.bashrc` va caricata con
 `source ~/.bashrc`, non eseguita con `bash ~/.bashrc`: il suo `return` per le
 shell non interattive e' previsto.
 
