@@ -6,7 +6,7 @@ License:        LicenseRef-Proprietary
 BuildArch:      noarch
 Requires:       bash
 Requires:       coreutils
-Requires:       ffmpeg-free
+Requires:       /usr/bin/ffmpeg
 Requires:       flatpak
 Requires:       iproute
 Requires:       kde-connect

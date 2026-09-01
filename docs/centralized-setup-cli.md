@@ -381,7 +381,11 @@ dall'ambiente alla fine. Se sono diverse, usare separatamente
 `OMARCHY_SSH_PASSWORD`, `OMARCHY_SUDO_PASSWORD` e
 `OMARCHY_LOCAL_SUDO_PASSWORD` in una sessione manuale protetta.
 
-L'RPM `latest` e' costruito su Fedora 44; l'hash SHA-256 della copia corrente
+L'RPM richiede la capacita' `/usr/bin/ffmpeg`, non il nome `ffmpeg-free`: in
+questo modo accetta sia la build Fedora sia FFmpeg completo di RPM Fusion senza
+tentare una sostituzione in conflitto. Il wizard verifica poi realmente che
+l'encoder `libopus` sia presente. L'RPM `latest` e' costruito su Fedora 44;
+l'hash SHA-256 della copia corrente
 e' pubblicato in [`releases/SHA256SUMS`](../releases/SHA256SUMS). Il pacchetto
 non include password o indirizzi: il wizard li salva localmente con permessi
 `0600` in `~/.config/omarchy/omarchy.env`.
