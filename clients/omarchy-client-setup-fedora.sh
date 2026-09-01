@@ -276,7 +276,7 @@ configure_ssh_password() {
   [[ -n "${OMARCHY_SSH_PASSWORD:-}" ]] || return 0
   # Omarchy Control provides its own in-memory SSH_ASKPASS executable. A
   # standalone shell can obtain the same non-interactive behavior via sshpass.
-  if [[ -z "${SSH_ASKPASS:-}" ]]; then
+  if [[ "${OMARCHY_ASKPASS_MODE:-}" != 1 ]]; then
     command -v sshpass >/dev/null || die 'OMARCHY_SSH_PASSWORD richiede sshpass: sudo dnf install -y sshpass'
     export SSHPASS="$OMARCHY_SSH_PASSWORD"
     ssh_auth_prefix=(sshpass -e)
