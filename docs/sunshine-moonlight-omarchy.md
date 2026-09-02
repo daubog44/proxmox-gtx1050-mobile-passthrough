@@ -234,7 +234,8 @@ Hyprland e i log `GBM request` erano ancora 1920x1080. Era un mismatch fra la
 dimensione richiesta al client e la superficie realmente catturata: Sunshine
 poteva scalare/letterboxare il desktop e lasciare aree nere. Sul nuovo client
 Fedora il profilo Moonlight non conteneva invece larghezza/altezza e ricadeva
-nel default upstream 1280x720. La modalita' di fallback gestita e' quindi ora
+nel fallback upstream 1280x720. Non e' il default del nostro setup: la modalita'
+gestita predefinita e' ora
 **1920x1080@60**, 16:9 come notebook e TV; il vecchio 1920x1200 resta una prova
 storica valida ma viene migrato automaticamente se appartiene al blocco dello
 script.
@@ -369,9 +370,10 @@ desktop interattivo, bassa latenza o la negoziazione NVENC/GameStream. Per
 questa architettura la strada corretta e' un client **Moonlight** sulla TV
 (Android/Google TV, Fire TV o Apple TV, se disponibile sul dispositivo),
 oppure un computer Fedora/Windows/macOS collegato alla TV via HDMI. Omarchy
-Control rileva i pixel fisici di quest'ultimo e offre due scelte: HEVC
-1080p60/20 Mbps e' il profilo gaming sicuro per la GTX 1050; il profilo nativo
-4K60/80 Mbps e' destinato al desktop e ai giochi leggeri. Il 4K richiede
+Control rileva i pixel fisici di quest'ultimo e offre tre scelte: Full HD
+60 FPS/20 Mbps e' il default e il profilo gaming sicuro per la GTX 1050;
+4K30/40 Mbps conserva la definizione della TV dimezzando bitrate e frequenza;
+il profilo nativo 4K60/80 Mbps e' destinato al desktop e ai giochi leggeri. Il 4K richiede
 quattro volte i pixel del 1080p: NVENC puo' codificare HEVC, ma il gioco deve
 anche riuscire a renderizzare quella scena a 3840x2160.
 
@@ -380,10 +382,10 @@ La TV vedra' lo **stesso** desktop headless: e' un secondo punto di vista
 servirebbero una seconda uscita headless e una seconda istanza/cattura Sunshine
 con porte, app e risorse NVENC separate; non e' configurato qui, non e' stato
 validato sull'hardware Pascal e potrebbe peggiorare la latenza. Prima prova
-raccomandata: collegare la TV, scegliere **Prestazioni 1080p** nella sezione
+raccomandata: collegare la TV, scegliere **Full HD 60 FPS** nella sezione
 Gaming di Omarchy Control e lasciare che Desktop o Steam Big Picture negozi
-1920x1080@60, con l'altro client scollegato. Provare **Qualita' nativa** solo
-dopo avere verificato 60 FPS, drop e latenza nell'overlay Moonlight.
+1920x1080@60, con l'altro client scollegato. Provare poi **4K 30 FPS** e infine
+**Qualita' nativa 60 FPS**, verificando drop e latenza nell'overlay Moonlight.
 
 ## Verifica riproducibile dopo una modifica
 

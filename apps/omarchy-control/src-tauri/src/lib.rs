@@ -536,17 +536,21 @@ fn moonlight_default_bitrate_kbps(width: u32, height: u32, fps: u32) -> u32 {
     (resolution_factor * frame_factor).round() as u32 * 1000
 }
 
-fn moonlight_gaming_settings(width: u32, height: u32) -> BTreeMap<&'static str, MoonlightSetting> {
+fn moonlight_gaming_settings(
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> BTreeMap<&'static str, MoonlightSetting> {
     let window_mode = if cfg!(target_os = "windows") { 0 } else { 1 };
     BTreeMap::from([
         ("audiocfg", MoonlightSetting::Integer(0)),
         ("autoadjustbitrate", MoonlightSetting::Boolean(true)),
         (
             "bitrate",
-            MoonlightSetting::Integer(moonlight_default_bitrate_kbps(width, height, 60)),
+            MoonlightSetting::Integer(moonlight_default_bitrate_kbps(width, height, fps)),
         ),
         ("capturesyskeys", MoonlightSetting::Integer(1)),
-        ("fps", MoonlightSetting::Integer(60)),
+        ("fps", MoonlightSetting::Integer(fps)),
         ("framepacing", MoonlightSetting::Boolean(true)),
         ("gameopts", MoonlightSetting::Boolean(true)),
         ("hdr", MoonlightSetting::Boolean(false)),
@@ -564,6 +568,27 @@ fn moonlight_gaming_settings(width: u32, height: u32) -> BTreeMap<&'static str, 
         ("windowmode", MoonlightSetting::Integer(window_mode)),
         ("yuv444", MoonlightSetting::Boolean(false)),
     ])
+}
+
+fn moonlight_gaming_profile(
+    quality_mode: &str,
+    monitor_width: u32,
+    monitor_height: u32,
+) -> AppResult<(u32, u32, u32, &'static str)> {
+    match quality_mode {
+        "performance" => Ok((1920, 1080, 60, "Full HD 60 FPS")),
+        "quality30" if monitor_width >= 3840 && monitor_height >= 2160 => {
+            Ok((3840, 2160, 30, "4K 30 FPS"))
+        }
+        "quality30" => Err("Il profilo 4K 30 FPS richiede uno schermo 3840x2160".into()),
+        "native" => Ok((
+            monitor_width.min(3840),
+            monitor_height.min(2160),
+            60,
+            "Qualita nativa 60 FPS",
+        )),
+        _ => Err("Profilo gaming non valido".into()),
+    }
 }
 
 fn update_ini_general(contents: &str, settings: &BTreeMap<&str, MoonlightSetting>) -> String {
@@ -1200,24 +1225,17 @@ fn configure_moonlight_gaming(
     let monitor = monitors.get(display_index).ok_or_else(|| {
         "Lo schermo selezionato non e piu disponibile: aggiorna l'elenco".to_string()
     })?;
-    let (width, height, profile) = match quality_mode.as_str() {
-        "performance" => (1920, 1080, "Prestazioni 1080p"),
-        "native" => (
-            monitor.size().width.min(3840),
-            monitor.size().height.min(2160),
-            "Qualita nativa",
-        ),
-        _ => return Err("Profilo gaming non valido".into()),
-    };
+    let (width, height, fps, profile) =
+        moonlight_gaming_profile(&quality_mode, monitor.size().width, monitor.size().height)?;
     if width < 640 || height < 480 {
         return Err(format!("Risoluzione schermo non valida: {width}x{height}"));
     }
-    let bitrate = moonlight_default_bitrate_kbps(width, height, 60);
+    let bitrate = moonlight_default_bitrate_kbps(width, height, fps);
     stop_moonlight()?;
-    write_moonlight_settings(&moonlight_gaming_settings(width, height))?;
+    write_moonlight_settings(&moonlight_gaming_settings(width, height, fps))?;
     launch_moonlight()?;
     Ok(format!(
-        "Moonlight: {profile}, {width}x{height}@60 e {:.0} Mbps automatici; modalita schermo intero, V-Sync e frame pacing attivi, HDR e YUV 4:4:4 disattivati",
+        "Moonlight: {profile}, {width}x{height}@{fps} e {:.0} Mbps automatici; modalita schermo intero, V-Sync e frame pacing attivi, HDR e YUV 4:4:4 disattivati",
         f64::from(bitrate) / 1000.0
     ))
 }
@@ -1423,7 +1441,21 @@ mod tests {
     #[test]
     fn moonlight_profile_uses_upstream_default_bitrates() {
         assert_eq!(moonlight_default_bitrate_kbps(1920, 1080, 60), 20_000);
+        assert_eq!(moonlight_default_bitrate_kbps(3840, 2160, 30), 40_000);
         assert_eq!(moonlight_default_bitrate_kbps(3840, 2160, 60), 80_000);
+    }
+
+    #[test]
+    fn moonlight_profiles_default_to_full_hd_and_offer_4k30() {
+        assert_eq!(
+            moonlight_gaming_profile("performance", 3840, 2160).unwrap(),
+            (1920, 1080, 60, "Full HD 60 FPS")
+        );
+        assert_eq!(
+            moonlight_gaming_profile("quality30", 3840, 2160).unwrap(),
+            (3840, 2160, 30, "4K 30 FPS")
+        );
+        assert!(moonlight_gaming_profile("quality30", 1920, 1080).is_err());
     }
 
     #[test]

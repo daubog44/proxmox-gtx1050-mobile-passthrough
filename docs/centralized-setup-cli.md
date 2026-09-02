@@ -372,8 +372,8 @@ clients/voxtype-fedora-mic-rtp.sh --list-sources
 
 Il modulo Fedora installa Moonlight come Flatpak utente
 `com.moonlight_stream.Moonlight`. In Omarchy Control, la sezione **Gaming**
-rileva gli schermi fisici e applica in modo esplicito un profilo 1080p60/20
-Mbps oppure nativo fino a 4K60/80 Mbps; conserva host e pairing e riavvia il
+rileva gli schermi fisici e applica in modo esplicito Full HD 60 FPS/20 Mbps
+(default), 4K30/40 Mbps oppure nativo fino a 4K60/80 Mbps; conserva host e pairing e riavvia il
 client per rendere effettive le preferenze. Il setup abilita idempotentemente il servizio
 firewalld `mdns` (`5353/UDP` limitato ai gruppi multicast standard), necessario
 per ricevere l'annuncio Sunshine `_nvstream._tcp`; non apre la porta a unicast

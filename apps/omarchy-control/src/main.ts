@@ -357,10 +357,10 @@ $("#app").innerHTML = `
       </section>
 
       <section id="streaming" class="section">
-        <div class="section-heading"><div><p class="eyebrow">MOONLIGHT GAMING</p><h2>Adatta lo stream allo schermo</h2><p>Seleziona il pannello su cui giocherai. Il profilo usa i pixel fisici, 60 FPS, bitrate automatico, V-Sync e frame pacing; riavvia Moonlight senza toccare l’associazione a Omarchy.</p></div></div>
+        <div class="section-heading"><div><p class="eyebrow">MOONLIGHT GAMING</p><h2>Adatta lo stream allo schermo</h2><p>Seleziona il pannello e il compromesso tra fluidità e definizione. Il default è Full HD 60 FPS; Moonlight viene riavviato senza perdere l’associazione a Omarchy.</p></div></div>
         <div class="gaming-profile">
-          <label><span>Schermo di destinazione</span><select id="gaming-display" aria-label="Schermo di destinazione"></select><small>Una TV 4K viene configurata come 3840×2160@60; il notebook resta disponibile come profilo 1080p.</small></label>
-          <label><span>Profilo</span><select id="gaming-quality" aria-label="Profilo gaming"><option value="performance">Prestazioni 1080p — consigliato GTX 1050</option><option value="native">Qualità nativa — desktop e giochi leggeri</option></select><small>Entrambi sono 16:9 e riempiono la TV. Il 4K nativo richiede quattro volte i pixel del 1080p.</small></label>
+          <label><span>Schermo di destinazione</span><select id="gaming-display" aria-label="Schermo di destinazione"></select><small>La TV HDMI 4K viene rilevata automaticamente; il notebook resta selezionabile.</small></label>
+          <label><span>Profilo</span><select id="gaming-quality" aria-label="Profilo gaming"><option value="performance">Full HD 60 FPS — default</option><option value="quality30">4K 30 FPS — 40 Mbps</option><option value="native">Nativa 60 FPS — fino a 4K/80 Mbps</option></select><small>4K30 dimezza FPS e bitrate rispetto a 4K60; Full HD 60 resta consigliato per i giochi sulla GTX 1050.</small></label>
           <button type="button" id="configure-gaming" disabled>Ottimizza e riavvia Moonlight</button>
         </div>
         <p class="profile-note">HEVC resta automatico perché viene usato solo se encoder e decoder lo supportano. HDR e YUV 4:4:4 restano spenti: sono meno affidabili e non migliorano il movimento nei giochi.</p>
