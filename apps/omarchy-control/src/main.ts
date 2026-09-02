@@ -252,20 +252,54 @@ async function loadDisplays() {
     displays = await invoke<DisplayInfo[]>("list_displays");
     const select = $<HTMLSelectElement>("#gaming-display");
     select.innerHTML = displays.map((display) =>
-      `<option value="${display.index}">${escapeHtml(display.name)} — ${display.width}×${display.height}</option>`,
+      `<option value="${display.index}">${escapeHtml(displayName(display))}</option>`,
     ).join("");
-    const fourK = displays.find((display) => display.width === 3840 && display.height === 2160);
-    if (fourK) select.value = String(fourK.index);
+    const external = displays.find((display) => /hdmi|displayport|\bdp[- ]/i.test(display.name));
+    const largest = displays.reduce<DisplayInfo | undefined>((current, display) =>
+      !current || display.width * display.height > current.width * current.height ? display : current,
+    undefined);
+    const preferred = external ?? largest;
+    if (preferred) select.value = String(preferred.index);
     $<HTMLButtonElement>("#configure-gaming").disabled = displays.length === 0;
+    updateGamingSummary();
   } catch (error) {
     setMessage(String(error), "error");
   }
 }
 
+function displayName(display: DisplayInfo) {
+  const name = display.name.trim();
+  if (/edp|lvds|built.?in|internal/i.test(name)) return "Schermo del portatile";
+  if (/hdmi/i.test(name)) return "TV / monitor HDMI";
+  if (/displayport|\bdp[- ]/i.test(name)) return "Monitor DisplayPort";
+  return name || `Schermo ${display.index + 1}`;
+}
+
+function selectedQuality() {
+  return document.querySelector<HTMLInputElement>('input[name="gaming-quality"]:checked')?.value ?? "performance";
+}
+
+function updateGamingSummary() {
+  const displayIndex = Number($<HTMLSelectElement>("#gaming-display").value);
+  const display = displays.find((candidate) => candidate.index === displayIndex);
+  const quality = selectedQuality();
+  const profiles: Record<string, { name: string; detail: string }> = {
+    performance: { name: "Full HD 60", detail: "1920×1080 · 60 FPS · 20 Mbps" },
+    quality30: { name: "4K 30", detail: "3840×2160 · 30 FPS · 40 Mbps" },
+    native: {
+      name: "Nativa 60",
+      detail: display ? `${display.width}×${display.height} · 60 FPS · bitrate automatico` : "Rilevamento in corso…",
+    },
+  };
+  const profile = profiles[quality] ?? profiles.performance;
+  $("#gaming-summary-title").textContent = `${display ? displayName(display) : "Nessuno schermo"} · ${profile.name}`;
+  $("#gaming-summary-detail").textContent = profile.detail;
+}
+
 async function configureGaming() {
   const button = $<HTMLButtonElement>("#configure-gaming");
   const displayIndex = Number($<HTMLSelectElement>("#gaming-display").value);
-  const qualityMode = $<HTMLSelectElement>("#gaming-quality").value;
+  const qualityMode = selectedQuality();
   setBusy(button, true, "Ottimizzo…");
   try {
     const detail = await invoke<string>("configure_moonlight_gaming", { displayIndex, qualityMode });
@@ -357,13 +391,27 @@ $("#app").innerHTML = `
       </section>
 
       <section id="streaming" class="section">
-        <div class="section-heading"><div><p class="eyebrow">MOONLIGHT GAMING</p><h2>Adatta lo stream allo schermo</h2><p>Seleziona il pannello e il compromesso tra fluidità e definizione. Il default è Full HD 60 FPS; Moonlight viene riavviato senza perdere l’associazione a Omarchy.</p></div></div>
+        <div class="section-heading"><div><p class="eyebrow">MOONLIGHT GAMING</p><h2>Qualità dello stream</h2><p>Scegli dove guarderai e quanto privilegiare fluidità o definizione. Full HD 60 è il default consigliato.</p></div><button type="button" class="quiet" id="refresh-displays">Rileva schermi</button></div>
         <div class="gaming-profile">
-          <label><span>Schermo di destinazione</span><select id="gaming-display" aria-label="Schermo di destinazione"></select><small>La TV HDMI 4K viene rilevata automaticamente; il notebook resta selezionabile.</small></label>
-          <label><span>Profilo</span><select id="gaming-quality" aria-label="Profilo gaming"><option value="performance">Full HD 60 FPS — default</option><option value="quality30">4K 30 FPS — 40 Mbps</option><option value="native">Nativa 60 FPS — fino a 4K/80 Mbps</option></select><small>4K30 dimezza FPS e bitrate rispetto a 4K60; Full HD 60 resta consigliato per i giochi sulla GTX 1050.</small></label>
-          <button type="button" id="configure-gaming" disabled>Ottimizza e riavvia Moonlight</button>
+          <div class="display-choice">
+            <label for="gaming-display"><span>Dove guarderai lo stream</span></label>
+            <select id="gaming-display" aria-label="Schermo di destinazione"></select>
+            <small>Mostriamo il nome dello schermo; la risoluzione viene scelta dal profilo.</small>
+          </div>
+          <fieldset class="quality-options">
+            <legend>Profilo video</legend>
+            <label class="quality-option"><input type="radio" name="gaming-quality" value="performance" checked><span><strong>Full HD</strong><small>60 FPS · 20 Mbps</small></span><em>Default</em></label>
+            <label class="quality-option"><input type="radio" name="gaming-quality" value="quality30"><span><strong>4K</strong><small>30 FPS · 40 Mbps</small></span><em>TV</em></label>
+            <label class="quality-option"><input type="radio" name="gaming-quality" value="native"><span><strong>Nativa</strong><small>60 FPS · bitrate automatico</small></span><em>Max</em></label>
+          </fieldset>
+          <div class="gaming-summary" aria-live="polite">
+            <span>Configurazione pronta</span>
+            <strong id="gaming-summary-title">Rilevamento schermi…</strong>
+            <p id="gaming-summary-detail">Full HD · 60 FPS · 20 Mbps</p>
+            <button type="button" id="configure-gaming" disabled>Applica e riavvia Moonlight</button>
+          </div>
         </div>
-        <p class="profile-note">HEVC resta automatico perché viene usato solo se encoder e decoder lo supportano. HDR e YUV 4:4:4 restano spenti: sono meno affidabili e non migliorano il movimento nei giochi.</p>
+        <p class="profile-note">4K30 forza uno stream 3840×2160 anche quando il desktop locale è scalato o duplicato a una risoluzione inferiore. HEVC resta automatico; HDR e YUV 4:4:4 restano spenti.</p>
       </section>
 
       <section id="connection" class="section">
@@ -411,6 +459,11 @@ $("#refresh").addEventListener("click", () => void refresh());
 $("#discover").addEventListener("click", () => void discover());
 $("#check-receiver").addEventListener("click", () => void checkReceiver());
 $("#moonlight").addEventListener("click", () => void launchMoonlight());
+$("#refresh-displays").addEventListener("click", () => void loadDisplays());
+$("#gaming-display").addEventListener("change", updateGamingSummary);
+document.querySelectorAll<HTMLInputElement>('input[name="gaming-quality"]').forEach((input) => {
+  input.addEventListener("change", updateGamingSummary);
+});
 $("#configure-gaming").addEventListener("click", () => void configureGaming());
 $("#configure").addEventListener("click", () => void configureClient());
 $("#configure-guest").addEventListener("click", () => void configureGuest());

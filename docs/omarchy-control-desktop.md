@@ -115,7 +115,9 @@ profili:
   automatico Moonlight da 20 Mbps. La TV 4K esegue l'upscaling senza bande,
   perche' il formato resta 16:9.
 - **4K 30 FPS**: 3840×2160@30 e 40 Mbps. Mantiene tutti i pixel della TV
-  dimezzando frequenza e bitrate rispetto a 4K60.
+  dimezzando frequenza e bitrate rispetto a 4K60. E' una richiesta esplicita:
+  resta selezionabile anche se KDE replica o scala la TV e comunica alla WebView
+  una geometria inferiore.
 - **Qualita' nativa**: usa i pixel fisici fino a 3840×2160@60 e 80 Mbps. E'
   adatto al desktop e ai giochi leggeri; un gioco moderno deve renderizzare
   quattro volte i pixel del 1080p e puo' non mantenere 60 FPS sulla GTX 1050.
@@ -130,6 +132,11 @@ nativo delle preferenze.
 
 Il valore 1280×720 e' soltanto il fallback upstream di un'installazione Moonlight
 senza preferenze: non e' il default scelto da Omarchy Control.
+
+La destinazione mostra nomi operativi come **Schermo del portatile** e
+**TV / monitor HDMI**, senza mescolare la scelta del dispositivo con quella
+della risoluzione. Il riepilogo sottostante espone invece formato, FPS e bitrate
+che verranno scritti nel profilo Moonlight.
 
 Quando parte lo stream, Moonlight passa larghezza, altezza e FPS a Sunshine.
 Il modulo guest installa lo stesso hook `omarchy-moonlight-mode` su **tutte** le

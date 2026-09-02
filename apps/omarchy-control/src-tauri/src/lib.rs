@@ -577,10 +577,7 @@ fn moonlight_gaming_profile(
 ) -> AppResult<(u32, u32, u32, &'static str)> {
     match quality_mode {
         "performance" => Ok((1920, 1080, 60, "Full HD 60 FPS")),
-        "quality30" if monitor_width >= 3840 && monitor_height >= 2160 => {
-            Ok((3840, 2160, 30, "4K 30 FPS"))
-        }
-        "quality30" => Err("Il profilo 4K 30 FPS richiede uno schermo 3840x2160".into()),
+        "quality30" => Ok((3840, 2160, 30, "4K 30 FPS")),
         "native" => Ok((
             monitor_width.min(3840),
             monitor_height.min(2160),
@@ -1455,7 +1452,10 @@ mod tests {
             moonlight_gaming_profile("quality30", 3840, 2160).unwrap(),
             (3840, 2160, 30, "4K 30 FPS")
         );
-        assert!(moonlight_gaming_profile("quality30", 1920, 1080).is_err());
+        assert_eq!(
+            moonlight_gaming_profile("quality30", 1920, 1080).unwrap(),
+            (3840, 2160, 30, "4K 30 FPS")
+        );
     }
 
     #[test]
