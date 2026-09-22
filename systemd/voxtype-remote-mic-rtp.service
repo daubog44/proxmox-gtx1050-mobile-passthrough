@@ -7,8 +7,8 @@ Wants=pipewire.service
 Type=simple
 EnvironmentFile=-%h/.config/voxtype/remote-mic.env
 ExecStart=%h/.local/bin/voxtype-remote-mic-rtp-receive ${VOXTYPE_RTP_PORT}
-Restart=always
-RestartSec=1
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=default.target

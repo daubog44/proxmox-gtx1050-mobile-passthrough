@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ==============================================================================
+# Omarchy NAS Storage Mount Helper
+# Mounts the Samba NVMe share (smb://192.168.0.39/nvme1) for recordings & saves
+# ==============================================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+if [[ $EUID -ne 0 ]]; then
+   echo -e "${RED}[ERROR] Questo script deve essere eseguito da root (o con sudo).${NC}"
+   exit 1
+fi
+
+NAS_SERVER="${1:-192.168.0.39}"
+NAS_SHARE="${2:-nvme1}"
+MOUNTPOINT="${3:-/mnt/nvme1-recordings}"
+SMB_USER="${4:-guest}"
+SMB_PASS="${5:-}"
+
+echo -e "${CYAN}${BOLD}=== Configurazione Montaggio Storage NAS Omarchy ===${NC}"
+echo -e "  Server:     ${BOLD}${NAS_SERVER}${NC}"
+echo -e "  Condivisione:${BOLD}//${NAS_SERVER}/${NAS_SHARE}${NC}"
+echo -e "  Mountpoint: ${BOLD}${MOUNTPOINT}${NC}"
+echo ""
+
+# 1. Verifica raggiungibilità di rete del NAS
+echo -e "${BLUE}[1/5] Verifica connessione di rete a ${NAS_SERVER}:445...${NC}"
+if ! nc -zv -w 3 "$NAS_SERVER" 445 >/dev/null 2>&1; then
+    echo -e "${YELLOW}[ATTENZIONE] Porta SMB 445 non raggiungibile su ${NAS_SERVER}. Verificare che il NAS sia acceso e in rete.${NC}"
+else
+    echo -e "${GREEN}[OK] Connessione al NAS riuscita.${NC}"
+fi
+
+# 2. Verifica pacchetto cifs-utils
+echo -e "${BLUE}[2/5] Verifica pacchetto cifs-utils...${NC}"
+if ! command -v mount.cifs >/dev/null 2>&1; then
+    echo -e "${CYAN}[INFO] Installazione cifs-utils in corso...${NC}"
+    if command -v pacman >/dev/null 2>&1; then
+        pacman -S --needed --noconfirm cifs-utils
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update && apt-get install -y cifs-utils
+    fi
+else
+    echo -e "${GREEN}[OK] cifs-utils già installato.${NC}"
+fi
+
+# 3. Creazione cartella mountpoint
+echo -e "${BLUE}[3/5] Creazione mount point ${MOUNTPOINT}...${NC}"
+mkdir -p "$MOUNTPOINT"
+chmod 775 "$MOUNTPOINT"
+
+# 4. Montaggio share CIFS
+echo -e "${BLUE}[4/5] Esecuzione mount CIFS...${NC}"
+if grep -qs "$MOUNTPOINT" /proc/mounts; then
+    echo -e "${YELLOW}[INFO] ${MOUNTPOINT} risulta già montato. Smontaggio per verifica...${NC}"
+    umount -l "$MOUNTPOINT" || true
+fi
+
+MOUNT_OPTS="uid=1000,gid=1000,iocharset=utf8,file_mode=0775,dir_mode=0775"
+FSTAB_OPTS="$MOUNT_OPTS"
+
+if [[ -n "$SMB_USER" && "$SMB_USER" != "guest" ]]; then
+    mkdir -p /etc/omarchy
+    chmod 700 /etc/omarchy
+    CRED_FILE="/etc/omarchy/nas-credentials"
+    cat << EOF > "$CRED_FILE"
+username=${SMB_USER}
+password=${SMB_PASS}
+EOF
+    chmod 600 "$CRED_FILE"
+    MOUNT_OPTS="${MOUNT_OPTS},credentials=${CRED_FILE}"
+    FSTAB_OPTS="${FSTAB_OPTS},credentials=${CRED_FILE}"
+else
+    MOUNT_OPTS="${MOUNT_OPTS},guest"
+    FSTAB_OPTS="${FSTAB_OPTS},guest"
+fi
+
+if mount -t cifs "//${NAS_SERVER}/${NAS_SHARE}" "$MOUNTPOINT" -o "$MOUNT_OPTS"; then
+    echo -e "${GREEN}[OK] Condivisione montata con successo in ${MOUNTPOINT}!${NC}"
+else
+    echo -e "${RED}[ERRORE] Impossibile montare //${NAS_SERVER}/${NAS_SHARE}.${NC}"
+    echo -e "${YELLOW}Suggerimento: se la share richiede autenticazione, usa: sudo $0 ${NAS_SERVER} ${NAS_SHARE} ${MOUNTPOINT} <username> <password>${NC}"
+    exit 1
+fi
+
+# Crea sottocartelle
+mkdir -p "${MOUNTPOINT}/recordings" "${MOUNTPOINT}/saves"
+chown -R 1000:1000 "${MOUNTPOINT}" 2>/dev/null || true
+
+# 5. Persistenza in /etc/fstab
+echo -e "${BLUE}[5/5] Configurazione avvio automatico in /etc/fstab...${NC}"
+FSTAB_LINE="//${NAS_SERVER}/${NAS_SHARE} ${MOUNTPOINT} cifs ${FSTAB_OPTS},_netdev,nofail 0 0"
+
+if grep -q "$MOUNTPOINT" /etc/fstab; then
+    sed -i "\|${MOUNTPOINT}|d" /etc/fstab
+fi
+
+echo "$FSTAB_LINE" >> /etc/fstab
+echo -e "${GREEN}[OK] Aggiunta riga di mount persistente a /etc/fstab.${NC}"
+
+echo ""
+echo -e "${GREEN}${BOLD}========================================================================${NC}"
+echo -e "${GREEN}${BOLD}       STORAGE NAS CIFS CONFIGURATO E MONTATO CORRETTAMENTE!             ${NC}"
+echo -e "${GREEN}${BOLD}========================================================================${NC}"
+df -h "$MOUNTPOINT"
+echo ""

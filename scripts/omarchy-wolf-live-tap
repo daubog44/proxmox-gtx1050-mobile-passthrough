@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Adds a live-view/recording tap to Wolf (Games on Whales) sessions.
+#
+# Wolf renders each game inside its container compositor and builds the video
+# pipeline as:  source ! video_params ! encoder ! default_sink
+# (games-on-whales/wolf state/configTOML.cpp). We wrap default_sink with a tee:
+#
+#   ... NVENC ! tee ! queue ! rtpmoonlightpay_video ! appsink        (player, unchanged)
+#               tee. ! queue leaky=downstream ! mpegtsmux ! shmsink  (tap)
+#
+# The tap copies the already-encoded stream (no second encode). A leaky queue
+# means a slow or absent reader drops tap frames instead of ever stalling the
+# player, and shmsink with wait-for-connection=false never blocks or errors
+# when nobody listens. The socket lands in /tmp/sockets (Wolf's XDG_RUNTIME_DIR,
+# shared with the host) as omarchy-live-<session_id>; omarchy-capture-publish
+# forwards it to MediaMTX only while someone watches or records.
+#
+# Wolf's NVENC pipelines default to gop-size=-1 (keyframes only when Moonlight
+# asks), so a late viewer or recording could wait forever for an IDR. The tap
+# sets a finite GOP (default 120 frames: 2 s at 60 FPS) on nvcodec encoders.
+set -euo pipefail
+
+readonly MARKER='omarchy-wolf-live-tap'
+config="${WOLF_CONFIG:-/etc/wolf/cfg/config.toml}"
+container="${WOLF_CONTAINER:-wolf}"
+gop="${OMARCHY_WOLF_GOP:-120}"
+restart=0
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+
+usage() {
+  cat <<EOF
+Uso: omarchy-wolf-live-tap <status|apply|rollback> [--config FILE] [--container NOME] [--restart]
+  status    mostra se il tap è installato e se Wolf lo supporta
+  apply     verifica prerequisiti, salva un backup e modifica config.toml
+  rollback  ripristina l'ultimo backup
+  --restart riavvia il container Wolf (termina le sessioni in corso)
+EOF
+}
+
+action="${1:-}"; shift || true
+while (($#)); do
+  case "$1" in
+    --config) config="$2"; shift 2 ;;
+    --container) container="$2"; shift 2 ;;
+    --restart) restart=1; shift ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+docker_bin="$(command -v docker || command -v podman || true)"
+
+check_prereqs() {
+  [[ -f "$config" ]] || die "config Wolf non trovata: $config (usa --config)"
+  [[ -n "$docker_bin" ]] || die 'docker/podman non trovato'
+  "$docker_bin" inspect "$container" >/dev/null 2>&1 || die "container Wolf '$container' non trovato (usa --container)"
+  "$docker_bin" inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$container" | tr ' ' '\n' | grep -qx '/tmp/sockets' \
+    || die "il container $container non monta /tmp/sockets: il tap non sarebbe visibile dall'host"
+  local element
+  for element in tee queue mpegtsmux shmsink; do
+    "$docker_bin" exec "$container" gst-inspect-1.0 --exists "$element" 2>/dev/null \
+      || die "elemento GStreamer '$element' assente nell'immagine Wolf: il tap romperebbe gli stream"
+  done
+  command -v gst-launch-1.0 >/dev/null && gst-inspect-1.0 --exists shmsrc 2>/dev/null \
+    || die 'sull host serve gstreamer + gst-plugins-bad (shmsrc)'
+}
+
+patch_config() {
+  python3 - "$config" "$gop" "$MARKER" <<'PY'
+import re, sys, tomllib
+
+path, gop, marker = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path, encoding="utf-8").read()
+# Wolf rewrites config.toml (and drops comments) whenever profiles change
+# through its API, so detect the tap by content, not by the marker comment.
+if "omarchy_live_tee" in tomllib.loads(text).get("gstreamer", {}).get("video", {}).get("default_sink", ""):
+    print("tap già presente")
+    sys.exit(0)
+
+section = re.search(r"^\[gstreamer\.video\]\s*$", text, re.M)
+if not section:
+    sys.exit("sezione [gstreamer.video] non trovata")
+sink = re.compile(r'^default_sink\s*=\s*"""(.*?)"""', re.S | re.M)
+match = sink.search(text, section.end())
+if not match:
+    sys.exit("default_sink non trovato in [gstreamer.video]")
+
+original = match.group(1).strip("\n")
+tapped = (
+    f'# {marker}: tee verso shmsink per anteprima/registrazione Omarchy\n'
+    'default_sink = """\n'
+    "tee name=omarchy_live_tee allow-not-linked=true ! \\\n"
+    f"{original}\n"
+    "omarchy_live_tee. ! queue leaky=downstream max-size-buffers=240 max-size-bytes=0 max-size-time=0 ! \\\n"
+    "mpegtsmux alignment=7 ! \\\n"
+    "shmsink socket-path=/tmp/sockets/omarchy-live-{session_id} wait-for-connection=false "
+    "sync=false async=false shm-size=67108864 perms=0660\n"
+    '"""'
+)
+text = text[:match.start()] + tapped + text[match.end():]
+
+# Finite GOP on NVENC encoders only (Pascal: H.264/HEVC). -1 is infinite and
+# 0 leaves it to the preset: both can starve a late viewer of keyframes.
+text, count = re.subn(r"(nvh26[45]enc[^\n]*?\bgop-size=)(?:-1|0)\b", rf"\g<1>{gop}", text)
+
+parsed = tomllib.loads(text)  # refuse to write an invalid config
+new_sink = parsed["gstreamer"]["video"]["default_sink"]
+assert "omarchy_live_tee" in new_sink and "rtpmoonlightpay_video" in new_sink, "sink risultante inatteso"
+
+overrides = [a.get("title", "?") for a in parsed.get("apps", []) if "sink" in a.get("video", {})]
+if overrides:
+    print("ATTENZIONE: queste app sovrascrivono il sink video e non avranno il tap:", ", ".join(overrides))
+
+open(path, "w", encoding="utf-8").write(text)
+print(f"tap installato; GOP finito su {count} encoder NVENC")
+PY
+}
+
+case "$action" in
+  status)
+    if [[ -f "$config" ]] && grep -q "omarchy_live_tee" "$config"; then note "tap installato in $config"; else note "tap NON installato ($config)"; fi
+    ls /tmp/sockets/omarchy-live-* 2>/dev/null | sed 's/^/    socket attivo: /' || true
+    ;;
+  apply)
+    (( EUID == 0 )) || die 'eseguire come root'
+    check_prereqs
+    backup="$config.omarchy-bak-$(date +%Y%m%d-%H%M%S)"
+    cp -p "$config" "$backup"
+    note "backup: $backup"
+    patch_config
+    if (( restart )); then
+      "$docker_bin" restart "$container" >/dev/null
+      note "Wolf riavviato: il tap è attivo sulle nuove sessioni"
+    else
+      note "riavvia Wolf quando nessuno gioca: $docker_bin restart $container"
+    fi
+    ;;
+  rollback)
+    (( EUID == 0 )) || die 'eseguire come root'
+    latest="$(ls -1t "$config".omarchy-bak-* 2>/dev/null | head -n1 || true)"
+    [[ -n "$latest" ]] || die 'nessun backup trovato'
+    cp -p "$latest" "$config"
+    note "ripristinato $latest"
+    if (( restart )); then "$docker_bin" restart "$container" >/dev/null; note "Wolf riavviato"; fi
+    ;;
+  *) usage >&2; exit 2 ;;
+esac

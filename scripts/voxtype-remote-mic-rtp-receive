@@ -18,6 +18,7 @@ export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNT
 command -v ffmpeg >/dev/null || { echo 'ffmpeg non disponibile' >&2; exit 1; }
 command -v pactl >/dev/null || { echo 'pactl non disponibile' >&2; exit 1; }
 command -v pw-cat >/dev/null || { echo 'pw-cat non disponibile' >&2; exit 1; }
+command -v python3 >/dev/null || { echo 'python3 non disponibile' >&2; exit 1; }
 
 if ! pactl list short sinks | awk '{print $2}' | grep -Fxq "$SINK_NAME"; then
   pactl load-module module-null-sink \
@@ -42,11 +43,42 @@ m=audio $port RTP/AVP 111
 a=rtpmap:111 opus/48000/2
 EOF
 
-# A bounded UDP FIFO and no RTP reordering prevent delayed packets from being
-# transcribed later. Small fixed Opus frames keep bandwidth and latency low.
-ffmpeg -nostdin -hide_banner -loglevel warning \
-  -protocol_whitelist file,udp,rtp -fflags nobuffer -flags low_delay \
-  -analyzeduration 0 -probesize 32 -max_delay 0 \
-  -i "$sdp" -ac 1 -ar 16000 -f s16le - | \
-  pw-cat --playback --raw --format s16 --rate 16000 --channels 1 \
-    --target "$SINK_NAME" -
+wait_for_rtp_packet() {
+  # Wait for at least one UDP packet on the specified port without consuming CPU.
+  # This prevents FFmpeg from repeatedly timing out and restarting when idle.
+  python3 - "$port" <<'PY_EOF'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('0.0.0.0', port))
+    s.recvfrom(2048)
+except Exception:
+    pass
+finally:
+    s.close()
+PY_EOF
+}
+
+# Main loop: wait for RTP packet on-demand, then stream via FFmpeg.
+# When the client stops streaming, FFmpeg demuxer times out (20s) and exits.
+# We then loop back to silent socket waiting with 0% CPU instead of error-looping.
+while true; do
+  wait_for_rtp_packet
+
+  # Small pause to allow socket cleanup
+  sleep 0.1
+
+  # A bounded UDP FIFO and no RTP reordering prevent delayed packets from being
+  # transcribed later. Small fixed Opus frames keep bandwidth and latency low.
+  ffmpeg -nostdin -hide_banner -loglevel warning \
+    -protocol_whitelist file,udp,rtp -fflags nobuffer -flags low_delay \
+    -analyzeduration 0 -probesize 32 -max_delay 0 \
+    -i "$sdp" -ac 1 -ar 16000 -f s16le - 2>/dev/null | \
+    pw-cat --playback --raw --format s16 --rate 16000 --channels 1 \
+      --target "$SINK_NAME" - 2>/dev/null || true
+
+  # Cooldown before waiting again
+  sleep 1
+done

@@ -1,0 +1,15 @@
+services:
+  omarchy-broker:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    container_name: omarchy-session-broker
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/lib/omarchy:/var/lib/omarchy
+      - /mnt/nas-recordings:/mnt/nas-recordings:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OMARCHY_PORT=47995

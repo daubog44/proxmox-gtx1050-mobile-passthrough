@@ -1,0 +1,23 @@
+{
+  "version": "0.4.0",
+  "release_date": "2026-09-22",
+  "notes": "• Sicurezza: rimossa la password admin predefinita; al primo avvio si imposta la propria (PBKDF2-SHA256), i vecchi record vengono aggiornati al login\n• Registrazioni: nuova sezione con player e download (avanzamento, annulla, Mostra nel Finder)\n• Visualizza live in H.265 via WebRTC, avviata solo su richiesta e chiusa alla chiusura della finestra\n• Sandbox ospite Wolf: profilo per utente creato in automatico, lobby multi-utente con takeover admin, rete ospiti isolata (solo Internet)\n• Pairing per ruolo: gli ospiti vanno solo su Wolf, l'admin su Sunshine\n• Navigazione ridisegnata",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.4.0/omarchy-control-0.4.0-darwin-aarch64.dmg",
+      "signature": ""
+    },
+    "darwin-x86_64": {
+      "url": "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.4.0/omarchy-control-0.4.0-darwin-x64.dmg",
+      "signature": ""
+    },
+    "linux-x86_64": {
+      "url": "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.4.0/omarchy-control-0.4.0-linux-x86_64.rpm",
+      "signature": ""
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/omarchy-control-v0.4.0/omarchy-control-0.4.0-windows-x64-setup.exe",
+      "signature": ""
+    }
+  }
+}

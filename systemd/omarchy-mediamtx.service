@@ -1,0 +1,17 @@
+[Unit]
+Description=Omarchy live video server (MediaMTX: WebRTC + RTSP, on-demand GPU capture)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root: the on-demand publisher reads Wolf's tap sockets (created by the Wolf
+# container) and drops to the desktop user for the Hyprland/portal capture.
+Environment=OMARCHY_DESKTOP_USER=daubog44
+Environment=WAYLAND_DISPLAY=wayland-1
+ExecStart=/usr/bin/mediamtx /etc/omarchy/mediamtx.yml
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

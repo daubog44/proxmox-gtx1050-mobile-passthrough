@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# MediaMTX runOnDemand publisher for path live/<session_id>. Pushes one H.265
+# stream to rtsp://127.0.0.1:$RTSP_PORT/$MTX_PATH; every consumer (WebRTC
+# viewers, fMP4 fallback viewers, NAS recordings) reads that single stream.
+#
+# Wolf sessions (live/wolf-<id>): the game renders inside Wolf's container
+# compositor, invisible to the host. omarchy-wolf-live-tap adds a leaky tee to
+# Wolf's own GStreamer pipeline that copies the already NVENC-encoded stream
+# (MPEG-TS) into a shmsink socket; we only read it. No extra encode when the
+# guest streams H.265; an H.264 guest is converted to H.265 on NVENC so live
+# view and recordings are always H.265.
+#
+# Sunshine sessions: capture the host Hyprland output as the desktop user.
+#   Preferred: gpu-screen-recorder via the ScreenCast portal, frames stay on the
+#   GPU end to end (PipeWire dmabuf -> OpenGL shader RGB->YUV -> CUDA interop
+#   -> NVENC). On Pascal / NVIDIA 580xx this needs the gsr build from
+#   omarchy-build-gsr-legacy-nvenc (distro gsr requires NVENC API 13.1).
+#   Measured on the GTX 1050 at 2880x1800: 25% CPU.
+#   Fallback: wf-recorder (wlr-screencopy). Frames go to NVENC as BGRx and
+#   NVENC does RGB->YUV in hardware: 46% CPU (207% with a CPU yuv420p convert).
+#   HEVC, 30 FPS constant, CBR, 1 s keyframe interval, no B-frames.
+set -uo pipefail
+
+: "${MTX_PATH:?MTX_PATH non impostato (va eseguito da MediaMTX)}"
+: "${RTSP_PORT:=8554}"
+session_id="${MTX_PATH#live/}"
+
+desktop_user="${OMARCHY_DESKTOP_USER:-$(id -un)}"
+desktop_uid="$(id -u "$desktop_user")"
+desktop_runtime="/run/user/$desktop_uid"
+[[ -d "$desktop_runtime" ]] || desktop_runtime="${XDG_RUNTIME_DIR:-/tmp}"
+bitrate_kbps="${OMARCHY_CAPTURE_BITRATE_KBPS:-8000}"
+wolf_tap_dir="${OMARCHY_WOLF_TAP_DIR:-/tmp/sockets}"
+output="${OMARCHY_CAPTURE_OUTPUT:-}"
+if [[ -z "$output" && -r /etc/omarchy/capture-output ]]; then
+  output="$(tr -d '[:space:]' < /etc/omarchy/capture-output)"
+fi
+output="${output:-omarchy-gtx}"
+
+ffmpeg_bin=/opt/ffmpeg-nvenc/usr/bin/ffmpeg
+if [[ -x "$ffmpeg_bin" ]]; then
+  export LD_LIBRARY_PATH="/opt/ffmpeg-nvenc/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+  ffmpeg_bin="$(command -v ffmpeg)" || { echo 'ffmpeg non installato' >&2; exit 1; }
+fi
+
+# What actually runs (capture backend, copy vs transcode) is published for the
+# control plane so fallbacks are visible: <state dir>/<session_id>.json.
+state_dir="${OMARCHY_LIVE_STATE_DIR:-/run/omarchy-live}"
+mkdir -p "$state_dir" 2>/dev/null || true
+write_state() {
+  printf '{"capture":"%s","encode":"%s","fallback":%s,"since":%s}\n' "$1" "$2" "$3" "$(date +%s)" \
+    > "$state_dir/$session_id.json" 2>/dev/null || true
+}
+
+# MediaMTX stops the publisher with SIGINT/SIGTERM when the last reader leaves.
+# Reset the trap first: kill 0 also signals this shell, and re-entering the
+# handler would flood ffmpeg with signals ("Received > 3 system signals").
+trap 'trap - INT TERM; kill -INT 0 2>/dev/null; wait; exit 0' INT TERM
+
+# Copy (never re-encode) MPEG-TS from stdin to MediaMTX. ffmpeg drops leading
+# non-keyframes, so readers always start on a clean IDR.
+push_rtsp() {
+  "$ffmpeg_bin" -hide_banner -loglevel error \
+    -fflags nobuffer -probesize 65536 -analyzeduration 0 \
+    -f mpegts -i pipe:0 -map 0:v:0 -c copy \
+    -f rtsp -rtsp_transport tcp "rtsp://127.0.0.1:${RTSP_PORT}/${MTX_PATH}"
+}
+
+# H.264 in (a Wolf guest whose Moonlight asked for H.264) -> H.265 out, on
+# NVENC. Only runs while someone watches or records that session.
+push_rtsp_as_hevc() {
+  "$ffmpeg_bin" -hide_banner -loglevel error \
+    -fflags nobuffer -probesize 1000000 -analyzeduration 0 -hwaccel auto \
+    -f mpegts -i pipe:0 -map 0:v:0 \
+    -c:v hevc_nvenc -preset p1 -tune ull -zerolatency 1 -rc cbr -b:v "${bitrate_kbps}k" \
+    -g 60 -bf 0 -profile:v main -pix_fmt yuv420p \
+    -f rtsp -rtsp_transport tcp "rtsp://127.0.0.1:${RTSP_PORT}/${MTX_PATH}"
+}
+
+# Run a capture command inside the desktop user's Wayland/D-Bus session.
+as_desktop() {
+  local env_args=(
+    "XDG_RUNTIME_DIR=$desktop_runtime"
+    "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1}"
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=$desktop_runtime/bus"
+    "HOME=$(getent passwd "$desktop_user" | cut -d: -f6 || echo "$HOME")"
+    "PATH=$PATH"
+    "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
+  )
+  if [[ "$(id -u)" == 0 && "$desktop_uid" != 0 ]]; then
+    runuser -u "$desktop_user" -- env "${env_args[@]}" "$@"
+  else
+    env "${env_args[@]}" "$@"
+  fi
+}
+
+desktop_home="$(getent passwd "$desktop_user" | cut -d: -f6 || echo "$HOME")"
+# Prefer the gsr built against the legacy-NVENC FFmpeg (Pascal), then distro.
+gsr_bin="${OMARCHY_GSR_BIN:-}"
+for candidate in /usr/local/lib/omarchy/gsr-legacy-nvenc/bin/gpu-screen-recorder \
+                 "$desktop_home/.local/opt/gsr-legacy-nvenc/bin/gpu-screen-recorder" \
+                 "$(command -v gpu-screen-recorder || true)"; do
+  [[ -n "$gsr_bin" ]] && break
+  [[ -n "$candidate" && -x "$candidate" ]] && gsr_bin="$candidate"
+done
+
+ensure_wireplumber() {
+  # Watchdog: restart WirePlumber if it lost connection to PipeWire or crashed
+  if ! as_desktop wpctl status >/dev/null 2>&1; then
+    echo "WirePlumber non risponde (PipeWire core assente): riavvio del servizio utente..." >&2
+    as_desktop systemctl --user restart wireplumber.service 2>/dev/null || true
+    sleep 1
+  fi
+}
+
+capture_res="${OMARCHY_CAPTURE_RESOLUTION:-}"
+if [[ -z "$capture_res" && -r /etc/omarchy/capture-resolution ]]; then
+  capture_res="$(tr -d '[:space:]' < /etc/omarchy/capture-resolution)"
+fi
+
+capture_gsr() {
+  ensure_wireplumber
+  local state_dir="$desktop_home/.local/state/omarchy"
+  as_desktop mkdir -p "$state_dir"
+  local extra_args=()
+  if [[ -n "$capture_res" ]]; then
+    extra_args+=(-s "$capture_res")
+  fi
+  as_desktop "$gsr_bin" -w portal \
+    -restore-portal-session yes \
+    -portal-session-token-filepath "$state_dir/gsr-portal-token" \
+    "${extra_args[@]}" \
+    -k hevc -f 30 -fm cfr -bm cbr -q "$bitrate_kbps" -keyint 1 \
+    -cursor yes -c mpegts
+}
+
+capture_wf() {
+  ensure_wireplumber
+  as_desktop wf-recorder -o "$output" -c hevc_nvenc -r 30 -x bgr0 \
+    -p preset=p1 -p tune=ull -p zerolatency=1 -p rc=cbr -p "b=${bitrate_kbps}k" \
+    -p g=30 -p bf=0 -p profile=main -m mpegts -y -f /dev/stdout
+}
+
+if [[ "$session_id" == wolf-* ]]; then
+  socket_path="$wolf_tap_dir/omarchy-live-${session_id#wolf-}"
+  [[ -S "$socket_path" ]] || { echo "tap Wolf assente: $socket_path" >&2; exit 1; }
+  read_tap() { gst-launch-1.0 -q shmsrc socket-path="$socket_path" is-live=true ! fdsink fd=1 sync=false; }
+  # The codec is whatever the guest's Moonlight negotiated: probe it once.
+  probe="$(mktemp)"
+  timeout 5 gst-launch-1.0 -q shmsrc socket-path="$socket_path" is-live=true num-buffers=300 \
+    ! fdsink fd=1 sync=false > "$probe" 2>/dev/null || true
+  ffprobe_bin="${ffmpeg_bin%ffmpeg}ffprobe"
+  [[ -x "$ffprobe_bin" ]] || ffprobe_bin="$(command -v ffprobe || echo ffprobe)"
+  codec="$("$ffprobe_bin" -v error -select_streams v:0 -show_entries stream=codec_name \
+    -of csv=p=0 -f mpegts "$probe" 2>/dev/null || true)"
+  rm -f "$probe"
+  if [[ "$codec" == hevc ]]; then
+    write_state wolf-tap copy false
+    read_tap | push_rtsp &
+  else
+    echo "sessione Wolf in ${codec:-codec sconosciuto}: converto in H.265 con NVENC" >&2
+    write_state wolf-tap "transcode ${codec:-?}->hevc" true
+    read_tap | push_rtsp_as_hevc &
+  fi
+  wait $!
+  exit $?
+fi
+
+# WirePlumber can lose its PipeWire core and keep running without linking any
+# stream ("assertion 'core != NULL' failed"): every portal capture then stalls
+# at format negotiation (seen for days on this host). Heal it before capturing.
+# Costs a sub-second audio blip for a running stream; OMARCHY_WIREPLUMBER_AUTOHEAL=0 disables.
+heal_wireplumber() {
+  [[ "${OMARCHY_WIREPLUMBER_AUTOHEAL:-1}" == 1 ]] || return 0
+  local broken
+  broken="$(as_desktop journalctl --user -u wireplumber --since '-15 min' --no-pager -q 2>/dev/null | grep -c "core != NULL" || true)"
+  if (( broken > 0 )); then
+    echo "WirePlumber bloccato ($broken errori core != NULL): lo riavvio" >&2
+    as_desktop systemctl --user restart wireplumber.service && sleep 2
+  fi
+}
+
+# A gsr failure is remembered for 10 minutes only: once the portal/WirePlumber
+# recovers the next viewer gets the full-GPU path again.
+backend_flag="$desktop_runtime/omarchy-capture-backend"
+backend="${OMARCHY_CAPTURE_BACKEND:-}"
+[[ -n "$backend" ]] || backend="$(head -n1 /etc/omarchy/capture-backend 2>/dev/null || true)"
+if [[ -z "$backend" && -f "$backend_flag" ]] && (( $(date +%s) - $(stat -c %Y "$backend_flag" 2>/dev/null || echo 0) < 600 )); then
+  backend=wf-recorder
+fi
+if [[ "$backend" != wf-recorder && -n "$gsr_bin" ]]; then
+  heal_wireplumber
+  started=$SECONDS
+  write_state gpu-screen-recorder copy false
+  capture_gsr | push_rtsp &
+  wait $!
+  # gsr gives up after its 5 s PipeWire negotiation timeout: anything that
+  # dies within 15 s never streamed. Remember it for this boot and fall back.
+  if (( SECONDS - started >= 15 )); then
+    exit 0
+  fi
+  echo 'gpu-screen-recorder non disponibile (portale/WirePlumber/NVENC), passo a wf-recorder per 10 minuti' >&2
+  echo wf-recorder > "$backend_flag" 2>/dev/null || true
+fi
+
+write_state wf-recorder copy true
+capture_wf | push_rtsp &
+wait $!

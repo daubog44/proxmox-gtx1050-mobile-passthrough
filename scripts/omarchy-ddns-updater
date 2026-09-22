@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""
+omarchy-ddns-updater: Background Dynamic DNS Client for Omarchy Nodes
+Mantiene aggiornato l'indirizzo IP pubblico su DuckDNS (o altri provider DDNS compatibili)
+per consentire l'accesso 1-Click tramite Moonlight da qualsiasi rete senza VPN.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+DEFAULT_CONFIG_PATH = "/etc/omarchy/ddns.conf"
+DEFAULT_STATUS_PATH = "/etc/omarchy/ddns-status.json"
+
+
+def load_config(config_path: str = DEFAULT_CONFIG_PATH) -> dict:
+    config = {
+        "enabled": True,
+        "provider": "duckdns",
+        "domain": "cloudgamingadrian",
+        "token": "",
+        "interval_seconds": 300,
+    }
+
+    p = Path(config_path)
+    if not p.exists():
+        return config
+
+    try:
+        content = p.read_text(encoding="utf-8")
+        # Try JSON first
+        if content.strip().startswith("{"):
+            config.update(json.loads(content))
+            return config
+
+        # Key-Value format fallback
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+                k = k.strip().lower()
+                v = v.strip().strip('"').strip("'")
+                if k == "enabled":
+                    config["enabled"] = v.lower() in ("true", "1", "yes")
+                elif k == "domain":
+                    config["domain"] = v
+                elif k == "token":
+                    config["token"] = v
+                elif k == "provider":
+                    config["provider"] = v
+                elif k in ("interval", "interval_seconds"):
+                    config["interval_seconds"] = int(v)
+    except Exception as e:
+        print(f"Errore lettura configurazione {config_path}: {e}", file=sys.stderr)
+
+    return config
+
+
+def save_config(config: dict, config_path: str = DEFAULT_CONFIG_PATH) -> bool:
+    try:
+        p = Path(config_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        content = (
+            f"# Omarchy Dynamic DNS Configuration\n"
+            f"ENABLED={str(config.get('enabled', True)).lower()}\n"
+            f"PROVIDER={config.get('provider', 'duckdns')}\n"
+            f"DOMAIN={config.get('domain', '')}\n"
+            f"TOKEN={config.get('token', '')}\n"
+            f"INTERVAL_SECONDS={config.get('interval_seconds', 300)}\n"
+        )
+        p.write_text(content, encoding="utf-8")
+        try:
+            os.chmod(p, 0o600)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        print(f"Errore salvataggio {config_path}: {e}", file=sys.stderr)
+        return False
+
+
+def get_public_ip() -> str:
+    endpoints = [
+        "https://api.ipify.org",
+        "https://icanhazip.com",
+        "https://ifconfig.me/ip",
+    ]
+    for url in endpoints:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "omarchy-ddns/1.0"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                ip = resp.read().decode("utf-8").strip()
+                if ip:
+                    return ip
+        except Exception:
+            continue
+    return ""
+
+
+def update_duckdns(domain: str, token: str, ip: str = "") -> dict:
+    clean_domain = domain.replace(".duckdns.org", "").strip()
+    clean_token = token.strip()
+
+    if not clean_domain or not clean_token:
+        return {"status": "error", "message": "Dominio o token DuckDNS mancante"}
+
+    params = {"domains": clean_domain, "token": clean_token}
+    if ip:
+        params["ip"] = ip
+    else:
+        params["ip"] = ""
+
+    url = f"https://www.duckdns.org/update?{urllib.parse.urlencode(params)}"
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "omarchy-ddns/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8").strip()
+
+        if body == "OK":
+            resolved_ip = ip or get_public_ip()
+            return {
+                "status": "ok",
+                "message": f"DuckDNS aggiornato con successo: {clean_domain}.duckdns.org -> {resolved_ip}",
+                "domain": f"{clean_domain}.duckdns.org",
+                "ip": resolved_ip,
+                "timestamp": int(time.time()),
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"DuckDNS ha risposto con errore: {body}",
+                "domain": f"{clean_domain}.duckdns.org",
+                "timestamp": int(time.time()),
+            }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Eccezione connessione DuckDNS: {e}",
+            "domain": f"{clean_domain}.duckdns.org",
+            "timestamp": int(time.time()),
+        }
+
+
+def save_status(status_info: dict, status_path: str = DEFAULT_STATUS_PATH):
+    try:
+        p = Path(status_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(status_info, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def run_once(config_path: str = DEFAULT_CONFIG_PATH) -> dict:
+    config = load_config(config_path)
+    if not config.get("enabled", True):
+        return {"status": "disabled", "message": "DDNS disabilitato"}
+
+    domain = config.get("domain", "")
+    token = config.get("token", "")
+
+    result = update_duckdns(domain, token)
+    save_status(result)
+    return result
+
+
+def run_daemon(config_path: str = DEFAULT_CONFIG_PATH):
+    print("Avvio demone omarchy-ddns-updater...")
+    last_ip = ""
+
+    while True:
+        config = load_config(config_path)
+        if config.get("enabled", True):
+            domain = config.get("domain", "")
+            token = config.get("token", "")
+            current_ip = get_public_ip()
+
+            # Update if IP changed or first run
+            if current_ip != last_ip or not last_ip:
+                res = update_duckdns(domain, token, current_ip)
+                save_status(res)
+                if res["status"] == "ok":
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {res['message']}")
+                    last_ip = current_ip
+                else:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Errore: {res['message']}", file=sys.stderr)
+            else:
+                # Keep-alive update
+                res = update_duckdns(domain, token, current_ip)
+                save_status(res)
+
+        interval = int(config.get("interval_seconds", 300))
+        time.sleep(max(60, interval))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Omarchy Dynamic DNS Updater")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="Percorso file configurazione")
+    parser.add_argument("--once", action="store_true", help="Esegue un solo aggiornamento e termina")
+    parser.add_argument("--daemon", action="store_true", help="Esegue in loop continuo in background")
+    parser.add_argument("--status", action="store_true", help="Mostra l'ultimo stato registrato")
+    parser.add_argument("--set-domain", help="Imposta e salva il sottodominio")
+    parser.add_argument("--set-token", help="Imposta e salva il token DuckDNS")
+
+    args = parser.parse_args()
+
+    if args.set_domain or args.set_token:
+        config = load_config(args.config)
+        if args.set_domain:
+            config["domain"] = args.set_domain
+        if args.set_token:
+            config["token"] = args.set_token
+        config["enabled"] = True
+        save_config(config, args.config)
+        print(f"Configurazione salvata in {args.config}")
+        res = run_once(args.config)
+        print(json.dumps(res, indent=2))
+        return
+
+    if args.status:
+        p = Path(DEFAULT_STATUS_PATH)
+        if p.exists():
+            print(p.read_text(encoding="utf-8"))
+        else:
+            print(json.dumps({"status": "unknown", "message": "Nessun aggiornamento registrato"}))
+        return
+
+    if args.once:
+        res = run_once(args.config)
+        print(json.dumps(res, indent=2))
+        sys.exit(0 if res["status"] == "ok" else 1)
+
+    if args.daemon:
+        run_daemon(args.config)
+        return
+
+    # Default: run once
+    res = run_once(args.config)
+    print(json.dumps(res, indent=2))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Wolf UI with multi-user lobbies by default.
+#
+#   omarchy-wolf-ui-coop <build|apply|status>
+#
+# Guests launch games from Wolf UI, and Wolf UI runs every game as a Wolf
+# lobby. Its "Start" button creates a *single-user* lobby (MultiUser = false,
+# src/Scenes/Main/Body/Apps/App.cs, OnStartPressed); only "Coop" creates a
+# multi-user one. Wolf refuses to join a single-user lobby ("Lobby is full"),
+# so the admin could never take over a normal session from Omarchy Control.
+#
+# build: clone Wolf UI at a pinned commit, flip that one flag (the build fails
+#        if the code no longer matches) and build omarchy/wolf-ui:coop with the
+#        upstream Dockerfile (downloads Godot/.NET from their official sources).
+# apply: point the "Wolf UI" app of Wolf's Moonlight profile at that image in
+#        config.toml (Wolf stopped for the edit, backup kept) and disable Wolf
+#        UI's self-update for it. Wolf only pulls an image when it is missing
+#        locally, so the local tag is used as is.
+set -euo pipefail
+
+readonly WOLF_UI_REPO="${WOLF_UI_REPO:-https://github.com/games-on-whales/wolf-ui}"
+readonly WOLF_UI_REF="${WOLF_UI_REF:-60908b949a601b092d1f1096809d7c7ff1c63e40}"
+readonly IMAGE="${OMARCHY_WOLF_UI_IMAGE:-omarchy/wolf-ui:coop}"
+readonly SRC="${OMARCHY_WOLF_UI_SRC:-/var/cache/omarchy/wolf-ui}"
+readonly WOLF_CONFIG="${WOLF_CONFIG:-/etc/wolf/cfg/config.toml}"
+readonly WOLF_CONTAINER="${WOLF_CONTAINER:-wolf}"
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+
+build() {
+  command -v docker >/dev/null || die 'docker non installato'
+  command -v git >/dev/null || die 'git non installato'
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$SRC"
+  if [[ ! -d "$SRC/.git" ]]; then
+    install -d -m 0755 "$(dirname "$SRC")"
+    git clone --quiet "$WOLF_UI_REPO" "$SRC"
+  fi
+  git -C "$SRC" fetch --quiet origin
+  git -C "$SRC" checkout --quiet --force "$WOLF_UI_REF"
+  python3 - "$SRC/src/Scenes/Main/Body/Apps/App.cs" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.find("private async void OnStartPressed()")
+end = text.find("private async void OnCoopPressed()")
+if start < 0 or end < start:
+    sys.exit("OnStartPressed/OnCoopPressed non trovati: Wolf UI è cambiata, aggiorna la patch")
+body = text[start:end]
+if body.count("MultiUser = false,") != 1:
+    sys.exit("MultiUser = false non trovato una sola volta in OnStartPressed: Wolf UI è cambiata")
+body = body.replace("MultiUser = false,", "MultiUser = true, // omarchy: lobbies always joinable for admin takeover")
+open(path, "w", encoding="utf-8").write(text[:start] + body + text[end:])
+PY
+  note "costruisco $IMAGE (Wolf UI ${WOLF_UI_REF:0:12}, lobby multi-utente di default)"
+  local log=/var/log/omarchy-wolf-ui-build.log rc=0
+  docker build --progress=plain -t "$IMAGE" --label "omarchy.wolf-ui.ref=$WOLF_UI_REF" "$SRC" >"$log" 2>&1 || rc=$?
+  git -C "$SRC" checkout --quiet -- .
+  if (( rc != 0 )); then
+    tail -25 "$log" >&2
+    die "build di $IMAGE fallita (log completo: $log)"
+  fi
+  note "immagine $IMAGE pronta"
+}
+
+# Wolf's API hides the Moonlight profile (GET /api/v1/profiles filters out
+# moonlight-profile-id), so it cannot be edited there: change config.toml with
+# Wolf stopped (Wolf rewrites the file from memory on every profile change).
+apply_image() {
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || die "immagine $IMAGE assente: esegui prima 'build'"
+  [[ -f "$WOLF_CONFIG" ]] || die "config di Wolf non trovata ($WOLF_CONFIG)"
+  if python3 - "$WOLF_CONFIG" "$IMAGE" check <<'PY2'
+import sys, tomllib
+path, image = sys.argv[1], sys.argv[2]
+c = tomllib.load(open(path, "rb"))
+p = next((p for p in c.get("profiles", []) if p.get("id") == "moonlight-profile-id"), None)
+apps = [a for a in (p or {}).get("apps", []) if "wolf-ui" in str((a.get("runner") or {}).get("image", "")) or a.get("title") == "Wolf UI"]
+ok = apps and all(a["runner"].get("image") == image and "WOLF_UI_AUTOUPDATE=False" in a["runner"].get("env", []) for a in apps)
+sys.exit(0 if ok else 1)
+PY2
+  then
+    note "Wolf UI usa già $IMAGE"
+    return 0
+  fi
+  local running=0 backup
+  docker ps --format '{{.Names}}' | grep -qx "$WOLF_CONTAINER" && running=1
+  backup="$WOLF_CONFIG.omarchy-bak-$(date +%Y%m%d-%H%M%S)"
+  cp -p "$WOLF_CONFIG" "$backup"
+  (( running )) && docker stop "$WOLF_CONTAINER" >/dev/null
+  if ! python3 - "$WOLF_CONFIG" "$IMAGE" <<'PY2'
+import re, sys, tomllib
+path, image = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+# Only the [[profiles]] table of the Moonlight profile.
+blocks = re.split(r"(?m)^(?=\[\[profiles\]\]\s*$)", text)
+done = False
+for i, block in enumerate(blocks):
+    if not re.search(r"(?m)^id\s*=\s*['\"]moonlight-profile-id['\"]\s*$", block):
+        continue
+    apps = re.split(r"(?m)^(?=\s*\[\[profiles\.apps\]\]\s*$)", block)
+    for j, app in enumerate(apps):
+        m = re.search(r"(?m)^(\s*image\s*=\s*)['\"][^'\"]*wolf-ui[^'\"]*['\"]", app)
+        if not m:
+            continue
+        app = app[:m.start()] + f"{m.group(1)}'{image}'" + app[m.end():]
+        if "WOLF_UI_AUTOUPDATE=False" not in app:
+            app = re.sub(r"WOLF_UI_AUTOUPDATE=\w+", "WOLF_UI_AUTOUPDATE=False", app)
+        apps[j] = app
+        done = True
+    blocks[i] = "".join(apps)
+if not done:
+    sys.exit("app Wolf UI non trovata nel profilo moonlight-profile-id")
+new = "".join(blocks)
+tomllib.loads(new)  # never leave Wolf with an unparsable config
+open(path, "w", encoding="utf-8").write(new)
+PY2
+  then
+    cp -p "$backup" "$WOLF_CONFIG"
+    (( running )) && docker start "$WOLF_CONTAINER" >/dev/null
+    die "modifica di $WOLF_CONFIG fallita: ripristinato il backup"
+  fi
+  (( running )) && docker start "$WOLF_CONTAINER" >/dev/null
+  note "Wolf UI ora usa $IMAGE (lobby multi-utente di default); backup: $backup"
+}
+
+case "${1:-status}" in
+  build) (( EUID == 0 )) || die 'eseguire come root'; build ;;
+  apply) (( EUID == 0 )) || die 'eseguire come root'; apply_image ;;
+  status)
+    docker image inspect "$IMAGE" --format "immagine: {{.Id}} (ref {{index .Config.Labels \"omarchy.wolf-ui.ref\"}})" 2>/dev/null \
+      || echo "immagine $IMAGE assente"
+    if [[ -r "$WOLF_CONFIG" ]]; then
+      WOLF_CONFIG="$WOLF_CONFIG" python3 - <<'PY2'
+import tomllib
+c = tomllib.load(open(__import__("os").environ.get("WOLF_CONFIG", "/etc/wolf/cfg/config.toml"), "rb"))
+for p in c.get("profiles", []):
+    for a in p.get("apps", []):
+        img = str((a.get("runner") or {}).get("image", ""))
+        if "wolf-ui" in img:
+            print(f"profilo {p['id']}: Wolf UI usa {img}")
+PY2
+    fi
+    ;;
+  *) die 'azione: build, apply oppure status' ;;
+esac

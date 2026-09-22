@@ -1,0 +1,39 @@
+post_install() {
+    echo ":: Reloading systemd daemon..."
+    systemctl daemon-reload
+
+    echo ":: Configuring firewall if UFW is active..."
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        ufw allow 47995/tcp comment "Omarchy REST API Daemon" >/dev/null 2>&1 || true
+    fi
+
+    echo ""
+    echo "=========================================================================="
+    echo "  Omarchy Node Daemon installed successfully!"
+    echo "  To start and enable the daemon immediately, run:"
+    echo "    sudo systemctl enable --now omarchy-session-broker.service"
+    echo ""
+    echo "  To display the active Bearer Token for Omarchy Control Desktop App:"
+    echo "    sudo omarchy-session-broker token"
+    echo "=========================================================================="
+    echo ""
+}
+
+post_upgrade() {
+    echo ":: Restarting omarchy-session-broker service..."
+    systemctl daemon-reload
+    if systemctl is-active --quiet omarchy-session-broker.service; then
+        systemctl restart omarchy-session-broker.service
+    fi
+}
+
+pre_remove() {
+    if systemctl is-active --quiet omarchy-session-broker.service; then
+        systemctl stop omarchy-session-broker.service
+    fi
+    systemctl disable omarchy-session-broker.service >/dev/null 2>&1 || true
+}
+
+post_remove() {
+    systemctl daemon-reload
+}

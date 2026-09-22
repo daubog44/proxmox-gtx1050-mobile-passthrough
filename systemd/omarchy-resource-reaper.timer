@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Omarchy Resource Reaper periodically
+Documentation=https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

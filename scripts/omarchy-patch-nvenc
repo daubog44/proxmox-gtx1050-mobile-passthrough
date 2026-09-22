@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Removes the artificial NVENC concurrent encoding session limit on NVIDIA drivers
+# using the community keylase/nvidia-patch bytecode patcher.
+#
+#   omarchy-patch-nvenc [status|apply|rollback|check]
+set -euo pipefail
+
+readonly PATCH_CACHE_DIR="/opt/omarchy/nvidia-patch"
+readonly PATCH_SCRIPT="$PATCH_CACHE_DIR/patch.sh"
+readonly KEYLASE_URL="https://raw.githubusercontent.com/keylase/nvidia-patch/master/patch.sh"
+readonly HOOK_FILE="/etc/pacman.d/hooks/99-omarchy-nvidia-nvenc-patch.hook"
+readonly WOLF_VOL_LIB="/var/lib/docker/volumes/nvidia-driver-vol/_data/lib"
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+require_root() { (( EUID == 0 )) || die 'eseguire come root'; }
+
+fetch_patch_script() {
+  install -d -m 0755 "$PATCH_CACHE_DIR"
+  if [[ ! -s "$PATCH_SCRIPT" ]]; then
+    note "scarico patch.sh da keylase/nvidia-patch..."
+    curl -fsSL "$KEYLASE_URL" -o "$PATCH_SCRIPT" || die "download di patch.sh fallito"
+    chmod 0755 "$PATCH_SCRIPT"
+  fi
+}
+
+is_driver_patched() {
+  local driver_ver
+  driver_ver="$(cat /sys/module/nvidia/version 2>/dev/null || true)"
+  [[ -n "$driver_ver" ]] || return 1
+  local backup="/opt/nvidia/libnvidia-encode-backup/libnvidia-encode.so.$driver_ver"
+  local active="/usr/lib/libnvidia-encode.so.$driver_ver"
+  [[ -f "$backup" && -f "$active" ]] || return 1
+  local sha_bak sha_act
+  sha_bak="$(sha1sum "$backup" | awk '{print $1}')"
+  sha_act="$(sha1sum "$active" | awk '{print $1}')"
+  [[ "$sha_bak" != "$sha_act" ]]
+}
+
+write_pacman_hook() {
+  install -d -m 0755 "$(dirname "$HOOK_FILE")"
+  cat > "$HOOK_FILE" <<'EOF'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = nvidia-580xx-utils
+Target = nvidia-utils
+
+[Action]
+Description = Re-apply NVENC unlimited session patch
+When = PostTransaction
+Exec = /usr/local/bin/omarchy-patch-nvenc apply
+EOF
+  chmod 0644 "$HOOK_FILE"
+}
+
+apply_patch() {
+  require_root
+  fetch_patch_script
+  local driver_ver
+  driver_ver="$(cat /sys/module/nvidia/version 2>/dev/null || true)"
+  [[ -n "$driver_ver" ]] || die "modulo kernel nvidia non caricato"
+
+  note "verifico compatibilità driver $driver_ver con nvidia-patch..."
+  "$PATCH_SCRIPT" -c "$driver_ver" >/dev/null 2>&1 || die "driver $driver_ver non supportato da nvidia-patch"
+
+  note "applico patch NVENC su /usr/lib/libnvidia-encode.so.$driver_ver..."
+  "$PATCH_SCRIPT" -s
+
+  # Sync into Wolf container driver volume if present
+  if [[ -d "$WOLF_VOL_LIB" && -f "/usr/lib/libnvidia-encode.so.$driver_ver" ]]; then
+    note "sincronizzo libreria patchata nel volume Docker di Wolf..."
+    cp -p "/usr/lib/libnvidia-encode.so.$driver_ver" "$WOLF_VOL_LIB/libnvidia-encode.so.$driver_ver"
+    if command -v docker >/dev/null && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx wolf; then
+      note "riavvio container wolf per ricaricare la libreria..."
+      docker restart wolf >/dev/null || true
+    fi
+  fi
+
+  # Update session broker setting if still default 2
+  if command -v sqlite3 >/dev/null && [[ -f /var/lib/omarchy/sessions.db ]]; then
+    sqlite3 /var/lib/omarchy/sessions.db "UPDATE system_settings SET value = '4' WHERE key = 'max_concurrent_streams' AND value = '2';" 2>/dev/null || true
+  fi
+
+  write_pacman_hook
+  note "patch NVENC applicata con successo! Limite sessioni rimosso (max_concurrent_streams sbloccato a 4)."
+}
+
+rollback_patch() {
+  require_root
+  [[ -x "$PATCH_SCRIPT" ]] || die "patch.sh non trovato in $PATCH_CACHE_DIR"
+  local driver_ver
+  driver_ver="$(cat /sys/module/nvidia/version 2>/dev/null || true)"
+  note "ripristino libreria originale..."
+  "$PATCH_SCRIPT" -r -s || die "rollback fallito"
+
+  if [[ -d "$WOLF_VOL_LIB" && -f "/usr/lib/libnvidia-encode.so.$driver_ver" ]]; then
+    cp -p "/usr/lib/libnvidia-encode.so.$driver_ver" "$WOLF_VOL_LIB/libnvidia-encode.so.$driver_ver"
+    if command -v docker >/dev/null && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx wolf; then
+      docker restart wolf >/dev/null || true
+    fi
+  fi
+
+  rm -f "$HOOK_FILE"
+  note "rollback completato: ripristinato limite stock di 2 flussi NVENC."
+}
+
+status_patch() {
+  local driver_ver
+  driver_ver="$(cat /sys/module/nvidia/version 2>/dev/null || echo 'non caricato')"
+  printf "Driver NVIDIA: %s\n" "$driver_ver"
+  if is_driver_patched; then
+    printf "Stato NVENC:   PATCHATO (illimitato / max_concurrent_streams sbloccato)\n"
+    printf "Hook Pacman:   %s\n" "$([[ -f "$HOOK_FILE" ]] && echo 'attivo' || echo 'non presente')"
+    if [[ -d "$WOLF_VOL_LIB" ]]; then
+      printf "Volume Wolf:   %s\n" "$([[ -f "$WOLF_VOL_LIB/libnvidia-encode.so.$driver_ver" ]] && echo 'sincronizzato' || echo 'non trovato')"
+    fi
+  else
+    printf "Stato NVENC:   STOCK (limitato a 2 sessioni hardware)\n"
+  fi
+}
+
+action="${1:-status}"
+case "$action" in
+  apply)    apply_patch ;;
+  rollback) rollback_patch ;;
+  status)   status_patch ;;
+  check)    is_driver_patched ;;
+  *) die "uso: omarchy-patch-nvenc [status|apply|rollback|check]" ;;
+esac

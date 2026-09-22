@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# omarchy-resource-reaper: periodic maintenance and resource reclamation script.
+# Safely reclaims memory, CPU, disk and container resources without touching
+# the admin desktop, active gaming sessions, or core server services.
+#
+# Scope & Guardrails:
+# - Admin desktop is sacred: Hyprland, Sunshine, QuickShell, PipeWire, WirePlumber,
+#   user browsers, Steam, terminals in active use are NEVER touched.
+# - Reclaims:
+#   1. Hung or abandoned menu spin-loops (e.g. omarchy-menu-* > 10 min old).
+#   2. Orphaned terminal monitors on dead PTS (htop/nvtop > 1 hour old).
+#   3. Dead/dangling Docker containers and untagged images.
+#   4. Stale temporary files in /tmp (SDP files, preview buffers older than 1h).
+#   5. Bounded systemd journal logs (vacuums logs older than 7d or > 100M).
+#   6. Safe sync to ensure pending buffers are flushed.
+set -Eeuo pipefail
+
+DRY_RUN=false
+VERBOSE=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run|-n) DRY_RUN=true ;;
+    --verbose|-v) VERBOSE=true ;;
+    --help|-h)
+      echo "Uso: omarchy-resource-reaper [--dry-run] [--verbose]"
+      echo "Libera risorse parassite in modo sicuro senza toccare il desktop admin."
+      exit 0
+      ;;
+  esac
+done
+
+log() {
+  echo "[omarchy-reaper $(date +'%Y-%m-%d %H:%M:%S')] $*"
+}
+
+# --- 1. Reclaim hung menu spin-loops (> 10 minutes) ---
+# When menus are dismissed or quickshell restarts, bash wrappers can spin at 100Hz.
+prune_hung_menus() {
+  local pids=()
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local pid etimes comm args
+    read -r pid etimes comm args <<<"$line"
+    # Filter for omarchy-menu processes running for more than 600 seconds (10 minutes)
+    if [[ "$args" =~ omarchy-menu- ]] && (( etimes > 600 )); then
+      pids+=("$pid")
+    fi
+  done < <(ps -eo pid,etimes,comm,args --no-headers 2>/dev/null || true)
+
+  if (( ${#pids[@]} > 0 )); then
+    log "Trovati ${#pids[@]} menu orfani/appesi da >10 min: ${pids[*]}"
+    if [[ "$DRY_RUN" == false ]]; then
+      kill "${pids[@]}" 2>/dev/null || true
+      sleep 0.5
+      kill -9 "${pids[@]}" 2>/dev/null || true
+    fi
+  elif [[ "$VERBOSE" == true ]]; then
+    log "Nessun menu orfano da terminare."
+  fi
+}
+
+# --- 2. Reclaim orphaned monitor processes on closed terminals ---
+# Terminal monitors like htop or nvtop left running in background for > 1 hour.
+prune_orphaned_monitors() {
+  local pids=()
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local pid etimes comm tty
+    read -r pid etimes comm tty <<<"$line"
+    if [[ "$comm" =~ ^(htop|nvtop)$ ]] && (( etimes > 3600 )); then
+      # Check if controlling tty is gone or pts is detached
+      if [[ "$tty" == "?" || ! -e "/dev/$tty" ]]; then
+        pids+=("$pid")
+      fi
+    fi
+  done < <(ps -eo pid,etimes,comm,tty --no-headers 2>/dev/null || true)
+
+  if (( ${#pids[@]} > 0 )); then
+    log "Trovati ${#pids[@]} monitor terminale orfani su TTY disconnesse: ${pids[*]}"
+    if [[ "$DRY_RUN" == false ]]; then
+      kill "${pids[@]}" 2>/dev/null || true
+    fi
+  elif [[ "$VERBOSE" == true ]]; then
+    log "Nessun monitor terminale orfano trovato."
+  fi
+}
+
+# --- 3. Clean stale temp files in /tmp ---
+prune_temp_files() {
+  local stale_count=0
+  while IFS= read -r -d '' f; do
+    ((stale_count++))
+    if [[ "$DRY_RUN" == false ]]; then
+      rm -f "$f" 2>/dev/null || true
+    fi
+  done < <(find /tmp -maxdepth 1 -name "voxtype-rtp-*.sdp" -mmin +60 -print0 2>/dev/null || true)
+
+  # Clean stale preview snapshots older than 30 minutes
+  if [[ -d /tmp/omarchy-preview ]]; then
+    while IFS= read -r -d '' f; do
+      ((stale_count++))
+      if [[ "$DRY_RUN" == false ]]; then
+        rm -f "$f" 2>/dev/null || true
+      fi
+    done < <(find /tmp/omarchy-preview -type f -mmin +30 -print0 2>/dev/null || true)
+  fi
+
+  if (( stale_count > 0 )); then
+    log "Puliti $stale_count file temporanei obsoleti in /tmp"
+  elif [[ "$VERBOSE" == true ]]; then
+    log "File temporanei in /tmp in ordine."
+  fi
+}
+
+# --- 4. Prune dangling Docker containers & images ---
+prune_docker_resources() {
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    if [[ "$DRY_RUN" == false ]]; then
+      local freed_c freed_i
+      freed_c=$(docker container prune -f 2>/dev/null | grep -i "reclaimed space" || true)
+      freed_i=$(docker image prune -f 2>/dev/null | grep -i "reclaimed space" || true)
+      if [[ -n "$freed_c" || -n "$freed_i" ]]; then
+        log "Docker prune eseguito: ${freed_c:-} ${freed_i:-}"
+      fi
+    fi
+  fi
+}
+
+# --- 5. Vacuum systemd journal to prevent disk and RAM hogging ---
+prune_system_journal() {
+  if command -v journalctl >/dev/null 2>&1; then
+    if [[ "$DRY_RUN" == false ]]; then
+      journalctl --vacuum-size=100M --vacuum-time=7d >/dev/null 2>&1 || true
+    fi
+    if [[ "$VERBOSE" == true ]]; then
+      log "Systemd journal vacuum completato (max 100M, 7d retention)."
+    fi
+  fi
+}
+
+# --- 6. Sync filesystem buffers ---
+sync_filesystem() {
+  if [[ "$DRY_RUN" == false ]]; then
+    sync 2>/dev/null || true
+  fi
+}
+
+main() {
+  log "Avvio controllo e bonifica risorse (dry_run=$DRY_RUN)..."
+  prune_hung_menus
+  prune_orphaned_monitors
+  prune_temp_files
+  prune_docker_resources
+  prune_system_journal
+  sync_filesystem
+  log "Completato. Desktop admin e sessioni attive preservati al 100%."
+}
+
+main

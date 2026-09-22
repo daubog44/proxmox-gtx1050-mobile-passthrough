@@ -1,0 +1,51 @@
+# MediaMTX for Omarchy live view and recordings (installed to /etc/omarchy/mediamtx.yml).
+#
+# One on-demand HEVC encode per session path (live/<session_id>), started by
+# omarchy-capture-publish when the first reader connects and stopped 2 s after
+# the last one leaves. Readers: WebRTC (WHEP, proxied by the session broker),
+# RTSP for the fMP4 fallback and NAS recordings.
+#
+# Signalling, RTSP and API listen on loopback only: the broker authenticates
+# the control plane and forwards WHEP. Only WebRTC media (8189 UDP/TCP) is
+# exposed to the LAN/VPN.
+logLevel: warn
+
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: publish
+      - action: read
+      - action: api
+
+api: true
+apiAddress: 127.0.0.1:9997
+metrics: false
+pprof: false
+playback: false
+
+rtsp: true
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+rtmp: false
+hls: false
+srt: false
+
+webrtc: true
+webrtcAddress: 127.0.0.1:8889
+webrtcLocalUDPAddress: :8189
+# ICE-TCP candidate for networks that block UDP.
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: true
+webrtcAdditionalHosts: []
+webrtcICEServers2: []
+
+paths:
+  "~^live/[A-Za-z0-9_.-]+$":
+    runOnDemand: /usr/local/bin/omarchy-capture-publish
+    runOnDemandRestart: true
+    runOnDemandStartTimeout: 20s
+    # Release GPU/encoder 2 s after the last viewer or recorder leaves.
+    runOnDemandCloseAfter: 2s

@@ -4,6 +4,13 @@ Repository didattico e operativo per assegnare la GPU NVIDIA discreta di un port
 
 ![Prova finale: nvtop mostra glxgears al 99% della GTX 1050 e Xorg NVIDIA sul display :2](evidence/nvtop-glxgears-proof.png)
 
+## 🎮 Guide Rapide Omarchy Gaming Cloud
+
+- 📖 **[Guida Utente / Giocatori](docs/USER_GUIDE.md)**: Come collegarsi e giocare con **Moonlight** e **WireGuard On-Demand** (attivazione automatica invisibile, zero interruttori, split-tunneling).
+- 🛠️ **[Guida Amministratore](docs/ADMIN_GUIDE.md)**: Come creare utenti, generare profili WireGuard On-Demand con QR Code, montare lo storage NAS e gestire il cluster su **Omarchy Control**.
+
+---
+
 ## Prima dei comandi: dove sei e cosa stai guardando
 
 Questa guida usa sempre tre contesti. Leggerli evita l'errore piu comune: lanciare un comando della VM sul nodo Proxmox, o viceversa.
@@ -203,6 +210,17 @@ La GTX mobile di questa VM non ha un connettore HDMI/DP guest collegato. Non for
 
 Lo strumento guest idempotente e' [scripts/omarchy-gtx-primary](scripts/omarchy-gtx-primary): crea l'uscita prima di Sunshine, conserva i backup, installa le funzioni Bash `omarchy_stream_resolution` e `omarchy_stream_health` e offre verifica, controllo fallback e rollback. A ogni nuova apertura di un'app Sunshine, Moonlight comunica W×H×FPS e l'hook applica quella modalita' al solo output headless GTX; non crea due desktop distinti per due client contemporanei. Omarchy Control rileva invece i pixel fisici dei monitor del **client** e configura Moonlight su Fedora, Windows o macOS: **Full HD 60 FPS** a 20 Mbps e' il default del setup e il profilo consigliato per giocare con la GTX 1050; **4K 30 FPS** usa 40 Mbps per privilegiare la definizione dimezzando bitrate e frequenza rispetto al **4K 60 FPS** nativo da 80 Mbps, indicato per desktop e giochi leggeri. I profili abilitano V-Sync, frame pacing e bitrate automatico; codec e decoder restano automatici, HDR e YUV 4:4:4 spenti. Il tool Windows [moonlight-windows-settings.ps1](clients/moonlight-windows-settings.ps1) resta disponibile per regolazioni manuali. Per un altro PC Fedora, [omarchy-client-setup-fedora.sh](clients/omarchy-client-setup-fedora.sh) installa Moonlight Flatpak, KDE Connect e il watcher microfono senza IP o password nel codice. Non cambia VFIO, VBIOS, SSDT, kernel o Limine. La guida completa, inclusa la cronologia RDP -> Sunshine -> HEVC, la spiegazione della CPU residua (`GPU -> RAM -> GPU` nel build compatibile), clipboard, TV, la prova del fallimento del pacchetto Sunshine ufficiale e i comandi riproducibili e' in [Sunshine/Moonlight su Omarchy](docs/sunshine-moonlight-omarchy.md).
 
+Il progetto multiutente mantiene Sunshine per il desktop proprietario e usa
+[Wolf](https://github.com/games-on-whales/wolf) per le sessioni concorrenti:
+un profilo Wolf, un account Linux senza shell, una directory privata e un
+account Steam per persona. Il backoffice owner crea/ferma/archivia guest a
+caldo, mostra client e telemetria GPU e configura una soglia sostenuta; una
+guardia systemd ferma soltanto le lobby guest interessate. L'API Wolf rimane su
+socket Unix e la GUI invoca via SSH un [broker privilegiato a operazioni
+limitate](docs/omarchy-session-broker.md), non una shell root. Architettura,
+porte, preflight e limiti della GTX 1050 sono in [Omarchy
+multiutente](docs/omarchy-multi-user-gaming.md).
+
 ![Omarchy tiling: Sandustry sulla GTX, nvtop e btop nello stesso workspace](evidence/omarchy-tiling-sandustry-nvtop.png)
 
 Il tiling manager e' Hyprland: lo screenshot mostra Sandustry, `nvtop` e `btop`
@@ -234,6 +252,12 @@ da approvare. La sezione **Gaming** rileva notebook, monitor e TV collegati al
 client e scrive il profilo Moonlight senza perdere pairing o host salvati;
 chiude e riapre Moonlight per evitare che una vecchia configurazione in memoria
 sovrascriva i nuovi valori. Non serve clonare questa repository.
+
+La sezione **Sessioni** e' il backoffice proprietario: crea profili Steam o
+desktop isolati con PIN, arresta lobby, archivia utenti in modo recuperabile e
+legge GPU/encoder/temperatura/VRAM. **Installa backend** sincronizza broker,
+Wolf e watchdog tramite lo stesso canale SSH; i preflight bloccano lo stato
+parziale se mancano spazio, NVIDIA Container Toolkit o device di input.
 
 **Fedora x86_64:**
 
@@ -548,6 +572,7 @@ docs/attempts-and-outcomes.md     tentativi falliti, causa e correzione
 docs/rdp-wayland.md               diagnostica RDP: xrdp/X11 e Remote Login GNOME/Wayland
 docs/wayland-nvidia-kms.md        fix KMS, renderer Wayland, VSync, Xorg :2, APT e audio RDP
 docs/sunshine-moonlight-omarchy.md  desktop GTX headless, Moonlight 1920x1200/HEVC/NVENC, CPU residua e rollback su Omarchy
+docs/omarchy-multi-user-gaming.md   account Linux/Steam separati, sessione Big Picture, concorrenza e limiti GTX 1050
 docs/omarchy-proxmox-guest-setup.md configurazione PVE/guest Omarchy, file effettivi, verifica e limiti CUDA
 docs/centralized-setup-cli.md       CLI PVE/guest/client Windows e Fedora, microfono e configurazione senza IP nel codice
 docs/proxmox-host-acpi.md           diagnosi del rumore ACPI periodico del firmware HP sul nodo PVE

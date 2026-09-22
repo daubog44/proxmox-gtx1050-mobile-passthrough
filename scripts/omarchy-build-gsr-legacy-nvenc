@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Builds gpu-screen-recorder against the legacy-NVENC FFmpeg in /opt/ffmpeg-nvenc.
+#
+# Why: the GTX 1050 is Pascal and NVIDIA 580xx is the last driver branch for
+# it (NVENC API 13.0). Arch's FFmpeg (libavcodec 63) needs NVENC API 13.1, so
+# the distro gpu-screen-recorder refuses NVENC. Sunshine works because it ships
+# its own NVENC headers. /opt/ffmpeg-nvenc is an FFmpeg 9 built with 13.0
+# headers (verified to encode hevc_nvenc on this driver). gsr hard-codes the
+# required API from LIBAVCODEC_VERSION_MAJOR at compile time
+# (src/codec_query/nvenc.c), so we compile it against that FFmpeg and set the
+# requirement to the API that FFmpeg was really built with.
+#
+# ffmpeg_static=false: gsr's "auto" static FFmpeg would be a current release
+# needing NVENC API 13.1 again, which is exactly what Pascal cannot provide.
+#
+# Result: portal capture (PipeWire DMA-BUF) -> OpenGL shader RGB->YUV -> CUDA
+# interop -> NVENC, no CPU copy, installed to $PREFIX with an rpath to
+# /opt/ffmpeg-nvenc so nothing else on the system changes. DT_RPATH (not
+# RUNPATH) so libavformat's own deps (e.g. libbluray.so.3 shipped in /opt)
+# resolve there too.
+set -euo pipefail
+
+FFMPEG_ROOT="${FFMPEG_ROOT:-/opt/ffmpeg-nvenc/usr}"
+NVENC_API="${OMARCHY_NVENC_API:-13.0}"
+GSR_REPO="${GSR_REPO:-https://repo.dec05eba.com/gpu-screen-recorder}"
+HOME="${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6 || echo /root)}"
+if (( EUID == 0 )); then PREFIX="${PREFIX:-/usr/local/lib/omarchy/gsr-legacy-nvenc}"; else PREFIX="${PREFIX:-$HOME/.local/opt/gsr-legacy-nvenc}"; fi
+WORK="${WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-gsr-build}"
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+
+[[ -f "$FFMPEG_ROOT/lib/pkgconfig/libavcodec.pc" ]] || die "FFmpeg legacy NVENC non trovato in $FFMPEG_ROOT"
+[[ "$NVENC_API" =~ ^([0-9]+)\.([0-9]+)$ ]] || die "OMARCHY_NVENC_API non valida: $NVENC_API"
+api_major="${BASH_REMATCH[1]}"; api_minor="${BASH_REMATCH[2]}"
+for tool in git gcc ninja pkg-config python3; do command -v "$tool" >/dev/null || die "manca $tool"; done
+
+# Same version as the distro package unless GSR_REF says otherwise.
+ref="${GSR_REF:-$(pacman -Q gpu-screen-recorder 2>/dev/null | awk '{print $2}' | cut -d- -f1)}"
+[[ -n "$ref" ]] || die 'versione di gpu-screen-recorder sconosciuta: imposta GSR_REF'
+
+mkdir -p "$WORK"
+meson_bin="$(command -v meson || true)"
+[[ -n "$meson_bin" || ! -x "$WORK/venv/bin/meson" ]] || meson_bin="$WORK/venv/bin/meson"
+if [[ -z "$meson_bin" ]]; then
+  note 'meson assente: lo installo in un venv privato'
+  python3 -m venv "$WORK/venv"
+  "$WORK/venv/bin/pip" install --quiet meson
+  meson_bin="$WORK/venv/bin/meson"
+fi
+
+# gsr includes <vulkan/vulkan.h> for its codec query (header only, no link).
+extra_cflags=""
+if ! printf '#include <vulkan/vulkan.h>\n' | cc -E -x c - >/dev/null 2>&1; then
+  if (( EUID == 0 )) && command -v pacman >/dev/null; then
+    pacman -S --needed --noconfirm vulkan-headers >/dev/null
+  else
+    note 'header Vulkan assenti: uso Vulkan-Headers (Khronos) in una cartella privata'
+    [[ -d "$WORK/Vulkan-Headers/.git" ]] || git clone --quiet --depth 1 https://github.com/KhronosGroup/Vulkan-Headers "$WORK/Vulkan-Headers"
+    extra_cflags="-I$WORK/Vulkan-Headers/include"
+  fi
+fi
+
+src="$WORK/gpu-screen-recorder-$ref"
+if [[ ! -d "$src/.git" ]]; then
+  rm -rf "$src"
+  git clone --quiet --depth 1 --branch "$ref" "$GSR_REPO" "$src"
+fi
+
+nvenc_c="$src/src/codec_query/nvenc.c"
+grep -q 'OMARCHY_LEGACY_NVENC' "$nvenc_c" || python3 - "$nvenc_c" "$api_major" "$api_minor" <<'PY'
+import re, sys
+path, major, minor = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path).read()
+# Keep upstream logic, then override the result right after the #endif that
+# closes the FFMPEG_REQUIRED_NVENC_API_VERSION #if/#elif chain.
+first = text.find("#define FFMPEG_REQUIRED_NVENC_API_VERSION")
+end = text.find("#endif\n", first)
+if first < 0 or end < 0:
+    sys.exit("blocco FFMPEG_REQUIRED_NVENC_API_VERSION non trovato: versione gsr non supportata")
+anchor = re.compile(r"#endif\n").search(text, end)
+override = (
+    "/* OMARCHY_LEGACY_NVENC: built against an FFmpeg compiled with NVENC API "
+    f"{major}.{minor} headers (Pascal / NVIDIA 580xx). */\n"
+    "#undef FFMPEG_REQUIRED_NVENC_API_VERSION\n"
+    f"#define FFMPEG_REQUIRED_NVENC_API_VERSION NVENCAPI_PACKED_VERSION({major}, {minor})\n"
+)
+text = text[:anchor.end()] + override + text[anchor.end():]
+open(path, "w").write(text)
+PY
+
+build="$src/build"
+rm -rf "$build"
+PKG_CONFIG_PATH="$FFMPEG_ROOT/lib/pkgconfig" \
+CFLAGS="${CFLAGS:-} $extra_cflags" \
+LDFLAGS="-Wl,--disable-new-dtags,-rpath,$FFMPEG_ROOT/lib" \
+  "$meson_bin" setup "$build" "$src" --buildtype=release --prefix="$PREFIX" \
+    -Dffmpeg_static=false -Dsystemd=false -Dcapabilities=false -Dnvidia_suspend_fix=false \
+    -Dapp_audio=false -Dplugin_examples=false -Dportal=true > "$WORK/meson-setup.log" \
+  || { tail -30 "$WORK/meson-setup.log" >&2; die 'meson setup fallito'; }
+ninja -C "$build" > "$WORK/ninja.log" || { tail -30 "$WORK/ninja.log" >&2; die 'compilazione fallita'; }
+ninja -C "$build" install >/dev/null
+
+bin="$PREFIX/bin/gpu-screen-recorder"
+ldd "$bin" | grep -q "$FFMPEG_ROOT/lib/libavcodec" || die "il binario non usa $FFMPEG_ROOT (rpath)"
+note "gpu-screen-recorder $ref (NVENC API $NVENC_API) installato in $bin"

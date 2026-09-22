@@ -1,0 +1,12 @@
+[Unit]
+Description=Omarchy Resource Reaper (periodic cleanup of hung loops, temp files, and dangling containers)
+Documentation=https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omarchy-resource-reaper
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

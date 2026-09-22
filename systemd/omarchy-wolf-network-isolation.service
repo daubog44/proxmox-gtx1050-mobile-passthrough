@@ -1,0 +1,16 @@
+[Unit]
+Description=Omarchy Wolf guest network isolation (Internet only, no LAN/VM access)
+# Docker must be up to create the network; iptables rules are not persistent,
+# so they are re-applied at every boot and after every Docker restart.
+After=docker.service network-online.target ufw.service
+Requires=docker.service
+PartOf=docker.service
+Before=omarchy-session-broker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/omarchy-wolf-network-isolation apply
+
+[Install]
+WantedBy=multi-user.target docker.service

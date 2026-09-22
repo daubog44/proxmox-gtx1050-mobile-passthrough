@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Non-interactive share picker for xdg-desktop-portal-hyprland.
+#
+# The streamed output (omarchy-gtx) is a Hyprland *headless* output: it has no
+# DRM CRTC, so KMS capture cannot see it. gpu-screen-recorder captures it via
+# the ScreenCast portal (PipeWire dmabuf -> shader OpenGL -> NVENC via CUDA), which normally
+# pops up hyprland-share-picker. On this headless streaming host nobody can
+# click it, so we answer for the user: always the streamed output, and "r"
+# allows a restore token so later sessions skip the picker entirely.
+#
+# Output format parsed by xdph (src/shared/ScreencopyShared.cpp):
+#   [SELECTION]<flags>/screen:<output name>\n
+set -euo pipefail
+
+output="${OMARCHY_CAPTURE_OUTPUT:-}"
+if [[ -z "$output" && -r /etc/omarchy/capture-output ]]; then
+  output="$(tr -d '[:space:]' < /etc/omarchy/capture-output)"
+fi
+printf '[SELECTION]r/screen:%s\n' "${output:-omarchy-gtx}"

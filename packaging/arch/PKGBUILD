@@ -1,0 +1,71 @@
+# Maintainer: Omarchy Team <dev@omarchy.local>
+pkgname=omarchy-node
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Omarchy GPU Session Broker & Node Daemon for Arch Linux / Omarchy OS"
+arch=('x86_64')
+url="https://github.com/omarchy/omarchy"
+license=('MIT')
+depends=('python' 'sqlite' 'systemd' 'sudo')
+optdepends=(
+    'nvidia-utils: GPU telemetry and NVENC stream monitoring'
+    'sunshine: Self-hosted game stream host for Moonlight'
+    'wolf: Containerized game streaming server'
+    'wireguard-tools: VPN peer management'
+    'cifs-utils: NAS CIFS/Samba mount support'
+    'ufw: Automatic firewall rules configuration'
+    'mediamtx: WebRTC/RTSP live view and recordings (AUR: mediamtx-bin)'
+    'gpu-screen-recorder: full-GPU capture for the live view'
+    'wf-recorder: fallback capture for the live view'
+    'gst-plugins-bad: shmsrc for the Wolf live tap'
+    'docker: Wolf containerised sessions'
+    'docker-compose: Wolf deployment'
+)
+backup=(
+    'var/lib/omarchy/omarchy-sessions.db'
+    'etc/omarchy/mediamtx.yml'
+)
+install="omarchy-node.install"
+source=(
+    "omarchy-session-broker::file://${PWD}/scripts/omarchy-session-broker"
+    "omarchy-setup::file://${PWD}/scripts/omarchy-setup"
+    "omarchy-wolf-network-isolation::file://${PWD}/scripts/omarchy-wolf-network-isolation"
+    "omarchy-mount-nas::file://${PWD}/scripts/omarchy-mount-nas"
+    "omarchy-session-broker.service::file://${PWD}/systemd/omarchy-session-broker.service"
+    "omarchy-capture-publish::file://${PWD}/scripts/omarchy-capture-publish"
+    "omarchy-capture-picker::file://${PWD}/scripts/omarchy-capture-picker"
+    "omarchy-build-gsr-legacy-nvenc::file://${PWD}/scripts/omarchy-build-gsr-legacy-nvenc"
+    "omarchy-wolf-live-tap::file://${PWD}/scripts/omarchy-wolf-live-tap"
+    "omarchy-wolf-install::file://${PWD}/scripts/omarchy-wolf-install"
+    "omarchy-wolf-ui-coop::file://${PWD}/scripts/omarchy-wolf-ui-coop"
+    "mediamtx-omarchy.yml::file://${PWD}/config/mediamtx-omarchy.yml"
+    "omarchy-mediamtx.service::file://${PWD}/systemd/omarchy-mediamtx.service"
+    "wolf-docker-compose.yml::file://${PWD}/packaging/wolf/docker-compose.yml"
+    "omarchy-wolf-network-isolation.service::file://${PWD}/systemd/omarchy-wolf-network-isolation.service"
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+    # Binaries
+    install -Dm755 "${srcdir}/omarchy-session-broker" "${pkgdir}/usr/bin/omarchy-session-broker"
+    install -Dm755 "${srcdir}/omarchy-setup" "${pkgdir}/usr/bin/omarchy-setup"
+    install -Dm755 "${srcdir}/omarchy-wolf-network-isolation" "${pkgdir}/usr/bin/omarchy-wolf-network-isolation"
+    install -Dm755 "${srcdir}/omarchy-mount-nas" "${pkgdir}/usr/bin/omarchy-mount-nas"
+
+    # Systemd Service
+    sed 's|/usr/local/bin/|/usr/bin/|g' "${srcdir}/omarchy-session-broker.service" | install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/omarchy-session-broker.service"
+
+    # Live view / recordings (MediaMTX) and Wolf
+    local script
+    for script in omarchy-capture-publish omarchy-capture-picker omarchy-build-gsr-legacy-nvenc omarchy-wolf-live-tap omarchy-wolf-install omarchy-wolf-ui-coop; do
+        install -Dm755 "${srcdir}/${script}" "${pkgdir}/usr/bin/${script}"
+    done
+    # The repo files reference /usr/local/bin (omarchy-setup layout); the package uses /usr/bin.
+    sed 's|/usr/local/bin/|/usr/bin/|g' "${srcdir}/mediamtx-omarchy.yml" | install -Dm644 /dev/stdin "${pkgdir}/etc/omarchy/mediamtx.yml"
+    install -Dm644 "${srcdir}/omarchy-mediamtx.service" "${pkgdir}/usr/lib/systemd/system/omarchy-mediamtx.service"
+    install -Dm644 "${srcdir}/wolf-docker-compose.yml" "${pkgdir}/usr/share/omarchy/wolf/docker-compose.yml"
+    sed 's|/usr/local/bin/|/usr/bin/|g' "${srcdir}/omarchy-wolf-network-isolation.service" | install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/omarchy-wolf-network-isolation.service"
+
+    # State directory
+    install -dm750 "${pkgdir}/var/lib/omarchy"
+}

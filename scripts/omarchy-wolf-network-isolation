@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Network isolation for Wolf guest sessions on Omarchy / Proxmox.
+#
+#   omarchy-wolf-network-isolation <status|apply|teardown>
+#
+# Wolf starts every game/desktop of a guest in its own Docker container. By
+# default those containers sit on Docker's bridge and reach the whole LAN (NAS,
+# router, Proxmox) and every port of this VM. apply creates the Docker network
+# "omarchy-guests" (bridge br-wolf-guest, 10.99.50.0/24) and firewall chains so
+# that its containers get:
+#   - Internet (Steam downloads, online play) through Docker's NAT;
+#   - DNS on any resolver (the router usually is the resolver);
+#   - nothing else: no private/CGNAT/Tailscale ranges (LAN, NAS, Proxmox,
+#     tailnet), no port of this VM (SSH, broker, Sunshine UI, MediaMTX), no
+#     traffic between guest containers (inter-container communication off).
+# The session broker points the apps of every Wolf profile at this network
+# (only when it exists). Streaming is unaffected: Moonlight talks to Wolf, which
+# runs on the host network, never to the app containers. Capabilities/seccomp of
+# the containers are left as Games on Whales ships them (Steam needs them).
+set -Eeuo pipefail
+
+NETWORK="${OMARCHY_WOLF_GUEST_NETWORK:-omarchy-guests}"
+BRIDGE_NAME="${WOLF_BRIDGE_NAME:-br-wolf-guest}"
+SUBNET="${WOLF_SUBNET:-10.99.50.0/24}"
+GATEWAY_IP="${WOLF_GATEWAY:-10.99.50.1}"
+CHAIN_FWD=OMARCHY-GUESTS
+CHAIN_IN=OMARCHY-GUESTS-IN
+BLOCKED_RANGES=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16)
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+require_root() { (( EUID == 0 )) || die 'eseguire come root'; }
+
+usage() {
+  cat <<EOF
+Uso: $0 <status|apply|teardown>
+  status    rete Docker $NETWORK, regole firewall e container collegati
+  apply     crea la rete ospiti isolata ($SUBNET) e le regole (idempotente)
+  teardown  rimuove regole e rete (i container ospite devono essere fermi)
+EOF
+}
+
+# Jump rule at the top of a built-in chain, added once.
+ensure_jump() {
+  local parent="$1" chain="$2"
+  iptables -C "$parent" -i "$BRIDGE_NAME" -j "$chain" 2>/dev/null \
+    || iptables -I "$parent" 1 -i "$BRIDGE_NAME" -j "$chain"
+}
+
+apply_isolation() {
+  require_root
+  command -v docker >/dev/null || die 'docker non installato'
+  if ! docker network inspect "$NETWORK" >/dev/null 2>&1; then
+    # Older versions created a plain Linux bridge with the same name.
+    if ip link show "$BRIDGE_NAME" >/dev/null 2>&1; then
+      ip link set dev "$BRIDGE_NAME" down || true
+      ip link delete dev "$BRIDGE_NAME" type bridge || true
+    fi
+    docker network create --driver bridge \
+      --subnet "$SUBNET" --gateway "$GATEWAY_IP" \
+      -o "com.docker.network.bridge.name=$BRIDGE_NAME" \
+      -o com.docker.network.bridge.enable_icc=false \
+      --label omarchy.role=wolf-guests "$NETWORK" >/dev/null
+    note "rete Docker $NETWORK creata ($BRIDGE_NAME, $SUBNET)"
+  fi
+
+  # Guest -> elsewhere (routed): DNS allowed, private ranges rejected, the rest
+  # (Internet) goes on to Docker's own accept/NAT rules.
+  iptables -N "$CHAIN_FWD" 2>/dev/null || iptables -F "$CHAIN_FWD"
+  iptables -A "$CHAIN_FWD" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+  iptables -A "$CHAIN_FWD" -p udp --dport 53 -j RETURN
+  iptables -A "$CHAIN_FWD" -p tcp --dport 53 -j RETURN
+  local range
+  for range in "${BLOCKED_RANGES[@]}"; do
+    iptables -A "$CHAIN_FWD" -d "$range" -j REJECT --reject-with icmp-admin-prohibited
+  done
+  iptables -A "$CHAIN_FWD" -j RETURN
+  # Guest -> this VM (any of its addresses): nothing.
+  iptables -N "$CHAIN_IN" 2>/dev/null || iptables -F "$CHAIN_IN"
+  iptables -A "$CHAIN_IN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A "$CHAIN_IN" -j DROP
+  ensure_jump FORWARD "$CHAIN_FWD"
+  ensure_jump INPUT "$CHAIN_IN"
+  # Docker (re)inserts its own jumps at the top of FORWARD; DOCKER-USER always
+  # runs first, so hook the guest chain there too.
+  if iptables -L DOCKER-USER -n >/dev/null 2>&1; then
+    ensure_jump DOCKER-USER "$CHAIN_FWD"
+  fi
+
+  # WireGuard clients (remote players): no LAN, no SSH/Proxmox on this VM.
+  if ip link show wg0 >/dev/null 2>&1; then
+    iptables -C FORWARD -i wg0 -d 192.168.0.0/16 -j REJECT 2>/dev/null || iptables -I FORWARD 1 -i wg0 -d 192.168.0.0/16 -j REJECT
+    iptables -C INPUT -i wg0 -p tcp --dport 22 -j DROP 2>/dev/null || iptables -I INPUT 1 -i wg0 -p tcp --dport 22 -j DROP
+    iptables -C INPUT -i wg0 -p tcp --dport 8006 -j DROP 2>/dev/null || iptables -I INPUT 1 -i wg0 -p tcp --dport 8006 -j DROP
+  fi
+  note "isolamento attivo: i container su $NETWORK raggiungono solo Internet"
+}
+
+check_status() {
+  if docker network inspect "$NETWORK" >/dev/null 2>&1; then
+    printf '  [+] rete Docker %s (%s, %s)\n' "$NETWORK" "$BRIDGE_NAME" "$SUBNET"
+    docker network inspect "$NETWORK" -f '{{range .Containers}}      container: {{.Name}} {{.IPv4Address}}{{println}}{{end}}' 2>/dev/null | grep . || true
+  else
+    printf '  [-] rete Docker %s assente: i giochi Wolf vedono la LAN\n' "$NETWORK"
+  fi
+  if iptables -C FORWARD -i "$BRIDGE_NAME" -j "$CHAIN_FWD" 2>/dev/null && iptables -C INPUT -i "$BRIDGE_NAME" -j "$CHAIN_IN" 2>/dev/null; then
+    printf '  [+] firewall: LAN, tailnet e porte della VM bloccate per gli ospiti\n'
+  else
+    printf '  [-] firewall ospiti non attivo\n'
+  fi
+}
+
+teardown_isolation() {
+  require_root
+  local parent
+  for parent in FORWARD DOCKER-USER; do
+    iptables -D "$parent" -i "$BRIDGE_NAME" -j "$CHAIN_FWD" 2>/dev/null || true
+  done
+  iptables -D INPUT -i "$BRIDGE_NAME" -j "$CHAIN_IN" 2>/dev/null || true
+  iptables -F "$CHAIN_FWD" 2>/dev/null && iptables -X "$CHAIN_FWD" 2>/dev/null || true
+  iptables -F "$CHAIN_IN" 2>/dev/null && iptables -X "$CHAIN_IN" 2>/dev/null || true
+  docker network rm "$NETWORK" >/dev/null 2>&1 || note "rete $NETWORK non rimossa (container ancora collegati?)"
+  note 'isolamento rimosso: risincronizza i profili (omarchy-session-broker wolf-sync-profiles)'
+}
+
+case "${1:-status}" in
+  status) check_status ;;
+  apply) apply_isolation ;;
+  teardown) teardown_isolation ;;
+  -h|--help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

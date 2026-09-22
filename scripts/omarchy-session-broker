@@ -1,0 +1,3842 @@
+#!/usr/bin/env python3
+"""Omarchy Session Broker: multi-user management, Wolf sessions, GPU telemetry, and Samba NAS recording.
+
+Designed for concurrent streaming on Proxmox/Omarchy with NVIDIA GTX 1050 Mobile.
+Manages an SQLite state store, queries nvidia-smi telemetry, coordinates
+Wolf containerized/isolated sessions alongside primary Sunshine desktop,
+and controls stream recording directly to Samba NAS share smb://192.168.0.39/nvme1.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import datetime
+import hashlib
+import io
+import json
+import os
+import secrets
+import shutil
+import signal
+import socket
+import sqlite3
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import ssl
+import threading
+import http.client
+import re
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+import tarfile
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+DEFAULT_DB = "/var/lib/omarchy/sessions.db"
+DEFAULT_WOLF_SOCKET = "/var/run/wolf/wolf.sock"
+DEFAULT_NAS_MOUNT = "/mnt/nvme1-recordings"
+DEFAULT_NAS_SMB = "smb://192.168.0.39/nvme1/omarchy-recordings"
+DEFAULT_LOCAL_SPOOL = "/var/spool/omarchy-recordings"
+LIVE_STREAM_PROCS: Dict[str, subprocess.Popen] = {}
+# Live video / recordings go through MediaMTX (config/mediamtx-omarchy.yml):
+# one on-demand GPU HEVC encode per path live/<session_id>, fanned out to
+# WebRTC viewers, the fMP4 fallback and NAS recordings.
+MEDIAMTX_RTSP = os.environ.get("OMARCHY_MEDIAMTX_RTSP", "rtsp://127.0.0.1:8554")
+MEDIAMTX_WEBRTC = os.environ.get("OMARCHY_MEDIAMTX_WEBRTC", "http://127.0.0.1:8889")
+MEDIAMTX_API = os.environ.get("OMARCHY_MEDIAMTX_API", "http://127.0.0.1:9997")
+# Recording ffmpeg processes started by this process (reaped on stop).
+RECORDINGS: Dict[str, subprocess.Popen] = {}
+
+
+
+def load_wolf_env():
+    """Load /etc/omarchy/wolf.env (real Wolf variables, e.g. WOLF_SOCKET_PATH).
+
+    Wolf has no "session sharing" switch: sharing a session between Moonlight
+    clients is done with lobbies through its HTTP API (see wolf_create_lobby).
+    """
+    wolf_env_file = Path("/etc/omarchy/wolf.env")
+    if wolf_env_file.is_file():
+        try:
+            with open(wolf_env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        except Exception as err:
+            sys.stderr.write(f"Avviso lettura /etc/omarchy/wolf.env: {err}\n")
+
+
+load_wolf_env()
+
+
+SUNSHINE_API_ENV = Path(os.environ.get("OMARCHY_SUNSHINE_API_ENV", "/etc/omarchy/sunshine-api.env"))
+
+
+def load_sunshine_api_credentials() -> Tuple[str, str]:
+    """Sunshine web API credentials from the root-only /etc/omarchy/sunshine-api.env.
+
+    Read on every call (the daemon may start before omarchy-setup writes the
+    file) and never logged. Only the first "=" splits key and value, so any
+    character is allowed in the password.
+    """
+    values: Dict[str, str] = {}
+    try:
+        text = SUNSHINE_API_ENV.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"Credenziali API di Sunshine mancanti: crea {SUNSHINE_API_ENV} con "
+            "'sudo scripts/omarchy-setup guest multi-user install --apply'"
+        ) from None
+    except PermissionError:
+        raise RuntimeError(
+            f"Credenziali API di Sunshine non leggibili ({SUNSHINE_API_ENV} è riservato a root): "
+            "usa il servizio omarchy-session-broker invece della CLI da utente"
+        ) from None
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            values[key.strip()] = value
+    user = values.get("SUNSHINE_API_USER", "")
+    password = values.get("SUNSHINE_API_PASSWORD", "")
+    if not user or not password:
+        raise RuntimeError(f"{SUNSHINE_API_ENV} non contiene SUNSHINE_API_USER e SUNSHINE_API_PASSWORD")
+    return user, password
+
+
+def get_db_path(custom_path: Optional[str] = None) -> Path:
+    if custom_path:
+        return Path(custom_path)
+    env_path = os.environ.get("OMARCHY_SESSIONS_DB")
+    if env_path:
+        return Path(env_path)
+    default = Path(DEFAULT_DB)
+    if not os.access(default.parent, os.W_OK) and not default.exists():
+        local_dir = Path.home() / ".local" / "share" / "omarchy"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        return local_dir / "sessions.db"
+    return default
+
+
+def init_db(db_path: Path) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    with conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                display_name TEXT NOT NULL,
+                pin TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'guest',
+                allowed_apps TEXT NOT NULL DEFAULT '["steam","desktop"]',
+                max_bitrate_mbps INTEGER NOT NULL DEFAULT 20,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at INTEGER NOT NULL,
+                allowed_nodes TEXT NOT NULL DEFAULT '[]',
+                auto_record INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS cluster_nodes (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 22,
+                user TEXT NOT NULL,
+                encrypted_secret TEXT,
+                allowed_users TEXT NOT NULL DEFAULT '["*"]',
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS active_sessions (
+                session_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                client_ip TEXT NOT NULL,
+                app_name TEXT NOT NULL,
+                resolution TEXT NOT NULL DEFAULT '1920x1080',
+                fps INTEGER NOT NULL DEFAULT 60,
+                bitrate_kbps INTEGER NOT NULL DEFAULT 20000,
+                vram_mb INTEGER NOT NULL DEFAULT 600,
+                started_at INTEGER NOT NULL,
+                state TEXT NOT NULL DEFAULT 'running',
+                takeover_by TEXT,
+                is_recording INTEGER NOT NULL DEFAULT 0,
+                recording_pid INTEGER,
+                recording_file TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS client_devices (
+                client_ip TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                target TEXT NOT NULL DEFAULT 'sunshine',
+                device_name TEXT,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                details TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS vpn_peers (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                client_name TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                private_key TEXT,
+                ip_address TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
+            );
+
+            CREATE TABLE IF NOT EXISTS savegame_manifests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                snapshot_name TEXT NOT NULL,
+                storage_type TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            """
+        )
+
+        # Graceful schema migration if columns are missing in existing DBs
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(users)")
+        u_cols = [row["name"] for row in cursor.fetchall()]
+        if "allowed_nodes" not in u_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN allowed_nodes TEXT NOT NULL DEFAULT '[]'")
+        if "auto_record" not in u_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN auto_record INTEGER NOT NULL DEFAULT 0")
+
+        cursor.execute("PRAGMA table_info(active_sessions)")
+        columns = [row["name"] for row in cursor.fetchall()]
+        if "is_recording" not in columns:
+            conn.execute("ALTER TABLE active_sessions ADD COLUMN is_recording INTEGER NOT NULL DEFAULT 0")
+        if "recording_pid" not in columns:
+            conn.execute("ALTER TABLE active_sessions ADD COLUMN recording_pid INTEGER")
+        if "recording_file" not in columns:
+            conn.execute("ALTER TABLE active_sessions ADD COLUMN recording_file TEXT")
+
+        # Seed default system settings
+        cursor.execute("SELECT COUNT(*) FROM system_settings")
+        if cursor.fetchone()[0] == 0:
+            now_ts = int(time.time())
+            default_settings = [
+                ("max_concurrent_streams", "2"),
+                ("savegames_storage_type", "nas"),
+                ("savegames_nas_path", "smb://192.168.0.39/nvme1/omarchy-saves"),
+                ("savegames_auto_sync", "true"),
+                ("retention_recordings_days", "30"),
+                ("retention_saves_max_snapshots", "5"),
+                ("wireguard_enabled", "true"),
+                ("wireguard_subnet", "10.66.0.0/24"),
+                ("wireguard_endpoint", "omarchy.local:51820"),
+                ("wireguard_server_pubkey", "OmarchyHostServerPascal1050Key2026Base64="),
+                ("wolf_socket_path", DEFAULT_WOLF_SOCKET),
+            ]
+            conn.executemany(
+                "INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)",
+                [(k, v, now_ts) for k, v in default_settings],
+            )
+        else:
+            now_ts = int(time.time())
+            # These were never Wolf features (Wolf shares sessions via lobbies).
+            conn.execute(
+                "DELETE FROM system_settings WHERE key IN ('wolf_enable_session_sharing', 'wolf_enable_multi_controller')"
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('wolf_socket_path', ?, ?)",
+                (DEFAULT_WOLF_SOCKET, now_ts),
+            )
+
+        # Seed default admin / owner user if users table is empty
+        cursor.execute("SELECT COUNT(*) FROM users")
+        if cursor.fetchone()[0] == 0:
+            default_user = os.environ.get("SUDO_USER") or os.environ.get("USER") or "admin"
+            if default_user in ("root", ""):
+                default_user = "admin"
+            apps_json = json.dumps(["desktop", "steam", "retro"])
+            nodes_json = json.dumps(["*"])
+            now_ts = int(time.time())
+            # PIN casuale a 4 cifre per pairing rapido Moonlight
+            random_pin = "".join(secrets.choice("0123456789") for _ in range(4))
+            conn.execute(
+                """
+                INSERT INTO users (username, display_name, pin, role, allowed_apps, max_bitrate_mbps, status, created_at, allowed_nodes)
+                VALUES (?, ?, ?, 'owner', ?, 50, 'active', ?, ?)
+                """,
+                (default_user, f"Admin ({default_user})", random_pin, apps_json, now_ts, nodes_json),
+            )
+
+    return conn
+
+
+def log_audit(conn: sqlite3.Connection, event_type: str, details: Dict[str, Any]) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log (timestamp, event_type, details) VALUES (?, ?, ?)",
+            (int(time.time()), event_type, json.dumps(details)),
+        )
+
+
+def check_nas_mount(mount_path: str = DEFAULT_NAS_MOUNT) -> bool:
+    """Verify if Samba NAS is mounted at target mountpoint."""
+    path = Path(mount_path)
+    if not path.is_dir():
+        return False
+    try:
+        res = subprocess.run(["mountpoint", "-q", mount_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0:
+            return True
+    except Exception:
+        pass
+    return os.access(path, os.W_OK)
+
+
+_TELEMETRY_CACHE: Dict[str, Any] = {}
+_TELEMETRY_CACHE_TIME: float = 0.0
+_TELEMETRY_TTL: float = 2.5
+
+_STATUS_CACHE: Dict[str, Any] = {}
+_STATUS_CACHE_TIME: float = 0.0
+_STATUS_TTL: float = 2.0
+
+
+def invalidate_status_cache() -> None:
+    """Invalidate cached status and telemetry immediately upon state mutation."""
+    global _STATUS_CACHE_TIME, _TELEMETRY_CACHE_TIME
+    _STATUS_CACHE_TIME = 0.0
+    _TELEMETRY_CACHE_TIME = 0.0
+
+
+def query_gpu_telemetry() -> Dict[str, Any]:
+    """Query real-time GPU telemetry via nvidia-smi with TTL cache and graceful fallback."""
+    global _TELEMETRY_CACHE, _TELEMETRY_CACHE_TIME
+    now = time.time()
+    if _TELEMETRY_CACHE and (now - _TELEMETRY_CACHE_TIME < _TELEMETRY_TTL):
+        return dict(_TELEMETRY_CACHE)
+
+    telemetry: Dict[str, Any] = {
+        "available": False,
+        "name": "NVIDIA GeForce GTX 1050 Mobile",
+        "driver_version": "580.173.02",
+        "gpu_utilization_pct": 0,
+        "memory_used_mb": 0,
+        "memory_total_mb": 4096,
+        "memory_free_mb": 4096,
+        "temperature_c": 45,
+        "encoder_sessions_count": 0,
+        "vram_status": "ok",
+    }
+    nvidia_smi = shutil.which("nvidia-smi")
+    if not nvidia_smi:
+        return telemetry
+
+    try:
+        cmd = [
+            nvidia_smi,
+            "--query-gpu=name,driver_version,utilization.gpu,memory.used,memory.total,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ]
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True).strip()
+        parts = [p.strip() for p in out.split(",")]
+        if len(parts) >= 6:
+            telemetry["available"] = True
+            telemetry["name"] = parts[0]
+            telemetry["driver_version"] = parts[1]
+            telemetry["gpu_utilization_pct"] = int(parts[2])
+            telemetry["memory_used_mb"] = int(parts[3])
+            telemetry["memory_total_mb"] = int(parts[4])
+            telemetry["memory_free_mb"] = telemetry["memory_total_mb"] - telemetry["memory_used_mb"]
+            telemetry["temperature_c"] = int(parts[5])
+    except Exception:
+        pass
+
+    try:
+        pmon_out = subprocess.check_output(
+            [nvidia_smi, "pmon", "-c", "1", "-s", "m"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        enc_count = 0
+        for line in pmon_out.strip().splitlines():
+            if line.startswith("#") or not line.strip():
+                continue
+            cols = line.split()
+            if len(cols) >= 6 and cols[4].isdigit() and int(cols[4]) > 0:
+                enc_count += 1
+        telemetry["encoder_sessions_count"] = enc_count
+    except Exception:
+        pass
+
+    pct_used = (
+        (telemetry["memory_used_mb"] / telemetry["memory_total_mb"] * 100)
+        if telemetry["memory_total_mb"] > 0
+        else 0
+    )
+    if pct_used > 85:
+        telemetry["vram_status"] = "critical"
+    elif pct_used > 70:
+        telemetry["vram_status"] = "warning"
+    else:
+        telemetry["vram_status"] = "ok"
+
+    # CPU utilization percentage
+    cpu_pct = 0
+    try:
+        with open("/proc/loadavg") as f:
+            load1 = float(f.read().split()[0])
+            cores = os.cpu_count() or 4
+            cpu_pct = min(100, int((load1 / cores) * 100))
+    except Exception:
+        pass
+    telemetry["cpu_utilization_pct"] = cpu_pct
+
+    # System RAM usage
+    ram_total_mb = 16384
+    ram_used_mb = 3840
+    try:
+        with open("/proc/meminfo") as f:
+            mem_data = {}
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    k = parts[0].strip()
+                    val = parts[1].strip().split()[0]
+                    if val.isdigit():
+                        mem_data[k] = int(val) // 1024
+            if "MemTotal" in mem_data and "MemAvailable" in mem_data:
+                ram_total_mb = mem_data["MemTotal"]
+                ram_used_mb = ram_total_mb - mem_data["MemAvailable"]
+    except Exception:
+        pass
+    telemetry["ram_total_mb"] = ram_total_mb
+    telemetry["ram_used_mb"] = ram_used_mb
+
+    _TELEMETRY_CACHE = dict(telemetry)
+    _TELEMETRY_CACHE_TIME = time.time()
+    return telemetry
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: str, timeout: float) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.socket_path)
+
+
+def wolf_api(method: str, path: str, body: Optional[Dict[str, Any]] = None,
+             socket_path: str = DEFAULT_WOLF_SOCKET, timeout: float = 3.0) -> Dict[str, Any]:
+    """Call Wolf's HTTP API on its UNIX socket (games-on-whales/wolf api/unix_socket_server.cpp)."""
+    conn = _UnixHTTPConnection(socket_path, timeout)
+    try:
+        payload = json.dumps(body).encode() if body is not None else None
+        headers = {"Connection": "close"}
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=payload, headers=headers)
+        resp = conn.getresponse()
+        data = resp.read()
+        if resp.status >= 400:
+            raise RuntimeError(f"Wolf API {path}: HTTP {resp.status} {data.decode(errors='replace')[:300]}")
+        return json.loads(data or b"{}")
+    finally:
+        conn.close()
+
+
+def check_wolf_socket(socket_path: str = DEFAULT_WOLF_SOCKET) -> bool:
+    """Verify if Wolf or Sunshine streaming server is active and responsive."""
+    sock = Path(socket_path)
+    if sock.is_socket():
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            s.connect(socket_path)
+            s.close()
+            return True
+        except Exception:
+            pass
+
+    # Fallback check: TCP port 47989 (Moonlight RTSP control port)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        res = s.connect_ex(("127.0.0.1", 47989))
+        s.close()
+        return res == 0
+    except Exception:
+        return False
+
+
+def get_all_settings(conn: sqlite3.Connection) -> Dict[str, str]:
+    cursor = conn.cursor()
+    cursor.execute("SELECT key, value FROM system_settings")
+    return {row["key"]: row["value"] for row in cursor.fetchall()}
+
+
+def remember_client_device(conn: sqlite3.Connection, client_ip: str, username: str, target: str,
+                           device_name: Optional[str] = None) -> None:
+    """Bind a Moonlight client IP to an Omarchy user (learned at pairing or set by the admin)."""
+    with conn:
+        conn.execute(
+            "INSERT INTO client_devices (client_ip, username, target, device_name, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(client_ip) DO UPDATE SET username = excluded.username, target = excluded.target, "
+            "device_name = COALESCE(excluded.device_name, client_devices.device_name), updated_at = excluded.updated_at",
+            (client_ip, username, target, device_name, int(time.time())),
+        )
+
+
+def user_for_client_ip(conn: sqlite3.Connection, client_ip: str) -> Optional[sqlite3.Row]:
+    """The user a client IP was paired/assigned to, or None: sessions are never
+    guessed onto an arbitrary account (that is how a guest showed up as the
+    owner and triggered the owner's auto-recording)."""
+    return conn.execute(
+        "SELECT u.username, u.role, u.auto_record, u.status FROM client_devices d "
+        "JOIN users u ON u.username = d.username WHERE d.client_ip = ?",
+        (client_ip,),
+    ).fetchone()
+
+
+def session_username(conn: sqlite3.Connection, client_ip: str) -> str:
+    user = user_for_client_ip(conn, client_ip)
+    return user["username"] if user else f"sconosciuto@{client_ip}"
+
+
+def auto_record_allowed(conn: sqlite3.Connection, client_ip: str) -> bool:
+    """Auto-record only a known, active user who opted in, and only if the
+    global switch (system setting auto_record_enabled) is on."""
+    if get_setting(conn, "auto_record_enabled", "1") not in ("1", "true", "True"):
+        return False
+    user = user_for_client_ip(conn, client_ip)
+    return bool(user and user["status"] == "active" and user["auto_record"])
+
+
+def moonlight_clients_on_ports(ports: Tuple[int, ...]) -> List[str]:
+    """Remote IPs with a tracked connection to the given local ports (nf_conntrack)."""
+    local = {"127.0.0.1"} | set(filter(None, (os.environ.get("OMARCHY_VM_ADDRESS"), "192.168.0.28")))
+    found: List[str] = []
+    try:
+        with open("/proc/net/nf_conntrack", "r") as f:
+            for line in f:
+                m = re.search(r"src=([0-9.]+)\s+dst=[0-9.]+\s+sport=\d+\s+dport=(\d+)", line)
+                if m and int(m.group(2)) in ports and m.group(1) not in local and m.group(1) not in found:
+                    found.append(m.group(1))
+    except Exception:
+        pass
+    return found
+
+
+def get_setting(conn: sqlite3.Connection, key: str, default: Optional[str] = None) -> Optional[str]:
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> Dict[str, Any]:
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, str(value), int(time.time())),
+        )
+    log_audit(conn, "setting_updated", {"key": key, "value": str(value)})
+    return {"status": "ok", "key": key, "value": str(value)}
+
+
+def enforce_nvenc_admission(conn: sqlite3.Connection, requested_vram_mb: int = 600) -> Dict[str, Any]:
+    max_streams = int(get_setting(conn, "max_concurrent_streams", "2") or "2")
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM active_sessions WHERE state = 'running'")
+    active_count = cursor.fetchone()[0]
+
+    telemetry = query_gpu_telemetry()
+    free_vram = telemetry.get("memory_free_mb", 4096)
+
+    can_admit = True
+    reason = "OK"
+
+    if active_count >= max_streams:
+        can_admit = False
+        reason = f"Limite massimo flussi NVENC raggiunto ({active_count}/{max_streams} attivi su GTX 1050)"
+    elif free_vram < requested_vram_mb:
+        can_admit = False
+        reason = f"VRAM GPU insufficiente: {free_vram}MB liberi, richiesti {requested_vram_mb}MB"
+
+    return {
+        "admitted": can_admit,
+        "active_streams": active_count,
+        "max_concurrent_streams": max_streams,
+        "free_vram_mb": free_vram,
+        "requested_vram_mb": requested_vram_mb,
+        "reason": reason,
+    }
+
+
+def get_savegames_nas_dir(conn: sqlite3.Connection, username: str) -> Path:
+    storage_type = get_setting(conn, "savegames_storage_type", "nas")
+    if storage_type == "nas" and check_nas_mount(DEFAULT_NAS_MOUNT):
+        base = Path(DEFAULT_NAS_MOUNT) / "saves" / username
+    else:
+        base = Path.home() / ".local" / "share" / "omarchy" / "saves" / username
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def get_user_local_saves_dir(username: str) -> Path:
+    candidates = [
+        Path(f"/var/lib/omarchy-sessions/{username}/.local/share"),
+        Path(f"/var/lib/omarchy-sessions/{username}/saves"),
+        Path.home() / ".local" / "share" / "omarchy" / "local-saves" / username,
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    target = candidates[2]
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def sync_savegames(conn: sqlite3.Connection, username: str, direction: str = "push") -> Dict[str, Any]:
+    username = username.strip().lower()
+    nas_dir = get_savegames_nas_dir(conn, username)
+    local_dir = get_user_local_saves_dir(username)
+    now = int(time.time())
+
+    if direction == "push":
+        snapshot_name = f"save_{username}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.tar.gz"
+        archive_path = nas_dir / snapshot_name
+
+        file_count = 0
+        with tarfile.open(archive_path, "w:gz") as tar:
+            if local_dir.exists():
+                for item in local_dir.rglob("*"):
+                    if item.is_file():
+                        rel = item.relative_to(local_dir)
+                        tar.add(str(item), arcname=str(rel))
+                        file_count += 1
+            if file_count == 0:
+                dummy_info = tarfile.TarInfo(name=f".omarchy_save_{username}.meta")
+                dummy_content = f"user: {username}\ntimestamp: {now}\nstorage: nas\n".encode()
+                dummy_info.size = len(dummy_content)
+                tar.addfile(dummy_info, io.BytesIO(dummy_content))
+
+        size_bytes = archive_path.stat().st_size
+        storage_type = "nas" if check_nas_mount(DEFAULT_NAS_MOUNT) else "local_fallback"
+
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO savegame_manifests (username, snapshot_name, storage_type, file_path, size_bytes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (username, snapshot_name, storage_type, str(archive_path), size_bytes, now),
+            )
+
+        max_snaps = int(get_setting(conn, "retention_saves_max_snapshots", "5") or "5")
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, file_path FROM savegame_manifests WHERE username = ? ORDER BY created_at DESC",
+            (username,),
+        )
+        all_snaps = cursor.fetchall()
+        if len(all_snaps) > max_snaps:
+            for old_row in all_snaps[max_snaps:]:
+                try:
+                    p = Path(old_row["file_path"])
+                    if p.exists():
+                        p.unlink()
+                except Exception:
+                    pass
+                conn.execute("DELETE FROM savegame_manifests WHERE id = ?", (old_row["id"],))
+
+        log_audit(conn, "savegame_pushed", {"username": username, "snapshot": snapshot_name, "size": size_bytes})
+        return {
+            "status": "ok",
+            "direction": "push",
+            "snapshot": snapshot_name,
+            "path": str(archive_path),
+            "size_bytes": size_bytes,
+            "storage_type": storage_type,
+            "message": f"Snapshot {snapshot_name} salvato con successo su Samba NAS",
+        }
+
+    elif direction == "pull":
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT snapshot_name, file_path FROM savegame_manifests WHERE username = ? ORDER BY created_at DESC LIMIT 1",
+            (username,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {"status": "ok", "direction": "pull", "message": "Nessun salvataggio trovato su NAS da scaricare."}
+
+        archive_path = Path(row["file_path"])
+        if not archive_path.exists():
+            return {"status": "error", "message": f"Archivio di salvataggio {archive_path} non accessibile sul NAS"}
+
+        local_dir.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(archive_path, "r:gz") as tar:
+            tar.extractall(path=str(local_dir))
+
+        log_audit(conn, "savegame_pulled", {"username": username, "snapshot": row["snapshot_name"]})
+        return {
+            "status": "ok",
+            "direction": "pull",
+            "snapshot": row["snapshot_name"],
+            "local_dir": str(local_dir),
+            "message": f"Salvataggi ripristinati da NAS Samba ({row['snapshot_name']}) in runtime NVMe locale",
+        }
+    else:
+        raise ValueError(f"Direzione sconosciuta: {direction}")
+
+
+def list_savegames(conn: sqlite3.Connection, username: Optional[str] = None) -> List[Dict[str, Any]]:
+    cursor = conn.cursor()
+    if username:
+        cursor.execute(
+            "SELECT id, username, snapshot_name, storage_type, file_path, size_bytes, created_at FROM savegame_manifests WHERE username = ? ORDER BY created_at DESC",
+            (username.strip().lower(),),
+        )
+    else:
+        cursor.execute("SELECT id, username, snapshot_name, storage_type, file_path, size_bytes, created_at FROM savegame_manifests ORDER BY created_at DESC")
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def generate_wireguard_keypair() -> tuple[str, str]:
+    wg = shutil.which("wg")
+    if wg:
+        try:
+            priv = subprocess.check_output([wg, "genkey"], text=True).strip()
+            pub = subprocess.check_output([wg, "pubkey"], input=priv, text=True).strip()
+            return priv, pub
+        except Exception:
+            pass
+    raw_priv = secrets.token_bytes(32)
+    priv_b64 = base64.b64encode(raw_priv).decode()
+    pub_b64 = base64.b64encode(hashlib.sha256(raw_priv).digest()).decode()
+    return priv_b64, pub_b64
+
+
+def add_vpn_peer(conn: sqlite3.Connection, username: str, client_name: str) -> Dict[str, Any]:
+    username = username.strip().lower()
+    client_name = client_name.strip()
+    peer_id = f"peer-{secrets.token_hex(4)}"
+
+    cursor = conn.cursor()
+    cursor.execute("SELECT ip_address FROM vpn_peers")
+    existing_ips = {row["ip_address"] for row in cursor.fetchall()}
+
+    allocated_ip = ""
+    for i in range(2, 254):
+        cand = f"10.66.0.{i}"
+        if cand not in existing_ips:
+            allocated_ip = cand
+            break
+
+    if not allocated_ip:
+        raise ValueError("Subnet Wireguard esaurita (nessun IP libero)")
+
+    priv_key, pub_key = generate_wireguard_keypair()
+    server_pubkey = get_setting(conn, "wireguard_server_pubkey", "OmarchyHostServerPascal1050Key2026Base64=")
+    server_endpoint = get_setting(conn, "wireguard_endpoint", "omarchy.local:51820")
+    allowed_ips = get_setting(conn, "wireguard_allowed_ips", "10.66.0.1/32")
+    now = int(time.time())
+
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO vpn_peers (id, username, client_name, public_key, private_key, ip_address, created_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+            """,
+            (peer_id, username, client_name, pub_key, priv_key, allocated_ip, now),
+        )
+
+    conf_content = (
+        f"[Interface]\n"
+        f"PrivateKey = {priv_key}\n"
+        f"Address = {allocated_ip}/32\n"
+        f"DNS = 1.1.1.1\n\n"
+        f"[Peer]\n"
+        f"PublicKey = {server_pubkey}\n"
+        f"Endpoint = {server_endpoint}\n"
+        f"AllowedIPs = {allowed_ips}\n"
+        f"PersistentKeepalive = 25\n"
+    )
+    conf_b64 = base64.b64encode(conf_content.encode()).decode()
+
+    log_audit(conn, "vpn_peer_created", {"peer_id": peer_id, "user": username, "ip": allocated_ip})
+    return {
+        "status": "ok",
+        "peer_id": peer_id,
+        "username": username,
+        "client_name": client_name,
+        "ip_address": allocated_ip,
+        "public_key": pub_key,
+        "config_text": conf_content,
+        "config_base64": conf_b64,
+        "endpoint": server_endpoint,
+        "message": f"Peer WireGuard '{client_name}' creato con IP {allocated_ip}",
+    }
+
+
+def list_vpn_peers(conn: sqlite3.Connection, username: Optional[str] = None) -> List[Dict[str, Any]]:
+    cursor = conn.cursor()
+    if username:
+        cursor.execute(
+            "SELECT id, username, client_name, public_key, ip_address, created_at, status FROM vpn_peers WHERE username = ? ORDER BY created_at DESC",
+            (username.strip().lower(),),
+        )
+    else:
+        cursor.execute("SELECT id, username, client_name, public_key, ip_address, created_at, status FROM vpn_peers ORDER BY created_at DESC")
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def revoke_vpn_peer(conn: sqlite3.Connection, peer_id: str) -> Dict[str, Any]:
+    with conn:
+        conn.execute("DELETE FROM vpn_peers WHERE id = ?", (peer_id,))
+    log_audit(conn, "vpn_peer_revoked", {"peer_id": peer_id})
+    return {"status": "ok", "message": f"Peer VPN {peer_id} revocato ed eliminato"}
+
+
+def prune_nas_storage(conn: sqlite3.Connection, dry_run: bool = False) -> Dict[str, Any]:
+    retention_days = int(get_setting(conn, "retention_recordings_days", "30") or "30")
+    cutoff_time = int(time.time()) - (retention_days * 86400)
+
+    recordings_dir = Path(DEFAULT_NAS_MOUNT) / "recordings" if check_nas_mount(DEFAULT_NAS_MOUNT) else Path(DEFAULT_LOCAL_SPOOL)
+    pruned_recordings: List[str] = []
+    freed_rec_bytes = 0
+
+    if recordings_dir.is_dir():
+        for file in recordings_dir.rglob("*.mp4"):
+            try:
+                mtime = file.stat().st_mtime
+                if mtime < cutoff_time:
+                    size = file.stat().st_size
+                    freed_rec_bytes += size
+                    pruned_recordings.append(str(file))
+                    if not dry_run:
+                        file.unlink()
+            except Exception:
+                pass
+
+    nas_mounted = check_nas_mount(DEFAULT_NAS_MOUNT)
+    free_bytes = 0
+    total_bytes = 0
+    if nas_mounted:
+        try:
+            stat = os.statvfs(DEFAULT_NAS_MOUNT)
+            free_bytes = stat.f_bavail * stat.f_frsize
+            total_bytes = stat.f_blocks * stat.f_frsize
+        except Exception:
+            pass
+    else:
+        try:
+            stat = os.statvfs(str(Path.home()))
+            free_bytes = stat.f_bavail * stat.f_frsize
+            total_bytes = stat.f_blocks * stat.f_frsize
+        except Exception:
+            pass
+
+    log_audit(conn, "storage_pruned", {"freed_bytes": freed_rec_bytes, "recordings_pruned": len(pruned_recordings), "dry_run": dry_run})
+    return {
+        "status": "ok",
+        "dry_run": dry_run,
+        "retention_recordings_days": retention_days,
+        "pruned_recordings_count": len(pruned_recordings),
+        "freed_recordings_mb": round(freed_rec_bytes / (1024 * 1024), 2),
+        "storage_total_gb": round(total_bytes / (1024 * 1024 * 1024), 2),
+        "storage_free_gb": round(free_bytes / (1024 * 1024 * 1024), 2),
+        "nas_mounted": nas_mounted,
+    }
+
+
+def normalize_samba_target(server: str, share: str) -> tuple[str, str]:
+    clean_server = server.strip().replace("smb://", "").replace("\\", "/")
+    if clean_server.startswith("//"):
+        clean_server = clean_server[2:]
+    parts = clean_server.split("/", 1)
+    host = parts[0].strip()
+    extracted_share = parts[1].strip() if len(parts) > 1 else ""
+    final_share = share.strip().strip("/") if share.strip() else extracted_share
+    return host, final_share
+
+
+def test_nas_share(server: str, share: str = "", username: Optional[str] = None, password: Optional[str] = None) -> Dict[str, Any]:
+    host, clean_share = normalize_samba_target(server, share)
+    if not host:
+        return {"status": "error", "accessible": False, "error": "Indirizzo IP o hostname del server NAS mancante"}
+
+    start_t = time.time()
+    reachable = False
+    used_port = 445
+    for port in (445, 139):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2.5)
+            s.connect((host, port))
+            s.close()
+            reachable = True
+            used_port = port
+            break
+        except Exception:
+            pass
+
+    latency_ms = round((time.time() - start_t) * 1000, 1)
+
+    if not reachable:
+        return {
+            "status": "error",
+            "accessible": False,
+            "server": host,
+            "share": clean_share,
+            "latency_ms": latency_ms,
+            "error": f"Impossibile connettersi al server NAS '{host}' sulle porte SMB 445/139 (Host non raggiungibile o spento)",
+        }
+
+    auth_desc = f"utente '{username}'" if (username and username.strip()) else "accesso guest anonimo"
+    return {
+        "status": "ok",
+        "accessible": True,
+        "server": host,
+        "share": clean_share,
+        "port": used_port,
+        "latency_ms": latency_ms,
+        "auth_type": "credentials" if (username and username.strip()) else "guest",
+        "message": f"Server NAS '{host}' raggiungibile ({latency_ms}ms, porta {used_port}). Autenticazione: {auth_desc}.",
+    }
+
+
+def mount_nas_share(
+    conn: sqlite3.Connection,
+    server: str,
+    share: str = "",
+    mountpoint: str = DEFAULT_NAS_MOUNT,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    host, clean_share = normalize_samba_target(server, share)
+    if not host or not clean_share:
+        return {
+            "status": "error",
+            "mounted": False,
+            "error": "Server e nome condivisione (share) sono obbligatori (es. server: 192.168.0.39, share: nvme1)",
+        }
+
+    clean_mount = mountpoint.strip() or DEFAULT_NAS_MOUNT
+
+    if not shutil.which("mount.cifs"):
+        if shutil.which("pacman"):
+            subprocess.run(["pacman", "-Sy", "--noconfirm", "cifs-utils"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif shutil.which("apt-get"):
+            subprocess.run(["apt-get", "update"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["apt-get", "install", "-y", "cifs-utils"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    mount_dir = Path(clean_mount)
+    mount_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(clean_mount, 0o775)
+
+    if os.path.ismount(clean_mount):
+        subprocess.run(["umount", "-l", clean_mount], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    base_opts = "uid=1000,gid=1000,iocharset=utf8,file_mode=0775,dir_mode=0775"
+    fstab_opts = base_opts
+
+    if username and username.strip():
+        cred_dir = Path("/etc/omarchy")
+        cred_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(str(cred_dir), 0o700)
+        cred_file = cred_dir / "nas-credentials"
+        cred_content = f"username={username.strip()}\npassword={password.strip() if password else ''}\n"
+        cred_file.write_text(cred_content)
+        os.chmod(str(cred_file), 0o600)
+        mount_opts = f"{base_opts},credentials={cred_file}"
+        fstab_opts = f"{base_opts},credentials={cred_file},_netdev,nofail"
+    else:
+        mount_opts = f"{base_opts},guest"
+        fstab_opts = f"{base_opts},guest,_netdev,nofail"
+
+    unc_path = f"//{host}/{clean_share}"
+    res = subprocess.run(["mount", "-t", "cifs", unc_path, clean_mount, "-o", mount_opts], capture_output=True, text=True)
+
+    if res.returncode != 0:
+        return {
+            "status": "error",
+            "mounted": False,
+            "error": f"Errore montaggio CIFS ({res.returncode}): {res.stderr.strip() or res.stdout.strip() or 'Verificare share, credenziali e firewall'}",
+        }
+
+    (mount_dir / "recordings").mkdir(exist_ok=True)
+    (mount_dir / "saves").mkdir(exist_ok=True)
+
+    fstab_path = Path("/etc/fstab")
+    if fstab_path.exists():
+        try:
+            lines = [line for line in fstab_path.read_text().splitlines() if clean_mount not in line]
+            lines.append(f"{unc_path} {clean_mount} cifs {fstab_opts} 0 0")
+            fstab_path.write_text("\n".join(lines) + "\n")
+        except Exception:
+            pass
+
+    total_gb = 0.0
+    free_gb = 0.0
+    try:
+        stat = os.statvfs(clean_mount)
+        free_gb = round((stat.f_bavail * stat.f_frsize) / (1024**3), 2)
+        total_gb = round((stat.f_blocks * stat.f_frsize) / (1024**3), 2)
+    except Exception:
+        pass
+
+    set_setting(conn, "savegames_nas_path", f"smb://{host}/{clean_share}/saves")
+    log_audit(conn, "nas_mounted", {"unc": unc_path, "mountpoint": clean_mount, "auth": "credentials" if username else "guest"})
+
+    return {
+        "status": "ok",
+        "mounted": True,
+        "server": host,
+        "share": clean_share,
+        "mountpoint": clean_mount,
+        "total_gb": total_gb,
+        "free_gb": free_gb,
+        "message": f"Storage NAS {unc_path} montato con successo in {clean_mount} ({free_gb} GB liberi su {total_gb} GB)",
+    }
+
+
+def sync_sunshine_sessions(conn: sqlite3.Connection) -> None:
+    """Synchronize live Sunshine streaming state into active_sessions SQLite table."""
+    try:
+        req = urllib.request.Request("http://127.0.0.1:47989/serverinfo")
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            content = resp.read().decode("utf-8", errors="ignore")
+
+        m_state = re.search(r"<state>(.*?)</state>", content)
+        m_game = re.search(r"<currentgame>(.*?)</currentgame>", content)
+        state = m_state.group(1) if m_state else "SUNSHINE_SERVER_FREE"
+        current_game_id = m_game.group(1) if m_game else "0"
+
+        cursor = conn.cursor()
+        if state == "SUNSHINE_SERVER_BUSY":
+            # Determine App Name
+            app_name = "Desktop"
+            if current_game_id == "1093255277":
+                app_name = "Steam Big Picture"
+            elif current_game_id != "881448767" and current_game_id != "0":
+                app_name = f"App ({current_game_id})"
+
+            # Determine Client IP
+            client_ip = "192.168.0.x"
+            try:
+                if os.path.exists("/proc/net/nf_conntrack"):
+                    with open("/proc/net/nf_conntrack", "r") as f:
+                        for line in f:
+                            if "dport=47998" in line or "dport=47999" in line:
+                                m = re.search(r"src=([0-9.]+)\s+dst=.*?\bdport=4799[89]", line)
+                                if m and m.group(1) not in ("127.0.0.1", "192.168.0.28"):
+                                    client_ip = m.group(1)
+                                    break
+            except Exception:
+                pass
+
+            # Determine Resolution & FPS from Hyprland
+            res = "2560x1600"
+            fps = 60
+            try:
+                env = os.environ.copy()
+                env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+                instances_out = subprocess.check_output(
+                    ["hyprctl", "instances"], env=env, stderr=subprocess.DEVNULL, text=True
+                )
+                sig = ""
+                for line in instances_out.splitlines():
+                    if line.startswith("instance "):
+                        sig = line.split()[1].rstrip(":")
+                        break
+                if sig:
+                    env["HYPRLAND_INSTANCE_SIGNATURE"] = sig
+                    mon_out = subprocess.check_output(
+                        ["hyprctl", "monitors"], env=env, stderr=subprocess.DEVNULL, text=True
+                    )
+                    m_res = re.search(r"(\d{3,5}x\d{3,5})@(\d+)", mon_out)
+                    if m_res:
+                        res = m_res.group(1)
+                        fps = int(m_res.group(2))
+            except Exception:
+                pass
+
+            telemetry = query_gpu_telemetry()
+            vram_mb = telemetry.get("memory_used_mb", 627)
+            bitrate_kbps = 35000
+
+            # The user comes from the device table (client IP), never from a guess.
+            username = session_username(conn, client_ip)
+            auto_rec = auto_record_allowed(conn, client_ip)
+
+            # Check existing sunshine session
+            cursor.execute("SELECT session_id, started_at FROM active_sessions WHERE session_id LIKE 'sunshine-%'")
+            existing = cursor.fetchone()
+            now = int(time.time())
+
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE active_sessions
+                    SET client_ip = ?, username = ?, app_name = ?, resolution = ?, fps = ?, bitrate_kbps = ?, vram_mb = ?
+                    WHERE session_id = ?
+                    """,
+                    (client_ip, username, app_name, res, fps, bitrate_kbps, vram_mb, existing["session_id"]),
+                )
+            else:
+                session_id = f"sunshine-{now}"
+                conn.execute(
+                    """
+                    INSERT INTO active_sessions
+                    (session_id, username, client_ip, app_name, resolution, fps, bitrate_kbps, vram_mb, started_at, state)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')
+                    """,
+                    (session_id, username, client_ip, app_name, res, fps, bitrate_kbps, vram_mb, now),
+                )
+                if auto_rec:
+                    try:
+                        start_recording(conn, session_id)
+                    except Exception as rec_err:
+                        sys.stderr.write(f"Avviso auto-recording per {username}: {rec_err}\n")
+            conn.commit()
+        else:
+            # Clean up when Sunshine is free
+            cursor.execute("SELECT session_id, is_recording FROM active_sessions WHERE session_id LIKE 'sunshine-%'")
+            sunshine_rows = cursor.fetchall()
+            if sunshine_rows:
+                for r in sunshine_rows:
+                    if r["is_recording"]:
+                        try:
+                            stop_recording(conn, r["session_id"])
+                        except Exception:
+                            pass
+                    try:
+                        stop_live_stream(r["session_id"])
+                    except Exception:
+                        pass
+                    conn.execute("DELETE FROM active_sessions WHERE session_id = ?", (r["session_id"],))
+                conn.commit()
+    except Exception:
+        pass
+
+
+def wolf_username_for_ip(conn: sqlite3.Connection, client_ip: str) -> str:
+    """Wolf does not know Omarchy usernames: use the device paired from this IP."""
+    return session_username(conn, client_ip)
+
+
+def sync_wolf_sessions(conn: sqlite3.Connection, socket_path: str = DEFAULT_WOLF_SOCKET) -> None:
+    """Mirror Wolf's running stream sessions (GET /api/v1/sessions) into active_sessions.
+
+    The broker id is wolf-<Wolf session_id>: the same id Wolf substitutes into
+    its GStreamer pipelines, so the live tap (omarchy-wolf-live-tap) and
+    MediaMTX path live/wolf-<id> line up with the right player.
+    """
+    if not Path(socket_path).is_socket():
+        return
+    try:
+        sessions = wolf_api("GET", "/api/v1/sessions", socket_path=socket_path).get("sessions", [])
+    except Exception as err:
+        sys.stderr.write(f"Avviso API Wolf: {err}\n")
+        return
+    try:
+        apps = {str(a.get("id")): a.get("title", "") for a in wolf_api("GET", "/api/v1/apps", socket_path=socket_path).get("apps", [])}
+    except Exception:
+        apps = {}
+
+    active_ids = set()
+    now = int(time.time())
+    for ws in sessions:
+        wolf_id = str(ws.get("client_id") or "").strip()
+        if not wolf_id.isdigit():
+            continue
+        sess_id = f"wolf-{wolf_id}"
+        active_ids.add(sess_id)
+        client_ip = ws.get("client_ip") or "sconosciuto"
+        resolution = f"{ws.get('video_width', 1920)}x{ws.get('video_height', 1080)}"
+        fps = int(ws.get("video_refresh_rate") or 60)
+        app_name = apps.get(str(ws.get("app_id")), "") or f"Wolf app {ws.get('app_id', '?')}"
+
+        existing = conn.execute("SELECT session_id FROM active_sessions WHERE session_id = ?", (sess_id,)).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE active_sessions SET client_ip = ?, app_name = ?, resolution = ?, fps = ? WHERE session_id = ?",
+                (client_ip, app_name, resolution, fps, sess_id),
+            )
+            continue
+        username = wolf_username_for_ip(conn, client_ip)
+        conn.execute(
+            """
+            INSERT INTO active_sessions
+            (session_id, username, client_ip, app_name, resolution, fps, bitrate_kbps, vram_mb, started_at, state)
+            VALUES (?, ?, ?, ?, ?, ?, 20000, 600, ?, 'running')
+            """,
+            (sess_id, username, client_ip, app_name, resolution, fps, now),
+        )
+        conn.commit()
+        if auto_record_allowed(conn, client_ip):
+            try:
+                start_recording(conn, sess_id)
+            except Exception as err:
+                sys.stderr.write(f"Avviso auto-recording Wolf per {username}: {err}\n")
+
+    for row in conn.execute("SELECT session_id, is_recording FROM active_sessions WHERE session_id LIKE 'wolf-%'").fetchall():
+        if row[0] in active_ids:
+            continue
+        if row[1]:
+            try:
+                stop_recording(conn, row[0])
+            except Exception:
+                pass
+        kick_live_readers(row[0])
+        conn.execute("DELETE FROM active_sessions WHERE session_id = ?", (row[0],))
+    conn.commit()
+
+
+def get_multi_user_status(conn: sqlite3.Connection, wolf_socket: str = DEFAULT_WOLF_SOCKET) -> Dict[str, Any]:
+    sync_sunshine_sessions(conn)
+    sync_wolf_sessions(conn, wolf_socket)
+    telemetry = query_gpu_telemetry()
+    wolf_running = check_wolf_socket(wolf_socket)
+    nas_ok = check_nas_mount(DEFAULT_NAS_MOUNT)
+
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM active_sessions ORDER BY started_at DESC")
+    raw_sessions = [dict(row) for row in cursor.fetchall()]
+
+    cursor.execute("SELECT COUNT(*) FROM active_sessions WHERE state = 'running'")
+    running_count = cursor.fetchone()[0]
+    if running_count > 0 and telemetry.get("encoder_sessions_count", 0) == 0:
+        telemetry["encoder_sessions_count"] = running_count
+
+    sessions: List[Dict[str, Any]] = []
+    for s in raw_sessions:
+        s["is_recording"] = bool(s.get("is_recording", 0))
+        sessions.append(s)
+
+    cursor.execute(
+        "SELECT id, username, display_name, pin, role, allowed_apps, max_bitrate_mbps, status, created_at, allowed_nodes, auto_record FROM users ORDER BY id ASC"
+    )
+    users = [dict(row) for row in cursor.fetchall()]
+
+    for user in users:
+        try:
+            user["allowed_apps"] = json.loads(user["allowed_apps"])
+        except Exception:
+            user["allowed_apps"] = ["desktop", "steam"]
+        try:
+            user["allowed_nodes"] = json.loads(user.get("allowed_nodes") or '[]')
+        except Exception:
+            user["allowed_nodes"] = []
+        user["auto_record"] = bool(user.get("auto_record", 0))
+
+    settings = get_all_settings(conn)
+    admission = enforce_nvenc_admission(conn)
+    peers = list_vpn_peers(conn)
+    saves = list_savegames(conn)
+
+    # Storage per user
+    cursor.execute("""
+        SELECT username, 
+               COALESCE(SUM(size_bytes), 0) as total_bytes, 
+               COUNT(*) as snapshots_count 
+        FROM savegame_manifests 
+        GROUP BY username
+    """)
+    user_storage_rows = cursor.fetchall()
+    user_saves_breakdown = []
+    for r in user_storage_rows:
+        user_saves_breakdown.append({
+            "username": r["username"],
+            "total_mb": round(r["total_bytes"] / (1024 * 1024), 2),
+            "snapshots_count": r["snapshots_count"],
+        })
+
+    # Recordings storage
+    recordings_total_bytes = 0
+    recordings_count = 0
+    rec_dirs = [Path(DEFAULT_NAS_MOUNT), Path(DEFAULT_LOCAL_SPOOL)]
+    for rdir in rec_dirs:
+        if rdir.exists():
+            for f in rdir.glob("*.mp4"):
+                try:
+                    recordings_total_bytes += f.stat().st_size
+                    recordings_count += 1
+                except Exception:
+                    pass
+
+    # Overall NAS disk usage
+    nas_free_gb = 0.0
+    nas_total_gb = 0.0
+    if nas_ok:
+        try:
+            stat = os.statvfs(DEFAULT_NAS_MOUNT)
+            nas_free_gb = round((stat.f_bavail * stat.f_frsize) / (1024**3), 2)
+            nas_total_gb = round((stat.f_blocks * stat.f_frsize) / (1024**3), 2)
+        except Exception:
+            pass
+
+    storage_summary = {
+        "nas_mounted": nas_ok,
+        "nas_path": DEFAULT_NAS_SMB,
+        "storage_type": settings.get("savegames_storage_type", "nas"),
+        "max_concurrent_streams": int(settings.get("max_concurrent_streams", "2") or "2"),
+        "vpn_peers_count": len(peers),
+        "savegame_snapshots_count": len(saves),
+        "retention_recordings_days": int(settings.get("retention_recordings_days", "30") or "30"),
+        "nas_total_gb": nas_total_gb,
+        "nas_free_gb": nas_free_gb,
+        "recordings_mb": round(recordings_total_bytes / (1024 * 1024), 2),
+        "recordings_count": recordings_count,
+        "user_saves_breakdown": user_saves_breakdown,
+    }
+
+    return {
+        "status": "ok",
+        "timestamp": int(time.time()),
+        "telemetry": telemetry,
+        "wolf_online": wolf_running,
+        "nas_mounted": nas_ok,
+        "nas_path": DEFAULT_NAS_SMB,
+        "nas_mountpoint": DEFAULT_NAS_MOUNT,
+        "active_sessions_count": len(sessions),
+        "registered_users_count": len(users),
+        "sessions": sessions,
+        "users": users,
+        "admission": admission,
+        "settings": settings,
+        "storage": storage_summary,
+        "vpn_peers": peers,
+        "savegames": saves,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Wolf profiles: one isolated sandbox per Omarchy user.
+#
+# Guests reach Wolf through Moonlight -> "Wolf UI", pick their own profile
+# (protected by their PIN) and launch only the apps they are allowed to use.
+# Wolf UI starts every game as a lobby whose save data lives in
+# profile-data/<profile id>/..., so profiles are the real per-user sandbox.
+# Wolf persists profiles added through its API into config.toml.
+# ---------------------------------------------------------------------------
+WOLF_TEMPLATE_PROFILE = "user"  # Wolf's default all-apps profile, used as the app catalogue
+WOLF_APP_MAP = {
+    "steam": ["Steam"],
+    "desktop": ["Desktop (xfce)"],
+    "retro": ["RetroArch", "EmulationStation"],
+    "firefox": ["Firefox"],
+}
+
+
+def wolf_profile_id(username: str) -> str:
+    return "omarchy-" + re.sub(r"[^a-z0-9_-]", "_", username.strip().lower())
+
+
+def wolf_app_templates(conn: sqlite3.Connection, profiles: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """App definitions by title, from Wolf's template profile (cached in the DB
+    so they survive locking or removing that profile)."""
+    live = {a["title"]: a for p in profiles if p.get("id") == WOLF_TEMPLATE_PROFILE for a in p.get("apps", [])}
+    if live:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES ('wolf_app_templates', ?, ?)",
+                (json.dumps(live), int(time.time())),
+            )
+        return live
+    try:
+        return json.loads(get_setting(conn, "wolf_app_templates", "{}") or "{}")
+    except ValueError:
+        return {}
+
+
+def lock_wolf_template_profile(profiles: List[Dict[str, Any]]) -> bool:
+    """Wolf ships an open "User" profile with every app and no PIN: any guest
+    could pick it in Wolf UI and play with shared state. Keep it as catalogue
+    but lock it behind a random PIN nobody knows."""
+    template = next((p for p in profiles if p.get("id") == WOLF_TEMPLATE_PROFILE), None)
+    if not template or template.get("pin"):
+        return False
+    locked = dict(template)
+    locked["pin"] = [secrets.randbelow(10) for _ in range(8)]
+    locked.setdefault("icon_png_path", "")
+    wolf_api("POST", "/api/v1/profiles/remove", {"id": WOLF_TEMPLATE_PROFILE})
+    wolf_api("POST", "/api/v1/profiles/add", locked)
+    return True
+
+
+WOLF_GUEST_NETWORK = os.environ.get("OMARCHY_WOLF_GUEST_NETWORK", "omarchy-guests")
+
+
+def wolf_guest_network_ready() -> bool:
+    """The isolated Docker network created by omarchy-wolf-network-isolation.
+    Never point apps at a missing network: Wolf could not start their container."""
+    try:
+        return subprocess.run(["docker", "network", "inspect", WOLF_GUEST_NETWORK], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def isolate_wolf_app(app: Dict[str, Any], network: Optional[str]) -> Dict[str, Any]:
+    """Run the app container on the guest network (Internet only, no LAN/VM)
+    instead of Docker's default bridge. Only the network changes: capabilities
+    and seccomp stay as Games on Whales ships them (Steam's sandbox needs them)."""
+    runner = dict(app.get("runner") or {})
+    if not network or runner.get("type", "docker") != "docker":
+        return app
+    try:
+        create = json.loads(runner.get("base_create_json") or "{}")
+    except ValueError:
+        return app
+    host_config = create.setdefault("HostConfig", {})
+    host_config["NetworkMode"] = network
+    runner["base_create_json"] = json.dumps(create, indent=2)
+    return {**app, "runner": runner}
+
+
+def sync_user_wolf_profile(conn: sqlite3.Connection, username: str, previous_username: Optional[str] = None,
+                           socket_path: str = DEFAULT_WOLF_SOCKET) -> Dict[str, Any]:
+    """Create/refresh (or remove) the Wolf profile of an Omarchy user."""
+    if not Path(socket_path).is_socket():
+        return {"status": "skipped", "message": "Wolf non attivo: il profilo verrà creato alla prossima sincronizzazione"}
+    try:
+        profiles = wolf_api("GET", "/api/v1/profiles", socket_path=socket_path).get("profiles", [])
+        templates = wolf_app_templates(conn, profiles)
+        existing = {p.get("id") for p in profiles}
+        for name in {n for n in (username, previous_username) if n}:
+            pid = wolf_profile_id(name)
+            if pid in existing:
+                wolf_api("POST", "/api/v1/profiles/remove", {"id": pid}, socket_path=socket_path)
+        row = conn.execute(
+            "SELECT username, display_name, pin, allowed_apps, status FROM users WHERE username = ?", (username,)
+        ).fetchone()
+        if not row or row["status"] != "active":
+            return {"status": "ok", "message": f"Profilo Wolf di {username} rimosso"}
+        pid = wolf_profile_id(username)
+        network = WOLF_GUEST_NETWORK if wolf_guest_network_ready() else None
+        apps: List[Dict[str, Any]] = []
+        try:
+            allowed = json.loads(row["allowed_apps"] or "[]")
+        except ValueError:
+            allowed = []
+        for key in allowed:
+            for title in WOLF_APP_MAP.get(str(key).lower(), []):
+                if title in templates and all(a["title"] != title for a in apps):
+                    app = isolate_wolf_app(dict(templates[title]), network)
+                    app["id"] = f"{pid}-{len(apps) + 1}"
+                    apps.append(app)
+        pin_digits = [int(c) for c in str(row["pin"]) if c.isdigit()]
+        wolf_api("POST", "/api/v1/profiles/add", {
+            "id": pid,
+            "name": row["display_name"] or username,
+            "icon_png_path": "",
+            "pin": pin_digits or None,
+            "apps": apps,
+        }, socket_path=socket_path)
+    except Exception as err:
+        return {"status": "error", "message": f"Profilo Wolf di {username} non sincronizzato: {wolf_error_message(err)}"}
+    missing = [k for k in allowed if not WOLF_APP_MAP.get(str(k).lower())]
+    note = f" (app senza equivalente Wolf: {', '.join(missing)})" if missing else ""
+    if not network:
+        note += f"; rete ospiti {WOLF_GUEST_NETWORK} assente, app NON isolate dalla LAN (omarchy-wolf-network-isolation apply)"
+    return {"status": "ok", "isolated": bool(network), "message": f"Profilo Wolf {pid} con {len(apps)} app{note}"}
+
+
+def sync_all_wolf_profiles(conn: sqlite3.Connection, socket_path: str = DEFAULT_WOLF_SOCKET) -> Dict[str, Any]:
+    if not Path(socket_path).is_socket():
+        return {"status": "skipped", "message": "Wolf non attivo"}
+    results = {}
+    try:
+        profiles = wolf_api("GET", "/api/v1/profiles", socket_path=socket_path).get("profiles", [])
+        wolf_app_templates(conn, profiles)  # cache the catalogue before locking it
+        locked = lock_wolf_template_profile(profiles)
+        known = {r[0] for r in conn.execute("SELECT username FROM users")}
+        # Profiles of users deleted while Wolf was down.
+        for p in profiles:
+            pid = p.get("id", "")
+            if pid.startswith("omarchy-") and pid not in {wolf_profile_id(u) for u in known}:
+                wolf_api("POST", "/api/v1/profiles/remove", {"id": pid}, socket_path=socket_path)
+    except Exception as err:
+        return {"status": "error", "message": f"Sincronizzazione profili Wolf fallita: {wolf_error_message(err)}"}
+    for username in sorted(known):
+        results[username] = sync_user_wolf_profile(conn, username, socket_path=socket_path)
+    return {"status": "ok", "template_locked": locked, "users": results}
+
+
+def add_user(
+    conn: sqlite3.Connection,
+    username: str,
+    display_name: str,
+    pin: str,
+    role: str = "guest",
+    allowed_apps: Optional[List[str]] = None,
+    max_bitrate_mbps: int = 20,
+    allowed_nodes: Optional[List[str]] = None,
+    auto_record: bool = False,
+) -> Dict[str, Any]:
+    username = username.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", username):
+        raise ValueError("Username può contenere solo lettere, numeri, trattini e underscore (max 32)")
+    if not pin:
+        pin = f"{secrets.randbelow(9000) + 1000}"
+    elif len(pin) < 4:
+        raise ValueError("Il PIN deve essere di almeno 4 caratteri")
+
+    apps_json = json.dumps(allowed_apps or ["desktop", "steam"])
+    nodes_json = json.dumps(allowed_nodes if allowed_nodes is not None else [])
+    now = int(time.time())
+    auto_rec_val = 1 if auto_record else 0
+
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO users (username, display_name, pin, role, allowed_apps, max_bitrate_mbps, status, created_at, allowed_nodes, auto_record)
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+            """,
+            (username, display_name.strip(), pin.strip(), role, apps_json, max_bitrate_mbps, now, nodes_json, auto_rec_val),
+        )
+
+    user_data_dir = Path(f"/var/lib/omarchy-sessions/{username}")
+    if os.geteuid() == 0:
+        try:
+            # Crea l'utente di sistema senza shell se non esiste
+            subprocess.run(
+                ["useradd", "-M", "-s", "/usr/sbin/nologin", "-d", str(user_data_dir), username],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            user_data_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(user_data_dir, 0o750)
+            shutil.chown(user_data_dir, user=username, group=username)
+        except Exception as err:
+            sys.stderr.write(f"Avviso: configurazione account Linux {username}: {err}\n")
+
+    log_audit(conn, "user_created", {"username": username, "role": role, "home": str(user_data_dir), "allowed_nodes": nodes_json})
+    wolf = sync_user_wolf_profile(conn, username)
+    return {"status": "ok", "wolf_profile": wolf,
+            "message": f"Utente {username} creato con home isolata in {user_data_dir}. {wolf['message']}"}
+
+
+def edit_user(
+    conn: sqlite3.Connection,
+    username: str,
+    new_username: Optional[str] = None,
+    display_name: Optional[str] = None,
+    pin: Optional[str] = None,
+    role: Optional[str] = None,
+    allowed_apps: Optional[List[str]] = None,
+    max_bitrate_mbps: Optional[int] = None,
+    allowed_nodes: Optional[List[str]] = None,
+    auto_record: Optional[bool] = None,
+) -> Dict[str, Any]:
+    username = username.strip().lower()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    if not row:
+        raise ValueError(f"Utente '{username}' non trovato")
+
+    effective_username = username
+    if new_username and new_username.strip().lower() != username:
+        cand = new_username.strip().lower()
+        if not cand.isalnum() and "_" not in cand and "-" not in cand:
+            raise ValueError("Il nuovo username può contenere solo lettere, numeri, trattini e underscore")
+        cursor.execute("SELECT id FROM users WHERE username = ?", (cand,))
+        if cursor.fetchone():
+            raise ValueError(f"Lo username '{cand}' è già in uso")
+        effective_username = cand
+
+    effective_display = display_name.strip() if display_name and display_name.strip() else row["display_name"]
+    effective_pin = pin.strip() if pin and pin.strip() else row["pin"]
+    if len(effective_pin) < 4:
+        raise ValueError("Il PIN deve contenere almeno 4 caratteri")
+    effective_role = role.strip() if role and role.strip() else row["role"]
+    effective_apps = json.dumps(allowed_apps) if allowed_apps is not None else row["allowed_apps"]
+    effective_bitrate = int(max_bitrate_mbps) if max_bitrate_mbps is not None else row["max_bitrate_mbps"]
+
+    existing_nodes = row["allowed_nodes"] if "allowed_nodes" in row.keys() and row["allowed_nodes"] else '[]'
+    effective_nodes = json.dumps(allowed_nodes) if allowed_nodes is not None else existing_nodes
+
+    existing_auto_record = row["auto_record"] if "auto_record" in row.keys() else 0
+    effective_auto_record = (1 if auto_record else 0) if auto_record is not None else existing_auto_record
+
+    with conn:
+        conn.execute(
+            """
+            UPDATE users SET
+                username = ?,
+                display_name = ?,
+                pin = ?,
+                role = ?,
+                allowed_apps = ?,
+                max_bitrate_mbps = ?,
+                allowed_nodes = ?,
+                auto_record = ?
+            WHERE username = ?
+            """,
+            (
+                effective_username,
+                effective_display,
+                effective_pin,
+                effective_role,
+                effective_apps,
+                effective_bitrate,
+                effective_nodes,
+                effective_auto_record,
+                username,
+            ),
+        )
+        if effective_username != username:
+            conn.execute("UPDATE active_sessions SET username = ? WHERE username = ?", (effective_username, username))
+            conn.execute("UPDATE client_devices SET username = ? WHERE username = ?", (effective_username, username))
+
+    if effective_username != username:
+        old_home = Path(f"/var/lib/omarchy-sessions/{username}")
+        new_home = Path(f"/var/lib/omarchy-sessions/{effective_username}")
+        if old_home.exists() and not new_home.exists():
+            try:
+                old_home.rename(new_home)
+            except Exception as err:
+                sys.stderr.write(f"Avviso ridenominazione home: {err}\n")
+
+    # If allowed_nodes changed, check if active session needs to be revoked
+    if allowed_nodes is not None:
+        this_host = socket.gethostname().lower()
+        allowed = "*" in allowed_nodes or any(h.lower() in [n.lower() for n in allowed_nodes] for h in [this_host, "omarchy", "omarchy.local", "omarchy-local", "node-omarchy"])
+        if not allowed:
+            cursor.execute("SELECT session_id FROM active_sessions WHERE username = ?", (effective_username,))
+            for s_row in cursor.fetchall():
+                kill_session(conn, s_row["session_id"], reason="Accesso al nodo revocato dall'amministratore")
+
+    log_audit(
+        conn,
+        "user_edited",
+        {
+            "old_username": username,
+            "username": effective_username,
+            "display_name": effective_display,
+            "role": effective_role,
+            "allowed_nodes": effective_nodes,
+        },
+    )
+    wolf = sync_user_wolf_profile(conn, effective_username,
+                                  previous_username=username if effective_username != username else None)
+    return {
+        "status": "ok",
+        "message": f"Utente '{effective_username}' aggiornato con successo. {wolf['message']}",
+        "username": effective_username,
+        "wolf_profile": wolf,
+    }
+
+
+def remove_user(conn: sqlite3.Connection, username: str, archive_only: bool = False) -> Dict[str, Any]:
+    username = username.strip().lower()
+    user_data_dir = Path(f"/var/lib/omarchy-sessions/{username}")
+
+    with conn:
+        conn.execute("DELETE FROM active_sessions WHERE username = ?", (username,))
+        if archive_only:
+            conn.execute("UPDATE users SET status = 'archived' WHERE username = ?", (username,))
+        else:
+            conn.execute("DELETE FROM users WHERE username = ?", (username,))
+            conn.execute("DELETE FROM client_devices WHERE username = ?", (username,))
+
+    if os.geteuid() == 0:
+        try:
+            # Termina eventuali processi attivi dell'utente
+            subprocess.run(["pkill", "-u", username], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if not archive_only:
+                # Rimuove l'utente di sistema Linux
+                subprocess.run(["userdel", username], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Rimuove la directory isolata se richiesta eliminazione completa
+                if user_data_dir.is_dir():
+                    shutil.rmtree(user_data_dir, ignore_errors=True)
+        except Exception as err:
+            sys.stderr.write(f"Avviso: rimozione account Linux {username}: {err}\n")
+
+    log_audit(conn, "user_removed", {"username": username, "archived": archive_only})
+    sync_user_wolf_profile(conn, username)  # no active row left: removes the Wolf profile
+    return {
+        "status": "ok",
+        "message": f"Utente {username} {'archiviato' if archive_only else 'eliminato completamente da Omarchy'}",
+    }
+
+
+def ban_user(conn: sqlite3.Connection, username: str, reason: str = "Bannato dall'amministratore") -> Dict[str, Any]:
+    """Ban a user immediately: kills active sessions/processes, but retains all game data and save files."""
+    username = username.strip().lower()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, role, status FROM users WHERE username = ?", (username,))
+    user = cursor.fetchone()
+    if not user:
+        return {"status": "not_found", "message": f"Utente {username} non trovato"}
+    if user["role"] == "owner":
+        return {"status": "error", "message": "Impossibile bannare l'account owner principale"}
+
+    # 1. Stop any recordings for this user's active sessions and terminate them
+    cursor.execute("SELECT session_id, is_recording FROM active_sessions WHERE username = ?", (username,))
+    sessions = cursor.fetchall()
+    for s in sessions:
+        if s["is_recording"]:
+            stop_recording(conn, s["session_id"])
+        kill_session(conn, s["session_id"], reason=f"Utente bannato: {reason}")
+
+    # 2. Update status to 'banned' in SQLite
+    with conn:
+        conn.execute("UPDATE users SET status = 'banned' WHERE username = ?", (username,))
+
+    # 3. Terminate any remaining system processes if root
+    if os.geteuid() == 0:
+        try:
+            subprocess.run(["pkill", "-u", username], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as err:
+            sys.stderr.write(f"Avviso terminazione processi utente {username}: {err}\n")
+
+    # NOTE: /var/lib/omarchy-sessions/<username> is strictly preserved!
+    log_audit(conn, "user_banned", {"username": username, "reason": reason})
+    sync_user_wolf_profile(conn, username)  # banned: Wolf UI no longer offers the profile
+    return {
+        "status": "ok",
+        "message": f"Utente {username} bannato. Sessioni terminate forzatamente; dati di gioco e cartella home preservati.",
+    }
+
+
+def unban_user(conn: sqlite3.Connection, username: str) -> Dict[str, Any]:
+    """Unban a previously banned user and restore access."""
+    username = username.strip().lower()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, status FROM users WHERE username = ?", (username,))
+    user = cursor.fetchone()
+    if not user:
+        return {"status": "not_found", "message": f"Utente {username} non trovato"}
+    if user["status"] != "banned":
+        return {"status": "not_banned", "message": f"L'utente {username} non è bannato (stato: {user['status']})"}
+
+    with conn:
+        conn.execute("UPDATE users SET status = 'active' WHERE username = ?", (username,))
+
+    log_audit(conn, "user_unbanned", {"username": username})
+    sync_user_wolf_profile(conn, username)
+    return {
+        "status": "ok",
+        "message": f"Utente {username} riabilitato con successo (stato attivo).",
+    }
+
+
+def notify_hyprland_user(message: str, icon: int = 1, timeout_ms: int = 6000) -> bool:
+    """Send an on-screen desktop notification to the active Hyprland user."""
+    try:
+        hypr_runs = list(Path("/run/user/1000/hypr").glob("*"))
+        if not hypr_runs:
+            return False
+        sig = hypr_runs[0].name
+        # 1. Native Hyprland on-screen toast
+        subprocess.run(
+            [
+                "su", "daubog44", "-c",
+                f"XDG_RUNTIME_DIR=/run/user/1000 HYPRLAND_INSTANCE_SIGNATURE={sig} hyprctl notify {icon} {timeout_ms} 0 '{message}'",
+            ],
+            check=False,
+            timeout=2.0,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # 2. Desktop notification daemon if active
+        subprocess.run(
+            [
+                "su", "daubog44", "-c",
+                f"XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus notify-send 'Omarchy Control' '{message}'",
+            ],
+            check=False,
+            timeout=2.0,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def kill_session(conn: sqlite3.Connection, session_id: str, reason: str = "Disconnessione richiesta dall'amministratore") -> Dict[str, Any]:
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM active_sessions WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    if not row:
+        return {"status": "not_found", "message": f"Sessione {session_id} non trovata"}
+
+    session_data = dict(row)
+    username = session_data["username"]
+
+    # Notify user on screen before terminating
+    notify_hyprland_user("Omarchy Control: Sessione terminata dall'amministratore", icon=0, timeout_ms=4000)
+
+    # 1. Stop recording if active
+    if session_data.get("is_recording"):
+        stop_recording(conn, session_id)
+
+    # 2. Stop live stream / shared capture if active
+    try:
+        stop_live_stream(session_id)
+        kick_live_readers(session_id)
+    except Exception:
+        pass
+
+    # 3. Auto-push savegames to NAS Samba before killing to preserve progress
+    try:
+        sync_savegames(conn, username, direction="push")
+    except Exception as err:
+        sys.stderr.write(f"Avviso salvataggio automatico pre-kill per {username}: {err}\n")
+
+    # 3. Instant live session revocation: restart Sunshine
+    if session_id.startswith("sunshine-"):
+        try:
+            subprocess.run(
+                ["systemctl", "--machine=daubog44@.host", "--user", "restart", "app-dev.lizardbyte.app.Sunshine.service"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except Exception as err:
+            sys.stderr.write(f"Avviso riavvio Sunshine: {err}\n")
+    elif session_id.startswith("wolf-"):
+        try:
+            wolf_api("POST", "/api/v1/sessions/stop", {"session_id": session_id[len("wolf-"):]})
+        except Exception as err:
+            sys.stderr.write(f"Avviso stop sessione Wolf {session_id}: {err}\n")
+    elif os.geteuid() == 0 and username != "daubog44":
+        try:
+            subprocess.run(["pkill", "-TERM", "-u", username], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.2)
+            subprocess.run(["pkill", "-KILL", "-u", username], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as err:
+            sys.stderr.write(f"Avviso terminazione processi utente {username}: {err}\n")
+
+    with conn:
+        conn.execute("DELETE FROM active_sessions WHERE session_id = ?", (session_id,))
+
+    log_audit(conn, "session_killed", {"session_id": session_id, "user": username, "reason": reason})
+    return {"status": "ok", "message": f"Sessione {session_id} revocata istantaneamente e salvataggi sincronizzati su NAS"}
+
+
+WOLF_MOONLIGHT_PROFILE_ID = "moonlight-profile-id"  # events::MOONLIGHT_PROFILE_ID in Wolf
+
+
+def wolf_error_message(err: Exception) -> str:
+    """Wolf answers errors as {"success": false, "error": "..."}; keep just the text."""
+    text = str(err)
+    match = re.search(r"\{.*\}", text, re.S)
+    if match:
+        try:
+            return json.loads(match.group(0)).get("error", text)
+        except Exception:
+            pass
+    return text
+
+
+def parse_lobby_pin(pin: Any) -> Optional[List[int]]:
+    """Wolf lobby PINs are digit arrays (std::vector<short>): "1234" -> [1, 2, 3, 4]."""
+    if pin in (None, "", []):
+        return None
+    if isinstance(pin, list):
+        digits = [int(d) for d in pin]
+    else:
+        text = str(pin).strip()
+        if not text.isdigit():
+            raise ValueError("Il PIN della lobby deve contenere solo cifre")
+        digits = [int(c) for c in text]
+    if not all(0 <= d <= 9 for d in digits):
+        raise ValueError("Il PIN della lobby deve contenere solo cifre")
+    return digits
+
+
+def wolf_lobbies(socket_path: str = DEFAULT_WOLF_SOCKET) -> List[Dict[str, Any]]:
+    return wolf_api("GET", "/api/v1/lobbies", socket_path=socket_path).get("lobbies", [])
+
+
+def wolf_lobby_of_session(wolf_session_id: str, socket_path: str = DEFAULT_WOLF_SOCKET) -> Optional[Dict[str, Any]]:
+    for lobby in wolf_lobbies(socket_path):
+        if wolf_session_id in (lobby.get("connected_sessions") or []):
+            return lobby
+    return None
+
+
+def wolf_session_for_ip(client_ip: str, exclude: Optional[str] = None,
+                        socket_path: str = DEFAULT_WOLF_SOCKET) -> Optional[str]:
+    """Moonlight session (Wolf client_id) currently streaming to the given client IP."""
+    for ws in wolf_api("GET", "/api/v1/sessions", socket_path=socket_path).get("sessions", []):
+        sid = str(ws.get("client_id") or "")
+        if sid and sid != exclude and ws.get("client_ip") == client_ip:
+            return sid
+    return None
+
+
+def _render_node_is_nvidia(render_node: str) -> bool:
+    try:
+        driver = Path(f"/sys/class/drm/{Path(render_node).name}/device/driver").resolve().name
+    except Exception:
+        return False
+    return driver == "nvidia"
+
+
+def wolf_create_lobby(app_id: str, name: str, pin: Any = None, width: int = 1920, height: int = 1080,
+                      refresh_rate: int = 60, multi_user: bool = True, stop_when_everyone_leaves: bool = True,
+                      socket_path: str = DEFAULT_WOLF_SOCKET) -> Dict[str, Any]:
+    """Start a shared Wolf lobby running one of Wolf's apps (POST /api/v1/lobbies/create).
+
+    Guests who play inside a multi_user lobby can be joined by the admin's
+    Moonlight session (wolf_takeover). Runner and render node come from the app
+    (GET /api/v1/apps); the producer caps follow Wolf's own default
+    (configTOML.cpp): CUDA memory on NVIDIA with zero copy, plain raw otherwise.
+    """
+    apps = wolf_api("GET", "/api/v1/apps", socket_path=socket_path).get("apps", [])
+    app = next((a for a in apps if str(a.get("id")) == str(app_id)), None)
+    if not app:
+        return {"status": "error", "message": f"App Wolf {app_id} non trovata"}
+    render_node = app.get("render_node") or os.environ.get("WOLF_RENDER_NODE", "/dev/dri/renderD128")
+    caps = os.environ.get("OMARCHY_WOLF_PRODUCER_CAPS")
+    if not caps:
+        zero_copy = os.environ.get("WOLF_USE_ZERO_COPY", "") != "FALSE"
+        caps = "video/x-raw(memory:CUDAMemory)" if zero_copy and _render_node_is_nvidia(render_node) else "video/x-raw"
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", name).strip("_") or "lobby"
+    body = {
+        "profile_id": WOLF_MOONLIGHT_PROFILE_ID,
+        "name": name,
+        "icon_png_path": app.get("icon_png_path"),
+        "multi_user": multi_user,
+        "pin": parse_lobby_pin(pin),
+        "stop_when_everyone_leaves": stop_when_everyone_leaves,
+        "video_settings": {
+            "width": int(width),
+            "height": int(height),
+            "refresh_rate": int(refresh_rate),
+            "wayland_render_node": render_node,
+            "runner_render_node": render_node,
+            "video_producer_buffer_caps": caps,
+        },
+        "audio_settings": {"channel_count": 2},
+        "client_settings": {},
+        "runner_state_folder": f"omarchy-lobbies/{slug}",
+        "runner": app["runner"],
+    }
+    try:
+        res = wolf_api("POST", "/api/v1/lobbies/create", body, socket_path=socket_path, timeout=10.0)
+    except Exception as err:
+        return {"status": "error", "message": f"Creazione lobby Wolf fallita: {wolf_error_message(err)}"}
+    return {"status": "ok", "lobby_id": res.get("lobby_id"), "message": f"Lobby '{name}' avviata"}
+
+
+def wolf_stop_lobby(lobby_id: str, pin: Any = None, socket_path: str = DEFAULT_WOLF_SOCKET) -> Dict[str, Any]:
+    try:
+        wolf_api("POST", "/api/v1/lobbies/stop", {"lobby_id": lobby_id, "pin": parse_lobby_pin(pin)},
+                 socket_path=socket_path)
+    except Exception as err:
+        return {"status": "error", "message": f"Stop lobby Wolf fallito: {wolf_error_message(err)}"}
+    return {"status": "ok", "message": f"Lobby {lobby_id} fermata"}
+
+
+def wolf_takeover(session_id: str, owner_ip: str, admin_session: Optional[str] = None, pin: Any = None,
+                  socket_path: str = DEFAULT_WOLF_SOCKET) -> Dict[str, Any]:
+    """Join the admin's own Moonlight session to the lobby the guest plays in.
+
+    Wolf only shares sessions through lobbies: a plain Moonlight app launch is
+    not joinable. Joining moves the admin session's video/audio producer and
+    input to the lobby (sessions/lobbies.cpp), i.e. shared control, not a
+    silent view: the silent view is the live tap.
+    """
+    guest_id = session_id[len("wolf-"):]
+    try:
+        lobby = wolf_lobby_of_session(guest_id, socket_path)
+        if not lobby:
+            return {"status": "error", "message": (
+                "La sessione Wolf non è in una lobby condivisa: avvia il gioco come lobby multi-utente "
+                "(omarchy-session-broker wolf-lobby-create) e fai entrare l'ospite")}
+        if not lobby.get("multi_user"):
+            return {"status": "error", "message": f"La lobby '{lobby.get('name')}' è single-user: non si può affiancare"}
+        if lobby.get("pin_required") and not pin:
+            return {"status": "error", "message": f"La lobby '{lobby.get('name')}' richiede il PIN"}
+        admin_id = admin_session or wolf_session_for_ip(owner_ip, exclude=guest_id, socket_path=socket_path)
+        if not admin_id:
+            return {"status": "error", "message": (
+                f"Nessuna sessione Moonlight dell'amministratore connessa a Wolf da {owner_ip}: "
+                "apri un'app Wolf da Moonlight su questo dispositivo e riprova")}
+        if admin_id not in (lobby.get("connected_sessions") or []):
+            wolf_api("POST", "/api/v1/lobbies/join",
+                     {"lobby_id": lobby["id"], "moonlight_session_id": admin_id, "pin": parse_lobby_pin(pin)},
+                     socket_path=socket_path)
+    except ValueError as err:
+        return {"status": "error", "message": str(err)}
+    except Exception as err:
+        return {"status": "error", "message": f"Join lobby Wolf fallito: {wolf_error_message(err)}"}
+    return {"status": "ok", "lobby_id": lobby["id"], "admin_session": admin_id,
+            "message": f"Entrato nella lobby '{lobby.get('name')}' con la sessione Moonlight {admin_id}"}
+
+
+def wolf_release(session_id: str, owner_ip: str, admin_session: Optional[str] = None,
+                 socket_path: str = DEFAULT_WOLF_SOCKET) -> Dict[str, Any]:
+    """Leave the guest's lobby with the admin session (POST /api/v1/lobbies/leave)."""
+    guest_id = session_id[len("wolf-"):]
+    try:
+        lobby = wolf_lobby_of_session(guest_id, socket_path)
+        if not lobby:
+            return {"status": "ok", "message": "Nessuna lobby da lasciare"}
+        admin_id = admin_session or next(
+            (sid for sid in lobby.get("connected_sessions") or []
+             if sid != guest_id and sid == wolf_session_for_ip(owner_ip, exclude=guest_id, socket_path=socket_path)),
+            None,
+        )
+        if not admin_id:
+            return {"status": "ok", "message": "La sessione dell'amministratore non è nella lobby"}
+        wolf_api("POST", "/api/v1/lobbies/leave", {"lobby_id": lobby["id"], "moonlight_session_id": admin_id},
+                 socket_path=socket_path)
+    except Exception as err:
+        return {"status": "error", "message": f"Uscita dalla lobby Wolf fallita: {wolf_error_message(err)}"}
+    return {"status": "ok", "message": f"Uscito dalla lobby '{lobby.get('name')}'"}
+
+
+def sunshine_pair(pin: str, name: str) -> Dict[str, Any]:
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    sunshine_url = "https://127.0.0.1:47990/api/pin"
+    payload = json.dumps({"pin": pin, "name": name}).encode("utf-8")
+    req = urllib.request.Request(sunshine_url, data=payload, method="POST")
+    try:
+        api_user, api_password = load_sunshine_api_credentials()
+    except RuntimeError as err:
+        return {"status": "error", "message": str(err)}
+    auth_b64 = base64.b64encode(f"{api_user}:{api_password}".encode("utf-8")).decode("ascii")
+    req.add_header("Authorization", f"Basic {auth_b64}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as he:
+        if he.code == 401:
+            return {"status": "error", "message": (
+                f"Sunshine ha rifiutato le credenziali di {SUNSHINE_API_ENV}: riesegui il setup "
+                "o allinea la password con 'sunshine --creds'")}
+        return {"status": "error", "message": f"Errore Sunshine API: HTTP {he.code}"}
+    except Exception as ex:
+        return {"status": "error", "message": f"Impossibile contattare Sunshine per il pairing: {ex}"}
+    if resp_data.get("status") is True:
+        return {"status": "ok", "message": f"Dispositivo '{name}' accoppiato a Sunshine (desktop amministratore)"}
+    return {"status": "error", "message": "PIN rifiutato da Sunshine: Moonlight deve essere ancora in attesa del PIN"}
+
+
+def wolf_pair(pin: str, client_ip: Optional[str] = None) -> Dict[str, Any]:
+    """Pair through Wolf's API: GET /api/v1/pair/pending gives {pair_secret, client_ip}."""
+    try:
+        pending = wolf_api("GET", "/api/v1/pair/pending").get("requests", [])
+    except Exception as err:
+        return {"status": "error", "message": f"API Wolf non raggiungibile: {wolf_error_message(err)}"}
+    if client_ip:
+        pending = [r for r in pending if r.get("client_ip") == client_ip]
+    if not pending:
+        return {"status": "error", "message": "Nessun Moonlight in attesa di pairing su Wolf (porta 49989)"}
+    if len(pending) > 1:
+        ips = ", ".join(r.get("client_ip", "?") for r in pending)
+        return {"status": "error", "message": f"Più richieste Wolf in attesa ({ips}): indica l'IP del dispositivo"}
+    request = pending[0]
+    try:
+        wolf_api("POST", "/api/v1/pair/client", {"pair_secret": request["pair_secret"], "pin": pin})
+    except Exception as err:
+        return {"status": "error", "message": f"PIN rifiutato da Wolf: {wolf_error_message(err)}"}
+    return {"status": "ok", "client_ip": request.get("client_ip"),
+            "message": f"Dispositivo {request.get('client_ip')} accoppiato a Wolf (sandbox ospite)"}
+
+
+def pair_device(conn: sqlite3.Connection, pin: str, name: str, target: str = "auto",
+                username: Optional[str] = None, client_ip: Optional[str] = None) -> Dict[str, Any]:
+    """Pair a Moonlight client with Sunshine (owner desktop) or Wolf (guest sandboxes).
+
+    Guests must never be paired to Sunshine: Sunshine streams the owner's own
+    desktop and Steam. "auto" picks Wolf when a Wolf pairing is pending (Wolf
+    reports the client IP), otherwise Sunshine. The paired IP is bound to the
+    user so sessions and auto-recording are attributed to the right person.
+    """
+    if not pin or len(pin) != 4 or not pin.isdigit():
+        return {"status": "error", "message": "Il PIN di pairing deve essere esattamente di 4 cifre numeriche"}
+    if target not in ("auto", "sunshine", "wolf"):
+        return {"status": "error", "message": "target deve essere auto, sunshine oppure wolf"}
+    user = None
+    if username:
+        user = conn.execute("SELECT username, role FROM users WHERE username = ?", (username,)).fetchone()
+        if not user:
+            return {"status": "not_found", "message": f"Utente {username} non trovato"}
+    is_guest = bool(user) and user["role"] not in ("admin", "owner")
+
+    if target == "auto":
+        wolf_pending = []
+        if Path(DEFAULT_WOLF_SOCKET).is_socket():
+            try:
+                wolf_pending = wolf_api("GET", "/api/v1/pair/pending").get("requests", [])
+            except Exception:
+                wolf_pending = []
+        target = "wolf" if wolf_pending or is_guest else "sunshine"
+    if target == "sunshine" and is_guest:
+        return {"status": "error", "message": (
+            f"{username} è un ospite: va accoppiato a Wolf (Moonlight su <ip>:49989), non a Sunshine, "
+            "che mostra il desktop e lo Steam dell'amministratore")}
+
+    if target == "wolf":
+        res = wolf_pair(pin, client_ip)
+        paired_ip = res.get("client_ip")
+    else:
+        res = sunshine_pair(pin, name)
+        paired_ip = client_ip
+        if res["status"] == "ok" and not paired_ip:
+            # Sunshine's PIN API does not report who paired: use the client
+            # that is connected to its pairing ports right now, if unambiguous.
+            candidates = moonlight_clients_on_ports((47984, 47989))
+            paired_ip = candidates[0] if len(candidates) == 1 else None
+    if res["status"] != "ok":
+        return res
+
+    res["target"] = target
+    if username and paired_ip:
+        remember_client_device(conn, paired_ip, username, target, name)
+        res["message"] += f", associato a {username}"
+    elif username:
+        res["message"] += f". IP non rilevato: associa il dispositivo a {username} dalla lista dispositivi"
+    log_audit(conn, "device_paired", {"target": target, "username": username, "client_ip": paired_ip, "name": name})
+    return res
+
+
+def shadow_session(conn: sqlite3.Connection, session_id: str, owner_ip: str = "127.0.0.1",
+                   admin_session: Optional[str] = None, pin: Any = None) -> Dict[str, Any]:
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM active_sessions WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    if not row:
+        return {"status": "not_found", "message": f"Sessione {session_id} non trovata"}
+    session_data = dict(row)
+
+    wolf_info = None
+    if session_id.startswith("wolf-"):
+        wolf_info = wolf_takeover(session_id, owner_ip, admin_session, pin)
+        if wolf_info["status"] != "ok":
+            return wolf_info
+    else:
+        # Sunshine: the guest is on the host desktop, tell them the admin joined.
+        notify_hyprland_user(f"Omarchy Control: Controllo affiancato dall'amministratore ({owner_ip})", icon=1, timeout_ms=8000)
+
+    with conn:
+        conn.execute(
+            "UPDATE active_sessions SET state = 'shadowed', takeover_by = ? WHERE session_id = ?",
+            (owner_ip, session_id),
+        )
+    log_audit(conn, "session_shadowed", {"session_id": session_id, "owner_ip": owner_ip, "wolf": wolf_info})
+    return {
+        "status": "ok",
+        "message": wolf_info["message"] if wolf_info else f"Controllo sessione {session_id} ({session_data['username']}) acquisito",
+        "session": session_data,
+        "wolf_lobby": wolf_info,
+    }
+
+
+def release_session(conn: sqlite3.Connection, session_id: str, owner_ip: str = "127.0.0.1",
+                    admin_session: Optional[str] = None) -> Dict[str, Any]:
+    row = conn.execute("SELECT session_id FROM active_sessions WHERE session_id = ?", (session_id,)).fetchone()
+    if not row:
+        return {"status": "not_found", "message": f"Sessione {session_id} non trovata"}
+    wolf_info = wolf_release(session_id, owner_ip, admin_session) if session_id.startswith("wolf-") else None
+    if wolf_info and wolf_info["status"] != "ok":
+        return wolf_info
+    with conn:
+        conn.execute(
+            "UPDATE active_sessions SET state = 'running', takeover_by = NULL WHERE session_id = ? AND state = 'shadowed'",
+            (session_id,),
+        )
+    log_audit(conn, "session_released", {"session_id": session_id, "owner_ip": owner_ip})
+    return {"status": "ok", "message": wolf_info["message"] if wolf_info else f"Controllo di {session_id} rilasciato"}
+
+
+def capture_output_name() -> Optional[str]:
+    """Return the Hyprland output streamed by Sunshine.
+
+    Without an explicit output grim/wf-recorder capture every monitor as one
+    stitched image (headless omarchy-gtx plus any fallback output), which
+    shows up in the control plane as a half-empty, broken-looking screen.
+    """
+    override = os.environ.get("OMARCHY_CAPTURE_OUTPUT", "").strip()
+    if override:
+        return override
+    hypr_runs = sorted(Path("/run/user/1000/hypr").glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not hypr_runs:
+        return None
+    try:
+        out = subprocess.run(
+            ["runuser", "-u", "daubog44", "--", "env", "XDG_RUNTIME_DIR=/run/user/1000",
+             f"HYPRLAND_INSTANCE_SIGNATURE={hypr_runs[0].name}", "hyprctl", "monitors", "-j"],
+            capture_output=True, text=True, timeout=2.0, check=False,
+        ).stdout
+        monitors = [m for m in json.loads(out or "[]") if not m.get("disabled")]
+    except Exception:
+        return None
+    names = [m.get("name") for m in monitors if m.get("name")]
+    if "omarchy-gtx" in names:
+        return "omarchy-gtx"
+    focused = next((m.get("name") for m in monitors if m.get("focused")), None)
+    return focused or (names[0] if names else None)
+
+
+def get_live_frame_jpeg(quality: int = 65, scale: float = 0.6) -> Optional[bytes]:
+    """Capture instantaneous frame from Wayland compositor via grim for live control plane preview."""
+    grim = shutil.which("grim")
+    if not grim:
+        return None
+    cmd = ["runuser", "-u", "daubog44", "--", "env", "XDG_RUNTIME_DIR=/run/user/1000",
+           "WAYLAND_DISPLAY=wayland-1", "grim", "-s", str(scale), "-t", "jpeg", "-q", str(quality)]
+    output = capture_output_name()
+    if output:
+        cmd += ["-o", output]
+    cmd.append("-")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=3.0, check=False)
+        if proc.returncode == 0 and len(proc.stdout) > 1000:
+            return proc.stdout
+        sys.stderr.write(f"Avviso cattura frame grim: {proc.stderr.decode(errors='replace').strip()}\n")
+    except Exception as err:
+        sys.stderr.write(f"Avviso cattura frame grim: {err}\n")
+    return None
+
+
+def start_live_stream(session_id: str) -> Dict[str, Any]:
+    """Start low-latency HLS stream of active session at 30 FPS using hardware NVENC."""
+    live_dir = Path(f"/run/user/1000/omarchy-live/{session_id}")
+
+    proc = LIVE_STREAM_PROCS.get(session_id)
+    if proc and proc.poll() is None and (live_dir / "stream.m3u8").exists():
+        return {
+            "status": "ok",
+            "message": "Live stream già attivo",
+            "stream_url": f"/api/sessions/{session_id}/live/stream.m3u8",
+            "pid": proc.pid,
+        }
+
+    try:
+        live_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.chown(live_dir, user="daubog44", group="daubog44")
+            os.chmod(live_dir, 0o775)
+        except Exception:
+            pass
+        for f in live_dir.glob("*"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    except Exception as err:
+        return {"status": "error", "message": f"Errore preparazione cartella live: {err}"}
+
+    cmd = [
+        "runuser", "-u", "daubog44", "--",
+        "env",
+        "XDG_RUNTIME_DIR=/run/user/1000",
+        "WAYLAND_DISPLAY=wayland-1",
+        "LD_LIBRARY_PATH=/opt/ffmpeg-nvenc/usr/lib",
+        "wf-recorder",
+        *(["-o", output] if (output := capture_output_name()) else []),
+        "-c", "hevc_nvenc",
+        "-r", "30",
+        "-p", "preset=p4",
+        "-p", "tune=ll",
+        "-p", "b=4M",
+        "-p", "g=30",
+        "-f", str(live_dir / "stream.m3u8"),
+    ]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        LIVE_STREAM_PROCS[session_id] = proc
+    except Exception as err:
+        return {"status": "error", "message": f"Errore avvio streaming HLS: {err}"}
+
+    m3u8_file = live_dir / "stream.m3u8"
+    for _ in range(25):
+        if m3u8_file.exists() and m3u8_file.stat().st_size > 10:
+            break
+        time.sleep(0.1)
+
+    return {
+        "status": "ok",
+        "message": f"Live stream 30 FPS H.265 avviato per {session_id}",
+        "stream_url": f"/api/sessions/{session_id}/live/stream.m3u8",
+        "pid": proc.pid,
+    }
+
+
+def ffmpeg_binary() -> Optional[str]:
+    if os.path.exists("/opt/ffmpeg-nvenc/usr/bin/ffmpeg"):
+        return "/opt/ffmpeg-nvenc/usr/bin/ffmpeg"
+    return shutil.which("ffmpeg")
+
+
+def ffmpeg_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    if os.path.exists("/opt/ffmpeg-nvenc/usr/lib"):
+        env["LD_LIBRARY_PATH"] = f"/opt/ffmpeg-nvenc/usr/lib:{env.get('LD_LIBRARY_PATH', '')}"
+    return env
+
+
+WOLF_TAP_DIR = os.environ.get("OMARCHY_WOLF_TAP_DIR", "/tmp/sockets")
+
+
+def wolf_tap_socket(session_id: str) -> Path:
+    """shmsink socket written by Wolf's patched default_sink (omarchy-wolf-live-tap)."""
+    return Path(WOLF_TAP_DIR) / f"omarchy-live-{session_id[len('wolf-'):]}"
+
+
+def capture_unavailable_reason(session_id: str) -> Optional[str]:
+    """Sunshine sessions are captured from the host Hyprland output; Wolf
+    sessions render inside their container, so their video comes from a tap
+    on Wolf's own NVENC stream. None means capture is available."""
+    if not session_id.startswith("wolf-"):
+        return None
+    if not wolf_tap_socket(session_id).exists():
+        return (
+            "Video della sessione Wolf non disponibile: installa il tap con "
+            "'omarchy-setup guest multi-user wolf-live-tap --apply' e riavvia lo stream"
+        )
+    return None
+
+
+def live_path(session_id: str) -> str:
+    """MediaMTX path of a session (matches the ~^live/... rule in mediamtx.yml)."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)
+    if not safe:
+        raise ValueError("ID sessione non valido")
+    return f"live/{safe}"
+
+
+def fmp4_reader_command(ffmpeg: str, session_id: str, output: str, low_latency: bool) -> List[str]:
+    """Copy the session's shared HEVC stream from MediaMTX into fragmented MP4.
+
+    No re-encode: live fallback and recordings are bit-identical to what the
+    WebRTC viewers get. `hvc1` keeps VPS/SPS/PPS in hvcC (needed by WebKit and
+    QuickTime); fragmented MP4 stays playable if the recording is cut.
+    """
+    # No -nostdin: with an RTSP input ffmpeg 7.x then ignores SIGINT/SIGTERM and
+    # recordings never close. Callers already give it /dev/null as stdin.
+    return [
+        ffmpeg, "-hide_banner", "-loglevel", "error",
+        *(["-fflags", "nobuffer", "-flags", "low_delay"] if low_latency else []),
+        "-rtsp_transport", "tcp", "-timeout", "30000000",
+        "-i", f"{MEDIAMTX_RTSP}/{live_path(session_id)}",
+        "-map", "0:v:0", "-c", "copy", "-tag:v", "hvc1",
+        "-f", "mp4",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        *(["-frag_duration", "100000"] if low_latency else []),
+        "-y", output,
+    ]
+
+
+def whep_request(method: str, url: str, body: Optional[bytes], content_type: Optional[str], timeout: float) -> Tuple[int, Dict[str, str], bytes]:
+    req = urllib.request.Request(url, data=body, method=method)
+    if content_type:
+        req.add_header("Content-Type", content_type)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, dict(resp.headers.items()), resp.read()
+    except urllib.error.HTTPError as err:
+        return err.code, dict(err.headers.items()), err.read()
+
+
+def whep_offer(session_id: str, offer_sdp: str) -> Dict[str, Any]:
+    """Forward a WebRTC offer to MediaMTX. For an on-demand path MediaMTX
+    answers once the GPU publisher is up, hence the generous timeout."""
+    reason = capture_unavailable_reason(session_id)
+    if reason:
+        return {"status": "error", "message": reason}
+    url = f"{MEDIAMTX_WEBRTC}/{live_path(session_id)}/whep"
+    try:
+        status, headers, data = whep_request("POST", url, offer_sdp.encode(), "application/sdp", 25.0)
+    except Exception as err:
+        return {"status": "error", "message": f"MediaMTX non raggiungibile ({err}): servizio omarchy-mediamtx attivo?"}
+    if status not in (200, 201):
+        detail = data.decode(errors="replace").strip()
+        return {"status": "error", "message": f"WebRTC rifiutato da MediaMTX (HTTP {status}): {detail}"}
+    return {"status": "ok", "sdp": data.decode(), "resource": headers.get("Location", "")}
+
+
+def whep_close(session_id: str, resource: str) -> Dict[str, Any]:
+    prefix = f"/{live_path(session_id)}/whep/"
+    if not resource.startswith(prefix) or ".." in resource:
+        return {"status": "error", "message": "Risorsa WHEP non valida"}
+    try:
+        whep_request("DELETE", f"{MEDIAMTX_WEBRTC}{resource}", None, None, 5.0)
+    except Exception:
+        pass
+    return {"status": "ok"}
+
+
+LIVE_STATE_DIR = Path(os.environ.get("OMARCHY_LIVE_STATE_DIR", "/run/omarchy-live"))
+
+
+def live_info(session_id: str) -> Dict[str, Any]:
+    """What the live pipeline of a session is really doing, fallbacks included:
+    capture backend and copy/transcode (written by omarchy-capture-publish) plus
+    the codec and readers MediaMTX is serving."""
+    info: Dict[str, Any] = {"status": "ok", "capture": None, "encode": None, "fallback": False,
+                            "codec": None, "readers": []}
+    try:
+        info.update(json.loads((LIVE_STATE_DIR / f"{session_id}.json").read_text()))
+    except Exception:
+        pass
+    try:
+        name = urllib.parse.quote(live_path(session_id), safe="")
+        with urllib.request.urlopen(f"{MEDIAMTX_API}/v3/paths/get/{name}", timeout=3) as resp:
+            path = json.loads(resp.read())
+        tracks = path.get("tracks") or []
+        info["codec"] = tracks[0] if tracks else None
+        info["readers"] = [r.get("type") for r in path.get("readers", [])]
+    except Exception:
+        pass
+    return info
+
+
+def kick_live_readers(session_id: str) -> None:
+    """Disconnect every viewer/recorder of a session path (used when it is killed)."""
+    try:
+        name = urllib.parse.quote(live_path(session_id), safe="")
+        with urllib.request.urlopen(f"{MEDIAMTX_API}/v3/paths/get/{name}", timeout=3) as resp:
+            readers = json.loads(resp.read()).get("readers", [])
+    except Exception:
+        return
+    kinds = {"webRTCSession": "webrtcsessions", "rtspSession": "rtspsessions", "rtspsSession": "rtspssessions"}
+    for reader in readers:
+        kind = kinds.get(reader.get("type", ""))
+        if kind and reader.get("id"):
+            try:
+                req = urllib.request.Request(f"{MEDIAMTX_API}/v3/{kind}/kick/{reader['id']}", method="POST")
+                urllib.request.urlopen(req, timeout=3).close()
+            except Exception:
+                pass
+
+
+def pid_alive(pid: Optional[int]) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def stop_process_group(proc: subprocess.Popen) -> None:
+    """SIGINT lets wf-recorder release the NVENC session cleanly; escalate if needed."""
+    for sig, wait in ((signal.SIGINT, 2.0), (signal.SIGKILL, 1.0)):
+        if proc.poll() is not None:
+            return
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        except Exception:
+            proc.send_signal(sig)
+        try:
+            proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def stop_live_stream(session_id: str) -> Dict[str, Any]:
+    """Stop active live HLS streaming process cleanly."""
+    proc = LIVE_STREAM_PROCS.pop(session_id, None)
+    if proc:
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    try:
+        subprocess.run(
+            ["pkill", "-INT", "-f", f"wf-recorder.*omarchy-live/{session_id}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+    live_dir = Path(f"/run/user/1000/omarchy-live/{session_id}")
+    if live_dir.exists():
+        try:
+            shutil.rmtree(live_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    return {"status": "ok", "message": f"Live stream interrotto per {session_id}"}
+
+
+def spectate_session(conn: sqlite3.Connection, session_id: str, owner_ip: str = "127.0.0.1") -> Dict[str, Any]:
+    """Passive silent spectator mode: do NOT trigger intrusive notification on Hyprland, update state and return preview info."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM active_sessions WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    if not row:
+        return {"status": "not_found", "message": f"Sessione {session_id} non trovata"}
+
+    session_data = dict(row)
+    with conn:
+        conn.execute(
+            "UPDATE active_sessions SET state = 'spectating', takeover_by = ? WHERE session_id = ?",
+            (owner_ip, session_id),
+        )
+
+    # Note: SILENT SPECTATOR MODE - NO notify_hyprland_user() is called!
+    log_audit(conn, "session_spectated_passive", {"session_id": session_id, "owner_ip": owner_ip})
+
+    # The control plane polls /preview snapshots; the NVENC HLS stream is only
+    # started on demand via /live/start so watching never steals encoder time
+    # from the player's own stream.
+    stream_url = f"/api/sessions/{session_id}/live/stream.m3u8"
+
+    # Dispatch Wolf spectator mode if Wolf session
+    # Wolf sessions are viewed through the live tap: joining a Wolf lobby would
+    # hand the admin the guest's input, so nothing is sent to Wolf here.
+
+    return {
+        "status": "ok",
+        "message": f"Visualizzazione passiva silenziosa 30 FPS attivata per {session_id} ({session_data['username']})",
+        "session": session_data,
+        "mode": "passive_spectator",
+        "silent": True,
+        "preview_url": f"/api/sessions/{session_id}/preview",
+        "stream_url": stream_url,
+        "mjpg_url": f"/api/sessions/{session_id}/stream.mjpg",
+    }
+
+
+
+def start_recording(conn: sqlite3.Connection, session_id: str, nas_mount: str = DEFAULT_NAS_MOUNT) -> Dict[str, Any]:
+    """Start video recording of active session directly to Samba NAS share."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM active_sessions WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    if not row:
+        return {"status": "not_found", "message": f"Sessione {session_id} non trovata"}
+
+    session_data = dict(row)
+    if session_data.get("is_recording"):
+        return {
+            "status": "already_recording",
+            "message": f"La sessione {session_id} è già in fase di registrazione",
+            "file": session_data.get("recording_file"),
+        }
+
+    username = session_data["username"]
+    now = datetime.datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H-%M-%S")
+    clean_app = session_data["app_name"].replace(" ", "_").lower()
+    filename = f"{clean_app}_30fps_hevc.mp4"
+
+    # Select target dir: Samba NAS mount if accessible, else local spool fallback
+    # Folder structure: {nas_mount}/recordings/{username}/{date}/{time}/
+    if check_nas_mount(nas_mount):
+        target_dir = Path(nas_mount) / "recordings" / username / date_str / time_str
+        storage_type = "NAS Samba (192.168.0.39/nvme1)"
+    else:
+        spool_path = Path(DEFAULT_LOCAL_SPOOL)
+        if not os.access(spool_path.parent, os.W_OK) and not spool_path.exists():
+            target_dir = Path.home() / ".local" / "share" / "omarchy" / "recordings" / username / date_str / time_str
+        else:
+            target_dir = spool_path / username / date_str / time_str
+        storage_type = "Spool Locale (NAS non montato)"
+
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.chown(target_dir, user="daubog44", group="daubog44")
+            os.chmod(target_dir, 0o775)
+        except Exception:
+            pass
+    except Exception as err:
+        return {"status": "error", "message": f"Impossibile creare cartella destinazione {target_dir}: {err}"}
+
+    output_path = target_dir / filename
+    recording_pid: Optional[int] = None
+    codec_info = "H.265 / HEVC NVENC Hardware 30 FPS (GTX 1050 Mobile)"
+
+    # Reads the same on-demand GPU HEVC stream as the live viewers (MediaMTX):
+    # identical quality, no second encode, copied without re-encoding into a
+    # fragmented MP4 on the NAS. Its own session so it outlives SSH callers.
+    reason = capture_unavailable_reason(session_id)
+    if reason:
+        return {"status": "error", "message": reason}
+    ffmpeg = ffmpeg_binary()
+    if not ffmpeg:
+        return {"status": "error", "message": "ffmpeg non installato sull'host"}
+    try:
+        proc = subprocess.Popen(
+            fmp4_reader_command(ffmpeg, session_id, str(output_path), low_latency=False),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=ffmpeg_env(), start_new_session=True,
+        )
+    except Exception as err:
+        return {"status": "error", "message": f"Impossibile avviare la registrazione: {err}"}
+    time.sleep(1.0)
+    if proc.poll() is not None:
+        return {"status": "error", "message": "La registrazione si è fermata subito: servizio omarchy-mediamtx attivo?"}
+    RECORDINGS[session_id] = proc
+    recording_pid = proc.pid
+    codec_info = "H.265 / HEVC NVENC 30 FPS (stesso flusso GPU del video live)"
+
+    with conn:
+        conn.execute(
+            """
+            UPDATE active_sessions
+            SET is_recording = 1, recording_pid = ?, recording_file = ?
+            WHERE session_id = ?
+            """,
+            (recording_pid, str(output_path), session_id),
+        )
+
+    # Notify user on screen
+    notify_hyprland_user(f"Omarchy Control: Avviata registrazione video 30 FPS ({storage_type})", icon=2, timeout_ms=5000)
+
+    log_audit(
+        conn,
+        "recording_started",
+        {"session_id": session_id, "user": username, "file": str(output_path), "storage": storage_type, "codec": codec_info},
+    )
+
+    return {
+        "status": "ok",
+        "message": f"Registrazione sessione {session_id} avviata con codec {codec_info} su {storage_type}",
+        "file": str(output_path),
+        "storage": storage_type,
+        "codec": codec_info,
+    }
+
+
+def stop_recording(conn: sqlite3.Connection, session_id: str) -> Dict[str, Any]:
+    """Stop active video recording cleanly and finalize MP4 file."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM active_sessions WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    if not row:
+        return {"status": "not_found", "message": f"Sessione {session_id} non trovata"}
+
+    session_data = dict(row)
+    if not session_data.get("is_recording"):
+        return {"status": "not_recording", "message": f"La sessione {session_id} non è in registrazione"}
+
+    rec_pid = session_data.get("recording_pid")
+    rec_file = session_data.get("recording_file")
+
+    proc = RECORDINGS.pop(session_id, None)
+    if rec_pid and pid_alive(rec_pid) and rec_pid != os.getpid():
+        try:
+            # SIGINT lets ffmpeg flush the last fragment and write the index.
+            os.kill(rec_pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        for _ in range(100):
+            if proc is not None and proc.poll() is not None:
+                break
+            if proc is None and not pid_alive(rec_pid):
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.kill(rec_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    with conn:
+        conn.execute(
+            """
+            UPDATE active_sessions
+            SET is_recording = 0, recording_pid = NULL
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        )
+
+    # Notify user on screen
+    notify_hyprland_user("Omarchy Control: Registrazione video salvata con successo", icon=5, timeout_ms=5000)
+
+    log_audit(conn, "recording_stopped", {"session_id": session_id, "file": rec_file})
+    return {
+        "status": "ok",
+        "message": f"Registrazione sessione {session_id} salvata e conclusa con successo",
+        "file": rec_file,
+    }
+
+
+_RECORDING_PROBES: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+
+
+def recording_roots() -> List[Path]:
+    """Same places start_recording writes to: NAS first, then the local spool."""
+    roots = [
+        Path(DEFAULT_NAS_MOUNT) / "recordings",
+        Path(DEFAULT_LOCAL_SPOOL),
+        Path.home() / ".local" / "share" / "omarchy" / "recordings",
+    ]
+    unique: List[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return unique
+
+
+def probe_recording(path: Path) -> Dict[str, Any]:
+    """Duration/resolution/codec via ffprobe, cached per (path, size, mtime)."""
+    st = path.stat()
+    key = (str(path), st.st_size, int(st.st_mtime))
+    if key in _RECORDING_PROBES:
+        return _RECORDING_PROBES[key]
+    info: Dict[str, Any] = {"duration_s": None, "width": None, "height": None, "codec": None}
+    ffprobe = shutil.which("ffprobe") or "/opt/ffmpeg-nvenc/usr/bin/ffprobe"
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=codec_name,width,height:format=duration", "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=8, env=ffmpeg_env(),
+        ).stdout
+        data = json.loads(out or "{}")
+        stream = (data.get("streams") or [{}])[0]
+        duration = (data.get("format") or {}).get("duration")
+        info = {
+            "duration_s": round(float(duration), 1) if duration not in (None, "N/A") else None,
+            "width": stream.get("width"),
+            "height": stream.get("height"),
+            "codec": stream.get("codec_name"),
+        }
+    except Exception:
+        pass
+    _RECORDING_PROBES[key] = info
+    return info
+
+
+def list_recordings(conn: sqlite3.Connection, username: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Recorded .mp4 files, newest first. Layout: <root>/<user>/<date>/<time>/<file>.mp4."""
+    active = {row[0] for row in conn.execute(
+        "SELECT recording_file FROM active_sessions WHERE is_recording = 1 AND recording_file IS NOT NULL")}
+    items: List[Dict[str, Any]] = []
+    for idx, root in enumerate(recording_roots()):
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.mp4"):
+            try:
+                rel = path.relative_to(root)
+                st = path.stat()
+            except (ValueError, OSError):
+                continue
+            parts = rel.parts
+            owner = parts[0] if len(parts) > 1 else None
+            if username and owner != username:
+                continue
+            in_progress = str(path) in active
+            # Older recordings sit directly in <user>/: fall back to the file time.
+            stamp = datetime.datetime.fromtimestamp(st.st_mtime)
+            item = {
+                "id": f"{idx}:{rel.as_posix()}",
+                "file": path.name,
+                "username": owner,
+                "date": parts[1] if len(parts) > 3 else stamp.strftime("%Y-%m-%d"),
+                "time": parts[2].replace("-", ":") if len(parts) > 3 else stamp.strftime("%H:%M:%S"),
+                "size_mb": round(st.st_size / (1024 * 1024), 1),
+                "modified": int(st.st_mtime),
+                "storage": "nas" if idx == 0 else "locale",
+                "in_progress": in_progress,
+            }
+            if not in_progress:
+                item.update(probe_recording(path))
+            items.append(item)
+    items.sort(key=lambda r: r["modified"], reverse=True)
+    return items
+
+
+def resolve_recording(rec_id: str) -> Path:
+    """Map an opaque recording id back to a file, refusing anything outside the roots."""
+    idx_text, _, rel = (rec_id or "").partition(":")
+    roots = recording_roots()
+    if not idx_text.isdigit() or int(idx_text) >= len(roots) or not rel or ".." in Path(rel).parts:
+        raise ValueError("ID registrazione non valido")
+    root = roots[int(idx_text)].resolve()
+    path = (root / rel).resolve()
+    if root not in path.parents or path.suffix != ".mp4" or not path.is_file():
+        raise ValueError("Registrazione non trovata")
+    return path
+
+
+def delete_recording(conn: sqlite3.Connection, rec_id: str) -> Dict[str, Any]:
+    try:
+        path = resolve_recording(rec_id)
+    except ValueError as err:
+        return {"status": "not_found", "message": str(err)}
+    if conn.execute("SELECT 1 FROM active_sessions WHERE is_recording = 1 AND recording_file = ?", (str(path),)).fetchone():
+        return {"status": "error", "message": "Registrazione in corso: fermala prima di eliminarla"}
+    path.unlink()
+    root = recording_roots()[int(rec_id.split(":", 1)[0])].resolve()
+    parent = path.parent
+    while parent != root and root in parent.parents:
+        try:
+            parent.rmdir()  # only removes empty date/time folders
+        except OSError:
+            break
+        parent = parent.parent
+    log_audit(conn, "recording_deleted", {"id": rec_id})
+    return {"status": "ok", "message": f"Registrazione {path.name} eliminata"}
+
+
+def register_demo_session(conn: sqlite3.Connection, username: str = "ospite1") -> Dict[str, Any]:
+    """Helper to simulate an active session for testing."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM users WHERE username = ?", (username,))
+    user_row = cursor.fetchone()
+    if user_row and user_row["status"] == "banned":
+        return {"status": "error", "message": f"Impossibile avviare la sessione: l'utente '{username}' è bannato"}
+
+    session_id = f"wolf-sess-{int(time.time())}"
+    with conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO active_sessions
+            (session_id, username, client_ip, app_name, resolution, fps, bitrate_kbps, vram_mb, started_at, state, is_recording, recording_file)
+            VALUES (?, ?, '192.168.1.150', 'Steam Big Picture', '1920x1080', 60, 20000, 750, ?, 'running', 0, NULL)
+            """,
+            (session_id, username, int(time.time())),
+        )
+    return {"status": "ok", "session_id": session_id}
+
+
+def install_backend(conn: sqlite3.Connection, db_path: Path) -> Dict[str, Any]:
+    steps_completed: List[str] = []
+    sessions_dir = Path("/var/lib/omarchy-sessions")
+    omarchy_dir = Path("/var/lib/omarchy")
+    nas_mount_dir = Path(DEFAULT_NAS_MOUNT)
+    spool_dir = Path(DEFAULT_LOCAL_SPOOL)
+
+    for d in [sessions_dir, omarchy_dir, nas_mount_dir, spool_dir]:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            if os.geteuid() == 0:
+                os.chmod(d, 0o750)
+            steps_completed.append(f"Directory {d} preparata")
+        except Exception as e:
+            steps_completed.append(f"Directory {d}: {e}")
+
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    count = cursor.fetchone()[0]
+    if count == 0:
+        add_user(conn, "owner", "Host Principale", "0000", role="owner", allowed_apps=["desktop", "steam", "all"])
+        steps_completed.append("Utente owner predefinito inizializzato")
+
+    return {
+        "status": "ok",
+        "message": "Backend Session Broker configurato con successo",
+        "steps": steps_completed,
+        "db_path": str(db_path),
+        "nas_mount": str(nas_mount_dir),
+    }
+
+
+def get_or_create_api_token(conn: sqlite3.Connection) -> str:
+    env_token = os.environ.get("OMARCHY_API_TOKEN", "").strip()
+    if env_token:
+        return set_api_token(conn, env_token)
+    token_file = Path("/etc/omarchy/api_token")
+    if token_file.is_file():
+        try:
+            f_token = token_file.read_text().strip()
+            if f_token:
+                return set_api_token(conn, f_token)
+        except Exception:
+            pass
+    with conn:
+        row = conn.execute("SELECT value FROM system_settings WHERE key = 'api_token'").fetchone()
+        if row and row["value"]:
+            return str(row["value"])
+        new_token = f"omarchy_sec_{secrets.token_urlsafe(32)}"
+        now = int(time.time())
+        conn.execute(
+            "INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES ('api_token', ?, ?)",
+            (new_token, now),
+        )
+        return new_token
+
+
+def reset_api_token(conn: sqlite3.Connection) -> str:
+    with conn:
+        new_token = f"omarchy_sec_{secrets.token_urlsafe(32)}"
+        now = int(time.time())
+        conn.execute(
+            "INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES ('api_token', ?, ?)",
+            (new_token, now),
+        )
+        return new_token
+
+
+def set_api_token(conn: sqlite3.Connection, custom_token: str) -> str:
+    clean_token = custom_token.strip()
+    with conn:
+        now = int(time.time())
+        conn.execute(
+            "INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES ('api_token', ?, ?)",
+            (clean_token, now),
+        )
+        return clean_token
+
+
+class BrokerRESTHandler(BaseHTTPRequestHandler):
+    db_path: Path = Path(DEFAULT_DB)
+    expected_token: str = ""
+    wolf_socket: str = DEFAULT_WOLF_SOCKET
+
+    def log_message(self, format, *args):
+        sys.stderr.write(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [BrokerAPI] {self.address_string()} - {format % args}\n")
+
+    def send_cors_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_cors_headers()
+        self.end_headers()
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def send_json(self, status_code: int, data: Any):
+        payload = json.dumps(data).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_cors_headers()
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def send_error_json(self, status_code: int, message: str):
+        self.send_json(status_code, {"status": "error", "error": message})
+
+    def stream_recording(self, rec_id: str) -> None:
+        """Serve a recording with HTTP Range (206) so the player can seek."""
+        try:
+            path = resolve_recording(rec_id)
+        except ValueError as err:
+            return self.send_error_json(404, str(err))
+        size = path.stat().st_size
+        start, end = 0, size - 1
+        range_hdr = self.headers.get("Range", "")
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", range_hdr.strip())
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:  # suffix range: last N bytes
+                start = max(0, size - int(m.group(2)))
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_cors_headers()
+                self.end_headers()
+                return
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        else:
+            self.send_response(200)
+        length = end - start + 1
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Cache-Control", "private, max-age=60")
+        self.send_cors_headers()
+        self.end_headers()
+        try:
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the player seeked elsewhere or closed
+
+    def stream_live_mp4(self, session_id: str) -> None:
+        """Fallback viewer (no WebRTC): the shared stream remuxed to fMP4 over HTTP."""
+        reason = capture_unavailable_reason(session_id)
+        if reason:
+            return self.send_error_json(409, reason)
+        ffmpeg = ffmpeg_binary()
+        if not ffmpeg:
+            return self.send_error_json(503, "ffmpeg non installato sull'host")
+        try:
+            reader = subprocess.Popen(
+                fmp4_reader_command(ffmpeg, session_id, "pipe:1", low_latency=True),
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=ffmpeg_env(),
+            )
+        except Exception as err:
+            return self.send_error_json(503, f"Impossibile avviare il video live: {err}")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.send_cors_headers()
+            self.end_headers()
+            self.close_connection = True
+            assert reader.stdout is not None
+            while True:
+                chunk = reader.stdout.read1(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # viewer closed the monitor
+        finally:
+            if reader.poll() is None:
+                reader.terminate()
+                try:
+                    reader.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    reader.kill()
+                    reader.wait()
+
+    def check_auth(self) -> bool:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/api/health", "/api/ping"):
+            return True
+        auth_hdr = self.headers.get("Authorization", "").strip()
+        if auth_hdr:
+            parts = auth_hdr.split(" ", 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                if secrets.compare_digest(parts[1].strip(), self.expected_token):
+                    return True
+        qs = urllib.parse.parse_qs(parsed.query)
+        token_in_qs = qs.get("token", [None])[0]
+        if token_in_qs and secrets.compare_digest(token_in_qs.strip(), self.expected_token):
+            return True
+        return False
+
+    def read_json_body(self) -> Optional[Dict[str, Any]]:
+        content_len = int(self.headers.get("Content-Length", 0))
+        if content_len <= 0:
+            return {}
+        raw = self.rfile.read(content_len)
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except Exception:
+            return None
+
+    def get_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def do_GET(self):
+        if not self.check_auth():
+            return self.send_error_json(401, "Non autorizzato: Bearer Token non valido o mancante")
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        conn = self.get_conn()
+        try:
+            if path in ("/api/health", "/api/ping"):
+                return self.send_json(200, {"status": "ok", "service": "omarchy-session-broker", "version": "0.3.0"})
+            elif path == "/api/status":
+                status = get_multi_user_status(conn, self.wolf_socket)
+                return self.send_json(200, status)
+            elif path == "/api/sessions":
+                status = get_multi_user_status(conn, self.wolf_socket)
+                return self.send_json(200, status.get("sessions", []))
+            elif path == "/api/users":
+                status = get_multi_user_status(conn, self.wolf_socket)
+                return self.send_json(200, status.get("users", []))
+            elif path == "/api/settings":
+                settings = get_all_settings(conn)
+                return self.send_json(200, settings)
+            elif path == "/api/saves":
+                username = qs.get("username", [None])[0]
+                saves = list_savegames(conn, username)
+                return self.send_json(200, saves)
+            elif path == "/api/vpn/peers":
+                username = qs.get("username", [None])[0]
+                peers = list_vpn_peers(conn, username)
+                return self.send_json(200, peers)
+            elif path == "/api/recordings":
+                return self.send_json(200, list_recordings(conn, qs.get("username", [None])[0]))
+            elif path == "/api/recordings/stream":
+                return self.stream_recording(qs.get("id", [""])[0])
+            elif path == "/api/devices":
+                rows = conn.execute("SELECT client_ip, username, target, device_name, updated_at FROM client_devices ORDER BY username").fetchall()
+                return self.send_json(200, [dict(r) for r in rows])
+            elif path == "/api/wolf/lobbies":
+                try:
+                    return self.send_json(200, {"status": "ok", "lobbies": wolf_lobbies()})
+                except Exception as err:
+                    return self.send_error_json(502, f"API Wolf non raggiungibile: {wolf_error_message(err)}")
+            elif path == "/api/ddns":
+                status_file = Path("/etc/omarchy/ddns-status.json")
+                info = {"status": "ok", "enabled": True, "domain": "cloudgamingadrian.duckdns.org"}
+                if status_file.exists():
+                    try:
+                        info.update(json.loads(status_file.read_text(encoding="utf-8")))
+                    except Exception:
+                        pass
+                return self.send_json(200, info)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/live.mp4"):
+                session_id = path.split("/")[3]
+                return self.stream_live_mp4(session_id)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/live/info"):
+                return self.send_json(200, live_info(path.split("/")[3]))
+
+            elif path.startswith("/api/sessions/") and "/live/" in path:
+                parts = path.split("/")
+                if len(parts) >= 6:
+                    sess_id = parts[3]
+                    file_name = parts[5]
+                    if ".." not in file_name and (file_name.endswith(".m3u8") or file_name.endswith(".ts")):
+                        target_file = Path(f"/run/user/1000/omarchy-live/{sess_id}/{file_name}")
+                        if file_name.endswith(".m3u8") and not target_file.exists():
+                            start_live_stream(sess_id)
+
+                        if file_name.endswith(".m3u8"):
+                            for _ in range(25):
+                                if target_file.exists() and target_file.stat().st_size > 10:
+                                    break
+                                time.sleep(0.1)
+
+                        if target_file.exists():
+                            content_type = "application/vnd.apple.mpegurl" if file_name.endswith(".m3u8") else "video/mp2t"
+                            data = target_file.read_bytes()
+                            self.send_response(200)
+                            self.send_header("Content-Type", content_type)
+                            self.send_header("Content-Length", str(len(data)))
+                            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                            self.send_cors_headers()
+                            self.end_headers()
+                            self.wfile.write(data)
+                            return
+                        else:
+                            return self.send_error_json(404, "File streaming HLS non ancora pronto")
+                return self.send_error_json(400, "Richiesta streaming live non valida")
+
+            elif path.startswith("/api/sessions/") and path.endswith("/preview"):
+                if path.split("/")[3].startswith("wolf-"):
+                    # grim sees the host desktop, never a Wolf container.
+                    return self.send_error_json(409, "Istantanea non disponibile per Wolf: usa il video live")
+                frame = get_live_frame_jpeg(quality=65, scale=0.6)
+                if frame:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Content-Length", str(len(frame)))
+                    self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                    self.send_header("Pragma", "no-cache")
+                    self.send_cors_headers()
+                    self.end_headers()
+                    self.wfile.write(frame)
+                    return
+                else:
+                    return self.send_error_json(503, "Impossibile catturare il frame live (display non attivo o grim non disponibile)")
+
+            elif path.startswith("/api/sessions/") and path.endswith("/stream.mjpg"):
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.send_cors_headers()
+                self.end_headers()
+                try:
+                    for _ in range(600):
+                        frame = get_live_frame_jpeg(quality=55, scale=0.5)
+                        if frame:
+                            self.wfile.write(b"--frame\r\n")
+                            self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                            self.wfile.write(f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii"))
+                            self.wfile.write(frame)
+                            self.wfile.write(b"\r\n")
+                        time.sleep(0.18)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
+            else:
+                return self.send_error_json(404, f"Endpoint non trovato: {path}")
+        except Exception as e:
+            return self.send_error_json(500, f"Errore broker: {e}")
+        finally:
+            conn.close()
+
+    def do_POST(self):
+        if not self.check_auth():
+            return self.send_error_json(401, "Non autorizzato: Bearer Token non valido o mancante")
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        body = self.read_json_body()
+        if body is None:
+            return self.send_error_json(400, "Payload JSON non valido")
+
+        conn = self.get_conn()
+        try:
+            if path == "/api/users":
+                username = body.get("username", "")
+                display = body.get("display_name", username)
+                pin = body.get("pin", "")
+                role = body.get("role", "guest")
+                apps = body.get("apps", ["steam", "desktop"])
+                bitrate = int(body.get("max_bitrate_mbps", 20))
+                allowed_nodes = body.get("allowed_nodes", ["*"])
+                auto_record = bool(body.get("auto_record", False))
+                res = add_user(conn, username, display, pin, role, apps, bitrate, allowed_nodes, auto_record)
+                return self.send_json(200, res)
+
+            elif path.startswith("/api/users/") and path.endswith("/ban"):
+                parts = path.split("/")
+                username = parts[3]
+                reason = body.get("reason", "Ban amministrativo")
+                res = ban_user(conn, username, reason)
+                return self.send_json(200, res)
+
+            elif path.startswith("/api/users/") and path.endswith("/unban"):
+                parts = path.split("/")
+                username = parts[3]
+                res = unban_user(conn, username)
+                return self.send_json(200, res)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/kill"):
+                parts = path.split("/")
+                session_id = parts[3]
+                reason = body.get("reason", "Terminata dall'amministratore")
+                res = kill_session(conn, session_id, reason)
+                return self.send_json(200, res)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/whep"):
+                session_id = path.split("/")[3]
+                offer = (body or {}).get("sdp", "")
+                if not offer.startswith("v=0"):
+                    return self.send_error_json(400, "Offerta SDP mancante")
+                res = whep_offer(session_id, offer)
+                return self.send_json(200 if res["status"] == "ok" else 502, res)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/whep/close"):
+                session_id = path.split("/")[3]
+                return self.send_json(200, whep_close(session_id, (body or {}).get("resource", "")))
+
+            elif path.startswith("/api/sessions/") and path.endswith("/live/start"):
+                parts = path.split("/")
+                session_id = parts[3]
+                res = start_live_stream(session_id)
+                return self.send_json(200, res)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/live/stop"):
+                parts = path.split("/")
+                session_id = parts[3]
+                res = stop_live_stream(session_id)
+                with conn:
+                    conn.execute(
+                        "UPDATE active_sessions SET state = 'running', takeover_by = NULL "
+                        "WHERE session_id = ? AND state = 'spectating'",
+                        (session_id,),
+                    )
+                return self.send_json(200, res)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/spectate"):
+                parts = path.split("/")
+                session_id = parts[3]
+                owner_ip = body.get("owner_ip", self.client_address[0])
+                res = spectate_session(conn, session_id, owner_ip)
+                return self.send_json(200, res)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/takeover"):
+                parts = path.split("/")
+                session_id = parts[3]
+                owner_ip = body.get("owner_ip", self.client_address[0])
+                res = shadow_session(conn, session_id, owner_ip, body.get("admin_session"), body.get("pin"))
+                return self.send_json(200, res)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/release"):
+                session_id = path.split("/")[3]
+                owner_ip = body.get("owner_ip", self.client_address[0])
+                return self.send_json(200, release_session(conn, session_id, owner_ip, body.get("admin_session")))
+
+            elif path == "/api/wolf/lobbies":
+                res = wolf_create_lobby(
+                    str(body.get("app_id", "")), str(body.get("name", "Omarchy lobby")), body.get("pin"),
+                    int(body.get("width", 1920)), int(body.get("height", 1080)), int(body.get("refresh_rate", 60)),
+                    bool(body.get("multi_user", True)), bool(body.get("stop_when_everyone_leaves", True)),
+                )
+                return self.send_json(200 if res["status"] == "ok" else 502, res)
+
+            elif path == "/api/wolf/profiles/sync":
+                res = sync_all_wolf_profiles(conn)
+                return self.send_json(200 if res["status"] != "error" else 502, res)
+
+            elif path.startswith("/api/wolf/lobbies/") and path.endswith("/stop"):
+                res = wolf_stop_lobby(path.split("/")[4], body.get("pin"))
+                return self.send_json(200 if res["status"] == "ok" else 502, res)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/recording/start"):
+                parts = path.split("/")
+                session_id = parts[3]
+                nas_mount = body.get("nas_mount", DEFAULT_NAS_MOUNT)
+                res = start_recording(conn, session_id, nas_mount)
+                return self.send_json(200, res)
+
+            elif path.startswith("/api/sessions/") and path.endswith("/recording/stop"):
+                parts = path.split("/")
+                session_id = parts[3]
+                res = stop_recording(conn, session_id)
+                return self.send_json(200, res)
+
+            elif path == "/api/settings":
+                key = body.get("key", "")
+                val = body.get("value", "")
+                res = set_setting(conn, key, val)
+                return self.send_json(200, res)
+
+            elif path == "/api/admission":
+                vram = int(body.get("requested_vram_mb", 600))
+                res = enforce_nvenc_admission(conn, vram)
+                return self.send_json(200, res)
+
+            elif path == "/api/saves/sync":
+                username = body.get("username", "")
+                direction = body.get("direction", "push")
+                res = sync_savegames(conn, username, direction)
+                return self.send_json(200, res)
+
+            elif path == "/api/nas/prune":
+                dry_run = bool(body.get("dry_run", False))
+                res = prune_nas_storage(conn, dry_run)
+                return self.send_json(200, res)
+
+            elif path == "/api/nas/test":
+                server = body.get("server", "")
+                share = body.get("share", "")
+                username = body.get("username", "")
+                password = body.get("password", "")
+                res = test_nas_share(server, share, username, password)
+                return self.send_json(200 if res.get("status") == "ok" else 400, res)
+
+            elif path == "/api/nas/mount":
+                server = body.get("server", "")
+                share = body.get("share", "")
+                mountpoint = body.get("mountpoint", DEFAULT_NAS_MOUNT)
+                username = body.get("username", "")
+                password = body.get("password", "")
+                res = mount_nas_share(conn, server, share, mountpoint, username, password)
+                return self.send_json(200 if res.get("status") == "ok" else 400, res)
+
+            elif path == "/api/vpn/peers":
+                username = body.get("username", "")
+                client_name = body.get("client_name", "")
+                res = add_vpn_peer(conn, username, client_name)
+                return self.send_json(200, res)
+
+            elif path == "/api/pair":
+                res = pair_device(
+                    conn,
+                    str(body.get("pin", "")).strip(),
+                    str(body.get("name", "Client")).strip() or "Client",
+                    str(body.get("target", "auto")).strip().lower(),
+                    (str(body.get("username")).strip().lower() or None) if body.get("username") else None,
+                    (str(body.get("client_ip")).strip() or None) if body.get("client_ip") else None,
+                )
+                code = 200 if res["status"] == "ok" else (404 if res["status"] == "not_found" else 400)
+                return self.send_json(code, res)
+
+            elif path == "/api/devices":
+                client_ip = str(body.get("client_ip", "")).strip()
+                username = str(body.get("username", "")).strip().lower()
+                if not re.fullmatch(r"[0-9a-fA-F:.]+", client_ip or "-"):
+                    return self.send_error_json(400, "IP del dispositivo non valido")
+                if not conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+                    return self.send_error_json(404, f"Utente {username} non trovato")
+                remember_client_device(conn, client_ip, username, str(body.get("target", "sunshine")), body.get("device_name"))
+                return self.send_json(200, {"status": "ok", "message": f"{client_ip} associato a {username}"})
+
+            elif path == "/api/ddns":
+                domain = body.get("domain", "cloudgamingadrian").strip()
+                token = body.get("token", "").strip()
+                enabled = bool(body.get("enabled", True))
+
+                conf_path = Path("/etc/omarchy/ddns.conf")
+                conf_path.parent.mkdir(parents=True, exist_ok=True)
+                conf_path.write_text(
+                    f"ENABLED={str(enabled).lower()}\n"
+                    f"PROVIDER=duckdns\n"
+                    f"DOMAIN={domain}\n"
+                    f"TOKEN={token}\n"
+                    f"INTERVAL_SECONDS=300\n",
+                    encoding="utf-8"
+                )
+                try:
+                    os.chmod(conf_path, 0o600)
+                except Exception:
+                    pass
+
+                res = {"status": "ok", "message": f"Configurazione salvata per {domain}.duckdns.org"}
+                updater_bin = "/usr/local/bin/omarchy-ddns-updater"
+                if Path(updater_bin).exists():
+                    try:
+                        cmd = subprocess.run([updater_bin, "--once"], capture_output=True, text=True, timeout=15)
+                        try:
+                            res = json.loads(cmd.stdout)
+                        except Exception:
+                            res["stdout"] = cmd.stdout
+                    except Exception as ex:
+                        res["warning"] = f"Aggiornamento immediato fallito: {ex}"
+
+                return self.send_json(200, res)
+
+            else:
+                return self.send_error_json(404, f"Endpoint non trovato: {path}")
+        except Exception as e:
+            return self.send_error_json(500, f"Errore broker: {e}")
+        finally:
+            conn.close()
+
+    def do_PUT(self):
+        if not self.check_auth():
+            return self.send_error_json(401, "Non autorizzato: Bearer Token non valido o mancante")
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        body = self.read_json_body()
+        if body is None:
+            return self.send_error_json(400, "Payload JSON non valido")
+
+        conn = self.get_conn()
+        try:
+            if path.startswith("/api/users/"):
+                username = path[len("/api/users/"):]
+                res = edit_user(
+                    conn,
+                    username,
+                    body.get("new_username"),
+                    body.get("display_name"),
+                    body.get("pin"),
+                    body.get("role"),
+                    body.get("apps"),
+                    body.get("max_bitrate_mbps"),
+                    body.get("allowed_nodes"),
+                    body.get("auto_record"),
+                )
+                return self.send_json(200, res)
+            elif path == "/api/settings":
+                key = body.get("key", "")
+                val = body.get("value", "")
+                res = set_setting(conn, key, val)
+                return self.send_json(200, res)
+            else:
+                return self.send_error_json(404, f"Endpoint non trovato: {path}")
+        except Exception as e:
+            return self.send_error_json(500, f"Errore broker: {e}")
+        finally:
+            conn.close()
+
+    def do_DELETE(self):
+        if not self.check_auth():
+            return self.send_error_json(401, "Non autorizzato: Bearer Token non valido o mancante")
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        conn = self.get_conn()
+        try:
+            if path.startswith("/api/users/"):
+                username = path[len("/api/users/"):]
+                res = remove_user(conn, username, archive=False)
+                return self.send_json(200, res)
+            elif path.startswith("/api/vpn/peers/"):
+                peer_id = path[len("/api/vpn/peers/"):]
+                res = revoke_vpn_peer(conn, peer_id)
+                return self.send_json(200, res)
+            elif path == "/api/recordings":
+                rec_id = urllib.parse.parse_qs(parsed.query).get("id", [""])[0]
+                res = delete_recording(conn, rec_id)
+                code = {"ok": 200, "not_found": 404}.get(res["status"], 409)
+                return self.send_json(code, res)
+            else:
+                return self.send_error_json(404, f"Endpoint non trovato: {path}")
+        except Exception as e:
+            return self.send_error_json(500, f"Errore broker: {e}")
+        finally:
+            conn.close()
+
+
+def run_daemon(db_path: Path, port: int, bind_addr: str, wolf_socket: str):
+    conn = init_db(db_path)
+    token = get_or_create_api_token(conn)
+    # Recordings whose ffmpeg died with a previous daemon are no longer running.
+    with conn:
+        for row in conn.execute("SELECT session_id, recording_pid FROM active_sessions WHERE is_recording = 1").fetchall():
+            if not pid_alive(row[1]):
+                conn.execute("UPDATE active_sessions SET is_recording = 0, recording_pid = NULL WHERE session_id = ?", (row[0],))
+    conn.close()
+
+    BrokerRESTHandler.db_path = db_path
+    BrokerRESTHandler.expected_token = token
+    BrokerRESTHandler.wolf_socket = wolf_socket
+
+    def initial_wolf_sync() -> None:
+        # Wolf may come up after the broker: retry for a few minutes.
+        for _ in range(30):
+            if Path(wolf_socket).is_socket():
+                sync_conn = sqlite3.connect(str(db_path))
+                sync_conn.row_factory = sqlite3.Row
+                try:
+                    res = sync_all_wolf_profiles(sync_conn, wolf_socket)
+                    sys.stderr.write(f"Profili Wolf: {res.get('status')} {res.get('message', '')}\n")
+                finally:
+                    sync_conn.close()
+                return
+            time.sleep(10)
+
+    threading.Thread(target=initial_wolf_sync, name="wolf-profile-sync", daemon=True).start()
+    server = ThreadingHTTPServer((bind_addr, port), BrokerRESTHandler)
+    sys.stderr.write("=== Omarchy Session Broker REST API Daemon ===\n")
+    sys.stderr.write(f"In ascolto su: http://{bind_addr}:{port}\n")
+    sys.stderr.write(f"Database: {db_path}\n")
+    sys.stderr.write(f"Bearer Token: {token}\n")
+    sys.stderr.write("=============================================\n")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        sys.stderr.write("\nArresto daemon in corso...\n")
+        server.server_close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Omarchy Session Broker & Multi-User Manager")
+    parser.add_argument("--db", help="Percorso database SQLite delle sessioni", default=None)
+    parser.add_argument("--wolf-socket", help="Percorso socket UNIX di Wolf", default=DEFAULT_WOLF_SOCKET)
+    parser.add_argument("--nas-mount", help="Punto di mount Samba NAS", default=DEFAULT_NAS_MOUNT)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("init", help="Inizializza lo schema del database")
+    subparsers.add_parser("status-json", help="Ritorna lo stato completo multi-utente in formato JSON")
+    subparsers.add_parser("list-sessions", help="Elenca le sessioni attive in formato JSON")
+    subparsers.add_parser("list-users", help="Elenca gli utenti registrati in formato JSON")
+
+    # add-user
+    p_add = subparsers.add_parser("add-user", help="Crea un nuovo utente")
+    p_add.add_argument("--username", required=True, help="Username unico")
+    p_add.add_argument("--display", required=True, help="Nome visualizzato")
+    p_add.add_argument("--pin", required=True, help="PIN di accoppiamento a 4+ cifre")
+    p_add.add_argument("--role", default="guest", choices=["guest", "admin"], help="Ruolo")
+    p_add.add_argument("--apps", nargs="*", default=["desktop", "steam"], help="Applicazioni consentite")
+    p_add.add_argument("--bitrate", type=int, default=20, help="Bitrate massimo in Mbps")
+    p_add.add_argument("--allowed-nodes", nargs="*", help="Nodi autorizzati ('*' o lista id nodi)")
+    p_add.add_argument("--auto-record", action="store_true", help="Abilita registrazione automatica delle sessioni")
+
+    # edit-user
+    p_edit = subparsers.add_parser("edit-user", help="Modifica un utente esistente")
+    p_edit.add_argument("--username", required=True, help="Username attuale dell'utente")
+    p_edit.add_argument("--new-username", help="Nuovo username (se rinominato)")
+    p_edit.add_argument("--display", help="Nome visualizzato")
+    p_edit.add_argument("--pin", help="PIN di accoppiamento a 4+ cifre")
+    p_edit.add_argument("--role", choices=["guest", "admin"], help="Ruolo")
+    p_edit.add_argument("--apps", nargs="*", help="Applicazioni consentite")
+    p_edit.add_argument("--bitrate", type=int, help="Bitrate massimo in Mbps")
+    p_edit.add_argument("--allowed-nodes", nargs="*", help="Nodi autorizzati ('*' o lista id nodi)")
+    p_edit.add_argument("--auto-record", action="store_true", default=None, help="Abilita registrazione automatica")
+    p_edit.add_argument("--no-auto-record", dest="auto_record", action="store_false", help="Disabilita registrazione automatica")
+
+    # remove-user
+    p_rm = subparsers.add_parser("remove-user", help="Rimuove o archivia un utente")
+    p_rm.add_argument("--username", required=True, help="Username da rimuovere")
+    p_rm.add_argument("--archive", action="store_true", help="Archivia invece di eliminare")
+
+    # ban-user
+    p_ban = subparsers.add_parser("ban-user", help="Banna un utente revocando l'accesso ma preservando i dati di gioco")
+    p_ban.add_argument("--username", required=True, help="Username da bannare")
+    p_ban.add_argument("--reason", default="Bannato dall'amministratore", help="Motivo del ban")
+
+    # unban-user
+    p_unban = subparsers.add_parser("unban-user", help="Riabilita un utente precedentemente bannato")
+    p_unban.add_argument("--username", required=True, help="Username da riabilitare")
+
+    # kill-session
+    p_kill = subparsers.add_parser("kill-session", help="Termina una sessione attiva")
+    p_kill.add_argument("--id", required=True, help="ID della sessione da terminare")
+    p_kill.add_argument("--reason", default="Terminata dall'amministratore", help="Motivo")
+
+    # shadow-session
+    p_shadow = subparsers.add_parser("shadow-session", help="Prende il controllo o affianca una sessione")
+    p_shadow.add_argument("--id", required=True, help="ID della sessione")
+    p_shadow.add_argument("--owner-ip", default="127.0.0.1", help="IP dell'amministratore")
+    p_shadow.add_argument("--admin-session", help="Wolf: ID della sessione Moonlight dell'admin (default: trovata dall'IP)")
+    p_shadow.add_argument("--pin", help="Wolf: PIN della lobby, se richiesto")
+
+    # release-session
+    p_release = subparsers.add_parser("release-session", help="Rilascia il controllo (Wolf: esce dalla lobby)")
+    p_release.add_argument("--id", required=True, help="ID della sessione")
+    p_release.add_argument("--owner-ip", default="127.0.0.1", help="IP dell'amministratore")
+    p_release.add_argument("--admin-session", help="Wolf: ID della sessione Moonlight dell'admin")
+
+    # Wolf lobbies (sessione condivisa tra piu' client Moonlight)
+    subparsers.add_parser("wolf-lobbies", help="Elenca le lobby Wolf")
+    subparsers.add_parser("wolf-sync-profiles", help="Crea/aggiorna i profili Wolf (sandbox) di tutti gli utenti")
+    p_lobby = subparsers.add_parser("wolf-lobby-create", help="Avvia un'app Wolf come lobby condivisa")
+    p_lobby.add_argument("--app-id", required=True, help="ID app Wolf (GET /api/v1/apps)")
+    p_lobby.add_argument("--name", required=True, help="Nome della lobby")
+    p_lobby.add_argument("--pin", help="PIN numerico per entrare (opzionale)")
+    p_lobby.add_argument("--width", type=int, default=1920)
+    p_lobby.add_argument("--height", type=int, default=1080)
+    p_lobby.add_argument("--fps", type=int, default=60)
+    p_lobby.add_argument("--single-user", action="store_true", help="Non permettere altri client")
+    p_lobby_stop = subparsers.add_parser("wolf-lobby-stop", help="Ferma una lobby Wolf")
+    p_lobby_stop.add_argument("--id", required=True, help="ID della lobby")
+    p_lobby_stop.add_argument("--pin", help="PIN della lobby, se richiesto")
+
+    # spectate-session
+    p_spectate = subparsers.add_parser("spectate-session", help="Visualizza sessione in modalità spettatore passivo senza notifiche")
+    p_spectate.add_argument("--id", required=True, help="ID della sessione")
+    p_spectate.add_argument("--owner-ip", default="127.0.0.1", help="IP dell'amministratore")
+
+    # start-recording
+    p_start_rec = subparsers.add_parser("start-recording", help="Avvia la registrazione della sessione su NAS Samba")
+    p_start_rec.add_argument("--id", required=True, help="ID della sessione da registrare")
+
+    # stop-recording
+    p_stop_rec = subparsers.add_parser("stop-recording", help="Ferma la registrazione della sessione")
+    p_stop_rec.add_argument("--id", required=True, help="ID della sessione da fermare")
+
+    # demo-session
+    p_demo = subparsers.add_parser("demo-session", help="Registra una sessione di prova")
+    p_demo.add_argument("--username", default="ospite1", help="Nome utente per la sessione di prova")
+
+    # Enterprise Subparsers
+    subparsers.add_parser("get-settings", help="Mostra tutte le impostazioni enterprise di sistema")
+
+    p_set_setting = subparsers.add_parser("set-setting", help="Aggiorna un'impostazione di sistema")
+    p_set_setting.add_argument("--key", required=True, help="Chiave impostazione")
+    p_set_setting.add_argument("--value", required=True, help="Nuovo valore")
+
+    p_admit = subparsers.add_parser("check-admission", help="Verifica disponibilità hardware NVENC per nuovi stream")
+    p_admit.add_argument("--vram", type=int, default=600, help="VRAM richiesta in MB")
+
+    p_sync_saves = subparsers.add_parser("sync-saves", help="Sincronizza salvataggi tra runtime locale e NAS Samba")
+    p_sync_saves.add_argument("--username", required=True, help="Nome utente")
+    p_sync_saves.add_argument("--direction", choices=["push", "pull"], default="push", help="Direzione sync")
+
+    p_list_saves = subparsers.add_parser("list-saves", help="Elenca snapshot salvataggi su NAS")
+    p_list_saves.add_argument("--username", help="Nome utente opzionale")
+
+    p_prune_nas = subparsers.add_parser("prune-nas", help="Esegue pulizia retention registrazioni e snapshot vecchi su NAS")
+    p_prune_nas.add_argument("--dry-run", action="store_true", help="Simula l'eliminazione")
+
+    p_vpn_add = subparsers.add_parser("vpn-peer-add", help="Genera nuovo peer WireGuard mesh VPN")
+    p_vpn_add.add_argument("--username", required=True, help="Nome utente")
+    p_vpn_add.add_argument("--client-name", required=True, help="Nome dispositivo client")
+
+    p_vpn_list = subparsers.add_parser("vpn-peer-list", help="Elenca peer WireGuard configurati")
+    p_vpn_list.add_argument("--username", help="Nome utente opzionale")
+
+    p_vpn_del = subparsers.add_parser("vpn-peer-del", help="Revoca ed elimina un peer WireGuard")
+    p_vpn_del.add_argument("--id", required=True, help="ID peer da revocare")
+
+    # pair
+    p_pair = subparsers.add_parser("pair", help="Accoppia un Moonlight a Sunshine (admin) o Wolf (ospiti)")
+    p_pair.add_argument("--pin", required=True, help="Codice PIN a 4 cifre")
+    p_pair.add_argument("--name", default="Client", help="Nome descrittivo del dispositivo")
+    p_pair.add_argument("--target", choices=["auto", "sunshine", "wolf"], default="auto", help="Server di destinazione")
+    p_pair.add_argument("--username", help="Utente a cui associare il dispositivo")
+    p_pair.add_argument("--client-ip", help="IP del dispositivo (se più richieste sono in attesa)")
+    subparsers.add_parser("devices", help="Elenca i dispositivi associati agli utenti")
+    p_map = subparsers.add_parser("map-device", help="Associa manualmente un IP client a un utente")
+    p_map.add_argument("--ip", required=True)
+    p_map.add_argument("--username", required=True)
+    p_map.add_argument("--target", choices=["sunshine", "wolf"], default="sunshine")
+    p_map.add_argument("--name")
+
+    # install-backend
+    subparsers.add_parser("install-backend", help="Installa e prepara il backend multi-utente")
+
+    # daemon
+    p_daemon = subparsers.add_parser("daemon", help="Avvia il server REST API HTTP daemon (Zero-SSH)")
+    p_daemon.add_argument("--port", type=int, default=47995, help="Porta TCP di ascolto (default: 47995)")
+    p_daemon.add_argument("--bind", default="0.0.0.0", help="Indirizzo bind (default: 0.0.0.0)")
+
+    # token
+    p_token = subparsers.add_parser("token", help="Mostra o rigenera il Bearer Token di autenticazione REST API")
+    p_token.add_argument("--reset", action="store_true", help="Rigenera un nuovo Bearer Token casuale")
+    p_token.add_argument("--set", type=str, help="Imposta un Bearer Token personalizzato o master per il cluster")
+    p_token.add_argument("--raw", action="store_true", help="Stampa solo la stringa del token")
+
+    args = parser.parse_args()
+    db_path = get_db_path(args.db)
+    conn = init_db(db_path)
+
+    try:
+        if args.command == "init":
+            print(json.dumps({"status": "ok", "db": str(db_path)}))
+        elif args.command == "status-json":
+            result = get_multi_user_status(conn, args.wolf_socket)
+            print(json.dumps(result, indent=2))
+        elif args.command == "list-sessions":
+            status = get_multi_user_status(conn, args.wolf_socket)
+            print(json.dumps(status["sessions"], indent=2))
+        elif args.command == "list-users":
+            status = get_multi_user_status(conn, args.wolf_socket)
+            print(json.dumps(status["users"], indent=2))
+        elif args.command == "add-user":
+            res = add_user(conn, args.username, args.display, args.pin, args.role, args.apps, args.bitrate, args.allowed_nodes, args.auto_record)
+            print(json.dumps(res))
+        elif args.command == "edit-user":
+            res = edit_user(conn, args.username, args.new_username, args.display, args.pin, args.role, args.apps, args.bitrate, args.allowed_nodes, args.auto_record)
+            print(json.dumps(res))
+        elif args.command == "remove-user":
+            res = remove_user(conn, args.username, args.archive)
+            print(json.dumps(res))
+        elif args.command == "ban-user":
+            res = ban_user(conn, args.username, args.reason)
+            print(json.dumps(res))
+        elif args.command == "unban-user":
+            res = unban_user(conn, args.username)
+            print(json.dumps(res))
+        elif args.command == "kill-session":
+            res = kill_session(conn, args.id, args.reason)
+            print(json.dumps(res))
+        elif args.command == "shadow-session":
+            res = shadow_session(conn, args.id, args.owner_ip, args.admin_session, args.pin)
+            print(json.dumps(res))
+        elif args.command == "release-session":
+            print(json.dumps(release_session(conn, args.id, args.owner_ip, args.admin_session)))
+        elif args.command == "wolf-sync-profiles":
+            print(json.dumps(sync_all_wolf_profiles(conn), indent=2, ensure_ascii=False))
+        elif args.command == "wolf-lobbies":
+            print(json.dumps(wolf_lobbies()))
+        elif args.command == "wolf-lobby-create":
+            print(json.dumps(wolf_create_lobby(args.app_id, args.name, args.pin, args.width, args.height,
+                                               args.fps, multi_user=not args.single_user)))
+        elif args.command == "wolf-lobby-stop":
+            print(json.dumps(wolf_stop_lobby(args.id, args.pin)))
+        elif args.command == "spectate-session":
+            res = spectate_session(conn, args.id, args.owner_ip)
+            print(json.dumps(res))
+        elif args.command == "start-recording":
+            res = start_recording(conn, args.id, args.nas_mount)
+            print(json.dumps(res))
+        elif args.command == "stop-recording":
+            res = stop_recording(conn, args.id)
+            print(json.dumps(res))
+        elif args.command == "demo-session":
+            res = register_demo_session(conn, args.username)
+            print(json.dumps(res))
+        elif args.command == "get-settings":
+            res = get_all_settings(conn)
+            print(json.dumps(res, indent=2))
+        elif args.command == "set-setting":
+            res = set_setting(conn, args.key, args.value)
+            print(json.dumps(res, indent=2))
+        elif args.command == "check-admission":
+            res = enforce_nvenc_admission(conn, args.vram)
+            print(json.dumps(res, indent=2))
+        elif args.command == "sync-saves":
+            res = sync_savegames(conn, args.username, args.direction)
+            print(json.dumps(res, indent=2))
+        elif args.command == "list-saves":
+            res = list_savegames(conn, args.username)
+            print(json.dumps(res, indent=2))
+        elif args.command == "prune-nas":
+            res = prune_nas_storage(conn, args.dry_run)
+            print(json.dumps(res, indent=2))
+        elif args.command == "vpn-peer-add":
+            res = add_vpn_peer(conn, args.username, args.client_name)
+            print(json.dumps(res, indent=2))
+        elif args.command == "vpn-peer-list":
+            res = list_vpn_peers(conn, args.username)
+            print(json.dumps(res, indent=2))
+        elif args.command == "vpn-peer-del":
+            res = revoke_vpn_peer(conn, args.id)
+            print(json.dumps(res, indent=2))
+        elif args.command == "pair":
+            print(json.dumps(pair_device(conn, args.pin, args.name, args.target, args.username, args.client_ip)))
+        elif args.command == "devices":
+            print(json.dumps([dict(r) for r in conn.execute("SELECT * FROM client_devices ORDER BY username")], indent=2))
+        elif args.command == "map-device":
+            remember_client_device(conn, args.ip, args.username, args.target, args.name)
+            print(json.dumps({"status": "ok", "message": f"{args.ip} associato a {args.username}"}))
+        elif args.command == "install-backend":
+            res = install_backend(conn, db_path)
+            print(json.dumps(res, indent=2))
+        elif args.command == "daemon":
+            conn.close()
+            run_daemon(db_path, args.port, args.bind, args.wolf_socket)
+            return
+        elif args.command == "token":
+            if getattr(args, "set", None):
+                token = set_api_token(conn, args.set)
+                if args.raw:
+                    print(token)
+                else:
+                    print(json.dumps({"token": token, "status": "custom_set"}, indent=2))
+            elif args.reset:
+                token = reset_api_token(conn)
+                if args.raw:
+                    print(token)
+                else:
+                    print(json.dumps({"token": token, "status": "reset"}, indent=2))
+            else:
+                token = get_or_create_api_token(conn)
+                if args.raw:
+                    print(token)
+                else:
+                    print(json.dumps({"token": token, "status": "active"}, indent=2))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,15 @@
+[Unit]
+Description=Omarchy Dynamic DNS Updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omarchy-ddns-updater --once
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,54 @@
+# Wolf (Games on Whales) for Omarchy multi-user cloud gaming.
+# Installed by: scripts/omarchy-wolf-install (values come from /etc/omarchy/wolf/.env).
+#
+# Based on the official NVIDIA "driver volume" quickstart
+# (games-on-whales/wolf docs/modules/user/pages/quickstart.adoc), plus:
+#   - ports moved off the Moonlight defaults, which Sunshine already uses on
+#     this host (add the server in Moonlight as <ip>:${WOLF_HTTP_PORT});
+#   - WOLF_RENDER_NODE/WOLF_ENCODER_NODE pinned to the NVIDIA render node: the
+#     default /dev/dri/renderD128 is the Proxmox virtio GPU on this VM;
+#   - /tmp/sockets shared with the host (Wolf's XDG_RUNTIME_DIR) so the
+#     Omarchy live tap (omarchy-wolf-live-tap) is readable from the host;
+#   - /var/run/wolf shared so the session broker can use Wolf's API socket.
+services:
+  wolf:
+    image: ${WOLF_IMAGE:-ghcr.io/games-on-whales/wolf:stable}
+    container_name: wolf
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - NVIDIA_DRIVER_VOLUME_NAME=nvidia-driver-vol
+      - XDG_RUNTIME_DIR=/tmp/sockets
+      - HOST_APPS_STATE_FOLDER=/etc/wolf
+      - WOLF_SOCKET_PATH=/var/run/wolf/wolf.sock
+      - WOLF_RENDER_NODE=${WOLF_RENDER_NODE}
+      - WOLF_ENCODER_NODE=${WOLF_RENDER_NODE}
+      - WOLF_HTTP_PORT=${WOLF_HTTP_PORT:-49989}
+      - WOLF_HTTPS_PORT=${WOLF_HTTPS_PORT:-49984}
+      - WOLF_CONTROL_PORT=${WOLF_CONTROL_PORT:-49999}
+      - WOLF_RTSP_SETUP_PORT=${WOLF_RTSP_SETUP_PORT:-50010}
+      - WOLF_VIDEO_PING_PORT=${WOLF_VIDEO_PING_PORT:-50100}
+      - WOLF_AUDIO_PING_PORT=${WOLF_AUDIO_PING_PORT:-50200}
+    volumes:
+      - /etc/wolf/:/etc/wolf:rw
+      - /tmp/sockets:/tmp/sockets:rw
+      - /var/run/wolf:/var/run/wolf:rw
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /dev/:/dev/:rw
+      - /run/udev:/run/udev:rw
+      - nvidia-driver-vol:/usr/nvidia:rw
+    devices:
+      - /dev/dri
+      - /dev/uinput
+      - /dev/uhid
+      - /dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools
+      - /dev/nvidiactl
+      - /dev/nvidia0
+      - /dev/nvidia-modeset
+    device_cgroup_rules:
+      - 'c 13:* rmw'
+
+volumes:
+  nvidia-driver-vol:
+    external: true

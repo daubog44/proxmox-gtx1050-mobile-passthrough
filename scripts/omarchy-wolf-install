@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# Installs Wolf (Games on Whales) next to Sunshine on the Omarchy GPU VM.
+#
+#   omarchy-wolf-install [check|apply|status] [--repo DIR]
+#
+# Follows Wolf's official NVIDIA "driver volume" quickstart and adapts it to
+# this host (see packaging/wolf/docker-compose.yml): Wolf listens on its own
+# ports (Sunshine keeps the Moonlight defaults), renders/encodes on the NVIDIA
+# render node, shares /tmp/sockets for the live-view tap and /var/run/wolf for
+# the broker. After Wolf wrote its default config, the live tap is applied.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+action="${1:-check}"; shift || true
+while (($#)); do
+  case "$1" in
+    --repo) repo_root="$2"; shift 2 ;;
+    *) printf 'argomento sconosciuto: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+
+readonly INSTALL_DIR=/etc/omarchy/wolf
+readonly GOW_DRIVER_DOCKERFILE='https://raw.githubusercontent.com/games-on-whales/gow/master/images/nvidia-driver/Dockerfile'
+# Sunshine owns 47984/47989/47990/48010 tcp and 47998-48000 udp.
+readonly WOLF_TCP_PORTS=(49984 49989 50010)
+readonly WOLF_UDP_PORTS=(49999 50100 50200)
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+
+# Works from the repository (omarchy-setup) and from the Arch package.
+compose_src="$repo_root/packaging/wolf/docker-compose.yml"
+[[ -f "$compose_src" ]] || compose_src=/usr/share/omarchy/wolf/docker-compose.yml
+live_tap="$repo_root/scripts/omarchy-wolf-live-tap"
+[[ -x "$live_tap" ]] || live_tap="$(command -v omarchy-wolf-live-tap || true)"
+wolf_ui_coop="$repo_root/scripts/omarchy-wolf-ui-coop"
+[[ -x "$wolf_ui_coop" ]] || wolf_ui_coop="$(command -v omarchy-wolf-ui-coop || true)"
+note() { printf '==> %s\n' "$*"; }
+
+compose() {
+  if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi
+}
+
+nvidia_render_node() {
+  local node
+  for node in /sys/class/drm/renderD*; do
+    [[ "$(basename "$(readlink -f "$node/device/driver")")" == nvidia ]] && { echo "/dev/dri/$(basename "$node")"; return; }
+  done
+  return 1
+}
+
+preflight() {
+  local problems=0 dev port
+  command -v docker >/dev/null || { echo '  - docker non installato'; problems=1; }
+  docker info >/dev/null 2>&1 || { echo '  - demone docker non raggiungibile (eseguire come root, docker attivo?)'; problems=1; }
+  { docker compose version || command -v docker-compose; } >/dev/null 2>&1 || { echo '  - docker compose non disponibile'; problems=1; }
+  [[ "$(cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null)" == Y ]] || { echo '  - nvidia_drm.modeset non attivo (serve nvidia-drm.modeset=1)'; problems=1; }
+  [[ -r /sys/module/nvidia/version ]] || { echo '  - modulo nvidia non caricato'; problems=1; }
+  nvidia_render_node >/dev/null || { echo '  - render node NVIDIA non trovato in /dev/dri'; problems=1; }
+  for dev in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/uinput /dev/uhid; do
+    [[ -e "$dev" ]] || { echo "  - device mancante: $dev (prova: nvidia-modprobe -u -c=0 / modprobe uinput uhid)"; problems=1; }
+  done
+  for port in "${WOLF_TCP_PORTS[@]}"; do
+    ss -Hltn "sport = :$port" | grep -q . && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx wolf && { echo "  - porta TCP $port già occupata"; problems=1; }
+  done
+  return "$problems"
+}
+
+build_driver_volume() {
+  local nv_version current
+  nv_version="$(cat /sys/module/nvidia/version)"
+  current="$(docker image inspect gow/nvidia-driver:latest -f '{{index .Config.Labels "omarchy.nv_version"}}' 2>/dev/null || true)"
+  if [[ "$current" != "$nv_version" ]]; then
+    note "creo l'immagine del driver NVIDIA $nv_version (gow/nvidia-driver)"
+    curl -fsSL "$GOW_DRIVER_DOCKERFILE" \
+      | docker build -q -t gow/nvidia-driver:latest --label "omarchy.nv_version=$nv_version" \
+          -f - --build-arg "NV_VERSION=$nv_version" . >/dev/null
+    # A volume from another driver version would mismatch the kernel module.
+    docker volume rm nvidia-driver-vol >/dev/null 2>&1 || true
+  fi
+  docker volume inspect nvidia-driver-vol >/dev/null 2>&1 \
+    || docker create --rm --mount source=nvidia-driver-vol,destination=/usr/nvidia gow/nvidia-driver:latest sh >/dev/null
+}
+
+open_firewall() {
+  command -v ufw >/dev/null || return 0
+  local port
+  for port in "${WOLF_TCP_PORTS[@]}"; do ufw allow "$port/tcp" comment 'Omarchy Wolf (Moonlight)' >/dev/null; done
+  for port in "${WOLF_UDP_PORTS[@]}"; do ufw allow "$port/udp" comment 'Omarchy Wolf (Moonlight)' >/dev/null; done
+}
+
+case "$action" in
+  check)
+    if preflight; then note 'prerequisiti Wolf OK'; else die 'prerequisiti Wolf mancanti (vedi sopra)'; fi
+    ;;
+  apply)
+    (( EUID == 0 )) || die 'eseguire come root'
+    preflight || die 'prerequisiti Wolf mancanti (vedi sopra)'
+    render_node="$(nvidia_render_node)"
+    install -d -m 0755 "$INSTALL_DIR" /etc/wolf /tmp/sockets /var/run/wolf
+    [[ -f "$compose_src" ]] || die "docker-compose di Wolf non trovato ($compose_src)"
+    install -m 0644 "$compose_src" "$INSTALL_DIR/docker-compose.yml"
+    cat > "$INSTALL_DIR/.env" <<EOF
+WOLF_RENDER_NODE=$render_node
+WOLF_HTTP_PORT=49989
+WOLF_HTTPS_PORT=49984
+WOLF_CONTROL_PORT=49999
+WOLF_RTSP_SETUP_PORT=50010
+WOLF_VIDEO_PING_PORT=50100
+WOLF_AUDIO_PING_PORT=50200
+EOF
+    # /tmp is cleared at boot: recreate the shared sockets dir before Docker.
+    printf 'd /tmp/sockets 0755 root root -\nd /var/run/wolf 0755 root root -\n' > /etc/tmpfiles.d/omarchy-wolf.conf
+    build_driver_volume
+    # A "wolf" container started outside this compose (e.g. by hand) would
+    # block `up` with a name conflict and may lack the API socket/mounts.
+    # Its state lives in /etc/wolf, so replacing the container keeps it.
+    if docker inspect wolf >/dev/null 2>&1; then
+      managed_dir="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' wolf 2>/dev/null || true)"
+      if [[ "$managed_dir" != "$INSTALL_DIR" ]]; then
+        note "sostituisco il container wolf non gestito dal compose Omarchy (${managed_dir:-avviato a mano})"
+        docker rm -f wolf >/dev/null
+      fi
+    fi
+    # Old example files set invented variables (WOLF_ENABLE_SESSION_SHARING...).
+    if [[ -f /etc/omarchy/wolf.env ]] && grep -q 'WOLF_ENABLE_SESSION_SHARING' /etc/omarchy/wolf.env; then
+      cp -p /etc/omarchy/wolf.env "/etc/omarchy/wolf.env.omarchy-bak-$(date +%Y%m%d-%H%M%S)"
+      [[ -f "$repo_root/config/wolf.env.example" ]] && install -m 0644 "$repo_root/config/wolf.env.example" /etc/omarchy/wolf.env
+      sed -i "s|^WOLF_RENDER_NODE=.*|WOLF_RENDER_NODE=$render_node|" /etc/omarchy/wolf.env
+    fi
+    compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$INSTALL_DIR/.env" pull -q
+    compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$INSTALL_DIR/.env" up -d
+    open_firewall
+
+    note 'attendo che Wolf generi /etc/wolf/cfg/config.toml'
+    for _ in $(seq 60); do [[ -f /etc/wolf/cfg/config.toml && -S /var/run/wolf/wolf.sock ]] && break; sleep 1; done
+    [[ -f /etc/wolf/cfg/config.toml ]] || die 'Wolf non ha creato la configurazione: docker logs wolf'
+    for _ in $(seq 30); do [[ -S /var/run/wolf/wolf.sock ]] && break; sleep 1; done
+    if [[ ! -S /var/run/wolf/wolf.sock ]]; then
+      docker logs --tail 300 wolf 2>&1 | grep -iE "API server|socket|error|fatal" | tail -15 >&2 || true
+      die 'API di Wolf assente (/var/run/wolf/wolf.sock): profili, lobby e pairing non possono funzionare (log sopra)'
+    fi
+
+    # Wolf UI whose "Start" creates multi-user lobbies, so the admin can always
+    # join (take over) a guest's game. Long first build (Godot/.NET toolchain).
+    if [[ -n "$wolf_ui_coop" ]]; then
+      "$wolf_ui_coop" build && "$wolf_ui_coop" apply \
+        || note 'Wolf UI multi-utente non applicata: la takeover funzionerà solo sulle lobby "Coop"'
+    fi
+    # Guest containers on an isolated network: Internet only, no LAN/VM.
+    net_iso="$repo_root/scripts/omarchy-wolf-network-isolation"
+    [[ -x "$net_iso" ]] || net_iso="$(command -v omarchy-wolf-network-isolation || true)"
+    unit_src="$repo_root/systemd/omarchy-wolf-network-isolation.service"
+    [[ -f "$unit_src" ]] || unit_src=/usr/lib/systemd/system/omarchy-wolf-network-isolation.service
+    if [[ -n "$net_iso" && -f "$unit_src" ]]; then
+      if [[ "$net_iso" == "$repo_root/"* ]]; then
+        install -m 0755 "$net_iso" /usr/local/bin/omarchy-wolf-network-isolation
+        install -m 0644 "$unit_src" /etc/systemd/system/omarchy-wolf-network-isolation.service
+        systemctl daemon-reload
+      fi
+      systemctl enable omarchy-wolf-network-isolation.service >/dev/null 2>&1 || true
+      systemctl restart omarchy-wolf-network-isolation.service \
+        || die 'isolamento di rete degli ospiti fallito: journalctl -u omarchy-wolf-network-isolation'
+      note 'rete ospiti isolata attiva (omarchy-guests: solo Internet)'
+    else
+      note 'omarchy-wolf-network-isolation non trovato: i giochi ospite vedranno la LAN'
+    fi
+    # One Wolf profile (PIN + allowed apps, own save data) per Omarchy user.
+    if command -v omarchy-session-broker >/dev/null; then
+      omarchy-session-broker wolf-sync-profiles >/dev/null \
+        && note 'profili Wolf sincronizzati con gli utenti Omarchy' \
+        || note 'sincronizzazione profili Wolf fallita: omarchy-session-broker wolf-sync-profiles'
+    fi
+
+    [[ -n "$live_tap" ]] || die 'omarchy-wolf-live-tap non trovato'
+    WOLF_CONFIG=/etc/wolf/cfg/config.toml "$live_tap" apply --restart
+    systemctl try-restart omarchy-session-broker.service || true
+    note "Wolf attivo. In Moonlight aggiungi il PC come <ip-vm>:49989 (Sunshine resta su 47989)"
+    ;;
+  status)
+    docker ps --filter name=^wolf$ --format 'wolf: {{.Status}} ({{.Image}})' 2>/dev/null || true
+    [[ -S /var/run/wolf/wolf.sock ]] && echo 'API socket: /var/run/wolf/wolf.sock' || echo 'API socket assente'
+    if docker inspect wolf >/dev/null 2>&1; then
+      echo "compose: $(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' wolf)"
+      docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' wolf | grep -E '^(WOLF_SOCKET_PATH|XDG_RUNTIME_DIR|WOLF_RENDER_NODE|WOLF_HTTP_PORT)=' | sed 's/^/env: /'
+      docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' wolf | grep -E 'wolf|sockets' | sed 's/^/mount: /'
+      docker logs --tail 400 wolf 2>&1 | grep -iE 'API server' | tail -2 | sed 's/^/log: /'
+    fi
+    [[ -n "$live_tap" ]] && "$live_tap" status || true
+    [[ -n "$wolf_ui_coop" ]] && "$wolf_ui_coop" status || true
+    command -v omarchy-wolf-network-isolation >/dev/null && omarchy-wolf-network-isolation status || true
+    ;;
+  *) die 'azione: check, apply oppure status' ;;
+esac

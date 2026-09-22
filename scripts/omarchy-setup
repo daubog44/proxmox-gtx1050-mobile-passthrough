@@ -24,9 +24,10 @@ Uso:
   scripts/omarchy-setup [--config FILE] proxmox gpu-switch [--apply|--dry-run]
   scripts/omarchy-setup [--config FILE] guest sunshine <prepare|verify|status|rollback> [--apply]
   scripts/omarchy-setup [--config FILE] guest microphone <install|verify|add-client> [--apply]
-  scripts/omarchy-setup [--config FILE] guest nvidia <pin|verify> [--apply]
+  scripts/omarchy-setup [--config FILE] guest nvidia <pin|verify|patch> [--apply]
   scripts/omarchy-setup [--config FILE] guest steam <fix|verify> [--apply]
   scripts/omarchy-setup [--config FILE] guest steam fallback <enable|disable|status> <app-id|nome-esatto> [--apply]
+  scripts/omarchy-setup [--config FILE] guest multi-user <deploy|install|sunshine-api-creds|live-video|wolf|wolf-live-tap|status|users|sessions> [--apply]
   scripts/omarchy-setup [--config FILE] guest all [--apply]
   scripts/omarchy-setup [--config FILE] client fedora <onboard|all|check|moonlight|microphone|kde-connect|show> [--install-key] [--configure-kde-firewall] [--apply]
 
@@ -147,6 +148,140 @@ user_systemctl() {
     XDG_RUNTIME_DIR="/run/user/$uid" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
     systemctl --user "$@"
+}
+
+ensure_mediamtx() {
+  local latest_tag tmp_dir
+  if command -v mediamtx >/dev/null; then
+    note "verifico aggiornamenti MediaMTX (versione attuale: $(mediamtx --version 2>/dev/null || echo sconosciuta))..."
+    mediamtx --upgrade >/dev/null 2>&1 || true
+    return 0
+  fi
+  note "download e installazione dell'ultima versione di MediaMTX da GitHub..."
+  latest_tag="$(curl -fsSL https://api.github.com/repos/bluenviron/mediamtx/releases/latest 2>/dev/null | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4 || true)"
+  [[ -n "$latest_tag" ]] || latest_tag="v1.21.1"
+  tmp_dir="$(mktemp -d)"
+  local base="https://github.com/bluenviron/mediamtx/releases/download/${latest_tag}"
+  local archive="mediamtx_${latest_tag}_linux_amd64.tar.gz"
+  # Verify the archive against the release's checksums before installing as root.
+  if curl -fsSL -o "$tmp_dir/$archive" "$base/$archive" \
+     && curl -fsSL -o "$tmp_dir/checksums.sha256" "$base/checksums.sha256" \
+     && (cd "$tmp_dir" && grep " \*\?$archive\$" checksums.sha256 | sed 's/ \*/  /' | sha256sum -c --quiet -) \
+     && tar -xzf "$tmp_dir/$archive" -C "$tmp_dir" mediamtx; then
+    install -m 0755 "$tmp_dir/mediamtx" /usr/local/bin/mediamtx
+    ln -sf /usr/local/bin/mediamtx /usr/bin/mediamtx
+    rm -rf "$tmp_dir"
+    note "MediaMTX ($latest_tag) installato con successo"
+  else
+    rm -rf "$tmp_dir"
+    die "MediaMTX non installato: download fallito o checksum non valido (installa mediamtx-bin da AUR)"
+  fi
+}
+
+# Credentials the session broker uses for Sunshine's web API (PIN pairing).
+# Sunshine has a single web-manager account, so this is also the password of
+# the Sunshine web UI. Generated here, applied with Sunshine's own CLI and
+# stored only in a root-only file: never in the repository, never printed.
+configure_sunshine_api_credentials() {
+  local force=${1:-0} env_file=${OMARCHY_SUNSHINE_API_ENV:-/etc/omarchy/sunshine-api.env} api_user password home tmp
+  require_root
+  if (( ! force )) && [[ -s "$env_file" ]] && grep -q '^SUNSHINE_API_PASSWORD=.' "$env_file"; then
+    note "credenziali API Sunshine già presenti in $env_file (non modificate)"
+    return 0
+  fi
+  command -v sunshine >/dev/null || die 'sunshine non installato: impossibile impostare le credenziali API'
+  home="$(getent passwd "$OMARCHY_USER" | cut -d: -f6)"
+  [[ -n "$home" && -d "$home" ]] || die "home non trovata per $OMARCHY_USER"
+  api_user="${OMARCHY_SUNSHINE_API_USER:-admin}"
+  # Hex only: a leading "-" could be parsed by sunshine as an option.
+  password="$(python3 -c 'import secrets; print(secrets.token_hex(20))')"
+
+  # Note: the password is briefly visible in this process's argv (sunshine
+  # --creds has no stdin form); the command exits immediately.
+  if ! runuser -u "$OMARCHY_USER" -- env HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+       sunshine --creds "$api_user" "$password" >/dev/null 2>&1; then
+    unset password
+    die 'sunshine --creds non riuscito: credenziali invariate'
+  fi
+
+  install -d -m 0755 "$(dirname "$env_file")"
+  tmp="$(mktemp "$(dirname "$env_file")/.sunshine-api.env.XXXXXX")"
+  chmod 0600 "$tmp"
+  printf '# Generato da omarchy-setup: credenziali web API di Sunshine (solo root)\nSUNSHINE_API_USER=%s\nSUNSHINE_API_PASSWORD=%s\n' \
+    "$api_user" "$password" > "$tmp"
+  unset password
+  chown root:root "$tmp"
+  mv -f "$tmp" "$env_file"
+
+  # Sunshine loads the web credentials at startup only.
+  user_systemctl try-restart app-dev.lizardbyte.app.Sunshine.service \
+    || note 'riavvia Sunshine per applicare le nuove credenziali'
+  note "credenziali API Sunshine aggiornate in $env_file (leggibili solo da root, anche per la web UI di Sunshine)"
+}
+
+# Installs only the packages that are not installed yet. `pacman -S --needed`
+# still resolves already-installed ones against the (possibly newer) sync
+# database, and a single newer library is a partial upgrade pacman refuses.
+pacman_install_missing() {
+  local pkg missing=()
+  for pkg in "$@"; do pacman -Qq "$pkg" >/dev/null 2>&1 || missing+=("$pkg"); done
+  (( ${#missing[@]} )) || return 0
+  pacman -S --needed --noconfirm "${missing[@]}"
+}
+
+install_live_video() {
+  local home xdph
+  require_root
+  home="$(getent passwd "$OMARCHY_USER" | cut -d: -f6)"
+  [[ -n "$home" && -d "$home" ]] || die "home non trovata per $OMARCHY_USER"
+  pacman_install_missing gpu-screen-recorder wf-recorder ffmpeg \
+    || note 'gpu-screen-recorder/wf-recorder/ffmpeg: installali manualmente se non presenti nei repository'
+  ensure_mediamtx
+
+  # Pascal / NVIDIA 580xx: distro gsr needs NVENC API 13.1, build it against
+  # the legacy-NVENC FFmpeg so the full-GPU capture path works.
+  install -m 0755 "$repo_root/scripts/omarchy-build-gsr-legacy-nvenc" /usr/local/bin/omarchy-build-gsr-legacy-nvenc
+  if [[ -f /opt/ffmpeg-nvenc/usr/lib/pkgconfig/libavcodec.pc ]]; then
+    pacman_install_missing git base-devel ninja vulkan-headers \
+      || note 'strumenti di build non installati: provo comunque'
+    omarchy-build-gsr-legacy-nvenc || note 'build gsr legacy NVENC fallita: resterà il fallback wf-recorder'
+  fi
+  install -m 0755 "$repo_root/scripts/omarchy-capture-publish" /usr/local/bin/omarchy-capture-publish
+  install -m 0755 "$repo_root/scripts/omarchy-capture-picker" /usr/local/bin/omarchy-capture-picker
+  install -d -m 0755 /etc/omarchy
+  install -m 0644 "$repo_root/config/mediamtx-omarchy.yml" /etc/omarchy/mediamtx.yml
+  [[ -f /etc/omarchy/capture-output ]] || printf 'omarchy-gtx\n' > /etc/omarchy/capture-output
+  sed -e "s/^Environment=OMARCHY_DESKTOP_USER=.*/Environment=OMARCHY_DESKTOP_USER=$OMARCHY_USER/" \
+    "$repo_root/systemd/omarchy-mediamtx.service" > /etc/systemd/system/omarchy-mediamtx.service
+  # shmsrc (Wolf live tap) lives in gst-plugins-bad; skip pacman when it is
+  # already there: installing one package against a newer sync database is a
+  # partial upgrade and pacman refuses it (gst-plugin-gtk pins the old version).
+  gst-inspect-1.0 shmsrc >/dev/null 2>&1 || pacman_install_missing gstreamer gst-plugins-bad \
+    || note 'gstreamer/gst-plugins-bad (shmsrc) servono per il video delle sessioni Wolf: aggiorna il sistema (pacman -Syu) e riprova'
+
+  # gpu-screen-recorder captures the headless output through the ScreenCast
+  # portal; answer its picker automatically (nobody can click on this host).
+  xdph="$home/.config/hypr/xdph.conf"
+  install -d -o "$OMARCHY_USER" -g "$OMARCHY_USER" "$(dirname "$xdph")"
+  if ! grep -q '^\s*custom_picker_binary\s*=\s*/usr/local/bin/omarchy-capture-picker' "$xdph" 2>/dev/null; then
+    [[ -f "$xdph" ]] && cp -p "$xdph" "$xdph.omarchy-bak"
+    if grep -q '^\s*custom_picker_binary\s*=' "$xdph" 2>/dev/null; then
+      # Omarchy ships its own (interactive) picker: replace that line only.
+      sed -i 's|^\(\s*custom_picker_binary\s*=\).*|\1 /usr/local/bin/omarchy-capture-picker|' "$xdph"
+    else
+      printf '\n# Managed by omarchy-setup: automatic share picker for live view/recordings\nscreencopy {\n    custom_picker_binary = /usr/local/bin/omarchy-capture-picker\n    allow_token_by_default = true\n}\n' >> "$xdph"
+    fi
+    chown "$OMARCHY_USER:$OMARCHY_USER" "$xdph"
+    user_systemctl restart xdg-desktop-portal-hyprland.service || note 'riavvia la sessione Hyprland per applicare xdph.conf'
+  fi
+
+  # WebRTC media only (signalling stays on loopback behind the broker).
+  if command -v ufw >/dev/null; then
+    ufw allow 8189/udp comment 'Omarchy live WebRTC media'
+    ufw allow 8189/tcp comment 'Omarchy live WebRTC ICE-TCP'
+  fi
+  systemctl daemon-reload
+  systemctl enable --now omarchy-mediamtx.service
 }
 
 configure_moonlight_boot() {
@@ -355,7 +490,17 @@ guest_nvidia() {
       fi
       ;;
     verify) "$repo_root/scripts/omarchy-nvidia-pascal-branch" verify ;;
-    *) die 'azione NVIDIA: pin oppure verify' ;;
+    patch)
+      if (( apply )); then
+        require_root
+        install -m 0755 "$repo_root/scripts/omarchy-patch-nvenc" /usr/local/bin/omarchy-patch-nvenc
+        omarchy-patch-nvenc apply
+      else
+        "$repo_root/scripts/omarchy-patch-nvenc" status
+        note "anteprima: rimozione limite sessioni NVENC con keylase nvidia-patch e sync container Wolf"
+      fi
+      ;;
+    *) die 'azione NVIDIA: pin, verify oppure patch' ;;
   esac
 }
 
@@ -430,9 +575,96 @@ case "$1" in
         esac ;;
       steam) guest_steam "${3:-}" "${4:-}" "${5:-}" ;;
       nvidia) guest_nvidia "${3:-}" ;;
+      multi-user)
+        case "${3:-}" in
+          install)
+            if (( apply )); then
+              require_root
+              install -m 0755 "$repo_root/scripts/omarchy-session-broker" /usr/local/bin/omarchy-session-broker
+              install -m 0644 "$repo_root/systemd/omarchy-session-broker.service" /etc/systemd/system/omarchy-session-broker.service
+              install -m 0755 "$repo_root/scripts/omarchy-resource-reaper" /usr/local/bin/omarchy-resource-reaper
+              install -m 0644 "$repo_root/systemd/omarchy-resource-reaper.service" /etc/systemd/system/omarchy-resource-reaper.service
+              install -m 0644 "$repo_root/systemd/omarchy-resource-reaper.timer" /etc/systemd/system/omarchy-resource-reaper.timer
+              systemctl daemon-reload
+              ( configure_sunshine_api_credentials ) \
+                || note 'credenziali API Sunshine non impostate: pairing Sunshine non disponibile finché non esegui guest multi-user sunshine-api-creds --apply'
+              systemctl enable --now omarchy-session-broker.service
+              systemctl enable --now omarchy-resource-reaper.timer
+              omarchy-session-broker install-backend
+            else
+              note 'anteprima: installazione omarchy-session-broker, omarchy-resource-reaper timer, credenziali API Sunshine casuali e database SQLite'
+            fi
+            ;;
+          reaper)
+            if (( apply )); then
+              require_root
+              install -m 0755 "$repo_root/scripts/omarchy-resource-reaper" /usr/local/bin/omarchy-resource-reaper
+              install -m 0644 "$repo_root/systemd/omarchy-resource-reaper.service" /etc/systemd/system/omarchy-resource-reaper.service
+              install -m 0644 "$repo_root/systemd/omarchy-resource-reaper.timer" /etc/systemd/system/omarchy-resource-reaper.timer
+              systemctl daemon-reload
+              systemctl enable --now omarchy-resource-reaper.timer
+              /usr/local/bin/omarchy-resource-reaper --verbose
+            else
+              note 'anteprima: installazione omarchy-resource-reaper (timer periodico 30 min per bonifica loop orfani, log e risorse)'
+            fi
+            ;;
+          deploy)
+            # Everything the server needs, in order, with one sudo command.
+            if (( apply )); then
+              require_root
+              "$0" --config "$config_file" guest multi-user install --apply
+              "$0" --config "$config_file" guest multi-user live-video --apply
+              "$0" --config "$config_file" guest multi-user wolf --apply
+              install -m 0755 "$repo_root/scripts/omarchy-session-broker" /usr/local/bin/omarchy-session-broker
+              systemctl restart omarchy-session-broker.service
+              note 'deploy completato: broker, credenziali Sunshine, video live (MediaMTX), Wolf + profili + tap'
+            else
+              note 'anteprima: install + live-video + wolf (broker, credenziali Sunshine, MediaMTX, gsr legacy NVENC, Wolf, Wolf UI multi-utente, profili, tap live)'
+            fi
+            ;;
+          sunshine-api-creds)
+            if (( apply )); then
+              configure_sunshine_api_credentials 1
+            else
+              note 'anteprima: nuova password casuale per la web API di Sunshine in /etc/omarchy/sunshine-api.env (riavvia Sunshine)'
+            fi
+            ;;
+          live-video)
+            if (( apply )); then
+              install_live_video
+            else
+              note 'anteprima: gpu-screen-recorder + MediaMTX (WebRTC H.265), picker portale automatico, UFW 8189 udp/tcp'
+            fi
+            ;;
+          wolf)
+            if (( apply )); then
+              require_root
+              pacman_install_missing docker docker-compose >/dev/null || note 'installa docker e docker-compose'
+              systemctl enable --now docker.service
+              "$repo_root/scripts/omarchy-wolf-install" apply --repo "$repo_root"
+            else
+              "$repo_root/scripts/omarchy-wolf-install" check --repo "$repo_root" || true
+              note 'anteprima: Wolf in Docker (driver volume NVIDIA, porte 49984-50200), tap live, UFW'
+            fi
+            ;;
+          wolf-live-tap)
+            if (( apply )); then
+              require_root
+              install -m 0755 "$repo_root/scripts/omarchy-wolf-live-tap" /usr/local/bin/omarchy-wolf-live-tap
+              omarchy-wolf-live-tap apply
+            else
+              "$repo_root/scripts/omarchy-wolf-live-tap" status
+              note 'anteprima: tee dello stream NVENC di Wolf verso /tmp/sockets (backup di config.toml, GOP 2 s)'
+            fi
+            ;;
+          status) "$repo_root/scripts/omarchy-session-broker" status-json ;;
+          users) "$repo_root/scripts/omarchy-session-broker" list-users ;;
+          sessions) "$repo_root/scripts/omarchy-session-broker" list-sessions ;;
+          *) die 'azione multi-user: install, reaper, live-video, wolf, wolf-live-tap, status, users oppure sessions' ;;
+        esac ;;
       all)
         if (( apply )); then guest_nvidia pin; guest_sunshine prepare; install_microphone; else note 'anteprima: guardia driver 580xx + Sunshine headless + ricevitore microfono/pipewire/PTT'; fi ;;
-      *) die 'modulo guest: sunshine, microphone, nvidia, steam oppure all' ;;
+      *) die 'modulo guest: sunshine, microphone, nvidia, steam, multi-user oppure all' ;;
     esac ;;
   client)
     case "${2:-}" in

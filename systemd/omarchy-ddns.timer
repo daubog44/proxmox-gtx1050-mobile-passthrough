@@ -1,0 +1,11 @@
+[Unit]
+Description=Timer per Omarchy Dynamic DNS Updater (ogni 5 minuti)
+After=network.target
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Unit=omarchy-ddns.service
+
+[Install]
+WantedBy=timers.target
