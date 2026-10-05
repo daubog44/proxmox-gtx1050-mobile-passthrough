@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Opens this node's Moonlight/Wolf ports on the home router through UPnP IGD.
+#
+#   omarchy-upnp-ports <apply|status|remove>
+#
+# Every Omarchy node runs this for its own ports, so a new server needs no
+# manual port forwarding. Routers forget UPnP mappings on reboot: the systemd
+# timer re-applies them every 30 minutes. Only this node's LAN address is
+# used as target; nothing else on the network is touched.
+#
+# Requires UPnP enabled on the router (Sky Wifi Hub: Avanzate -> Rilevamento
+# dispositivi -> UPnP). Disable with OMARCHY_UPNP=0 in /etc/omarchy/upnp.env;
+# OMARCHY_UPNP_URL=<router description URL> skips discovery.
+#
+# Discovery is a multicast M-SEARCH; the router answers from its own address
+# and port, which a stateful firewall (UFW) sees as new inbound traffic and
+# drops. So UDP from the default gateway (only) is allowed in.
+set -euo pipefail
+
+CONFIG=/etc/omarchy/upnp.env
+# shellcheck disable=SC1090
+[[ -r "$CONFIG" ]] && . "$CONFIG"
+: "${OMARCHY_UPNP:=1}"
+# Wolf (guests). Sunshine ports can be added with OMARCHY_UPNP_EXTRA_TCP/UDP.
+TCP_PORTS=(49984 49989 50010 ${OMARCHY_UPNP_EXTRA_TCP:-})
+UDP_PORTS=(49999 50100 50200 ${OMARCHY_UPNP_EXTRA_UDP:-})
+DESCRIPTION="omarchy-$(hostname -s)"
+
+# -i: some routers (Sky Wifi Hub) report their WAN link as "Disconnected" /
+# 0.0.0.0 over UPnP although Internet works; upnpc would then refuse to use
+# them. The mappings are applied normally.
+UPNPC=(upnpc -i)
+[[ -n "${OMARCHY_UPNP_URL:-}" ]] && UPNPC+=(-u "$OMARCHY_UPNP_URL")
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+note() { printf '==> %s\n' "$*"; }
+
+ensure_upnpc() {
+  command -v upnpc >/dev/null && return
+  (( EUID == 0 )) || die 'upnpc (miniupnpc) non installato'
+  if command -v pacman >/dev/null; then
+    pacman -Qq miniupnpc >/dev/null 2>&1 || pacman -S --needed --noconfirm miniupnpc >/dev/null
+  elif command -v apt-get >/dev/null; then
+    apt-get install -y miniupnpc >/dev/null
+  fi
+  command -v upnpc >/dev/null || die 'impossibile installare miniupnpc'
+}
+
+gateway() {
+  ip -4 route show default 2>/dev/null | awk '{print $3; exit}'
+}
+
+allow_ssdp_replies() {
+  local gw
+  gw="$(gateway)"
+  [[ -n "$gw" && $EUID -eq 0 ]] || return 0
+  command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active" || return 0
+  ufw allow from "$gw" proto udp comment 'Omarchy UPnP: risposte SSDP del router' >/dev/null
+}
+
+lan_ip() {
+  ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}'
+}
+
+# 1 h lease renewed by the timer: a node that is switched off stops holding
+# ports open on the router. A manual forward of the same port counts as open.
+map_port() {
+  local out
+  out="$("${UPNPC[@]}" -e "$DESCRIPTION" -a "$1" "$2" "$2" "$3" 3600 2>&1)" && ! grep -qi "failed" <<<"$out" && return 0
+  grep -qiE "ConflictInMappingEntry|718" <<<"$out"
+}
+
+apply() {
+  if [[ "$OMARCHY_UPNP" != 1 ]]; then
+    note "UPnP disattivato ($CONFIG)"
+    return 0
+  fi
+  ensure_upnpc
+  allow_ssdp_replies
+  local ip failed=0 port
+  ip="$(lan_ip)"
+  [[ -n "$ip" ]] || die 'indirizzo LAN non trovato'
+  for port in "${TCP_PORTS[@]}"; do
+    map_port "$ip" "$port" TCP || { echo "  TCP $port: non aperta"; failed=1; }
+  done
+  for port in "${UDP_PORTS[@]}"; do
+    map_port "$ip" "$port" UDP || { echo "  UDP $port: non aperta"; failed=1; }
+  done
+  if (( failed )); then
+    echo "Router senza UPnP o che rifiuta le regole: apri le porte a mano verso $ip" >&2
+    return 1
+  fi
+  note "porte aperte sul router verso $ip: TCP ${TCP_PORTS[*]} · UDP ${UDP_PORTS[*]}"
+}
+
+status() {
+  command -v upnpc >/dev/null || { echo 'upnpc non installato'; return 0; }
+  "${UPNPC[@]}" -l 2>/dev/null | grep -E "Found valid IGD|$DESCRIPTION" || echo 'nessuna regola UPnP di questo nodo (o router senza UPnP)'
+}
+
+remove() {
+  ensure_upnpc
+  local port
+  for port in "${TCP_PORTS[@]}"; do "${UPNPC[@]}" -d "$port" TCP >/dev/null 2>&1 || true; done
+  for port in "${UDP_PORTS[@]}"; do "${UPNPC[@]}" -d "$port" UDP >/dev/null 2>&1 || true; done
+  note 'regole UPnP rimosse'
+}
+
+case "${1:-status}" in
+  apply) apply ;;
+  status) status ;;
+  remove) remove ;;
+  *) die 'azione: apply, status oppure remove' ;;
+esac

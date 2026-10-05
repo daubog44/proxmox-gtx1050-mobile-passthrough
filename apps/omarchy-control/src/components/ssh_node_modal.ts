@@ -73,8 +73,7 @@ export function renderSshNodeModal(
               </svg>
             </div>
             <div>
-              <h3 class="text-sm font-semibold text-zinc-100">Connessione Nodi Cluster</h3>
-              <p class="text-xs text-zinc-400">REST API Daemon nativa e fallback SSH</p>
+              <h3 class="text-sm font-semibold text-zinc-100">Server</h3>
             </div>
           </div>
           <button type="button" class="btn-close-ssh-modal text-zinc-400 hover:text-zinc-100 p-1 rounded-lg hover:bg-zinc-800 transition cursor-pointer">
@@ -89,7 +88,7 @@ export function renderSshNodeModal(
 
           <!-- Nodi Rilevati -->
           <div>
-            <div class="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-2">Server Rilevati</div>
+            <div class="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-2">Server salvati</div>
             <div class="space-y-1.5">
               ${nodesListHtml}
             </div>
@@ -101,9 +100,8 @@ export function renderSshNodeModal(
 
             <div class="flex items-center justify-between">
               <span class="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
-                <span class="text-emerald-400">⚡</span> Connessione REST API Daemon
+                Connessione
               </span>
-              <span class="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-medium">&lt; 5ms</span>
             </div>
 
             <!-- Tailscale / MagicDNS -->
@@ -114,7 +112,7 @@ export function renderSshNodeModal(
                     <circle cx="12" cy="12" r="10" stroke-width="2"></circle>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"></path>
                   </svg>
-                  <span>Rete Tailscale / MagicDNS</span>
+                  <span>Tailscale</span>
                 </label>
                 <div class="flex items-center gap-2">
                   <span id="tailscale-nodes-count" class="text-[10px] text-indigo-400 font-mono"></span>
@@ -150,7 +148,7 @@ export function renderSshNodeModal(
             <!-- Host & Porta API -->
             <div class="grid grid-cols-3 gap-2.5">
               <div class="col-span-2">
-                <label class="block text-xs font-medium text-zinc-400 mb-1" for="modal-node-host">Host o IP Server</label>
+                <label class="block text-xs font-medium text-zinc-400 mb-1" for="modal-node-host">Host</label>
                 <input
                   type="text"
                   id="modal-node-host"
@@ -185,7 +183,7 @@ export function renderSshNodeModal(
                     class="h-5 px-1.5 text-[10px] text-amber-400 hover:text-amber-300 font-medium flex items-center gap-1 transition rounded bg-amber-500/10 border border-amber-500/20 cursor-pointer"
                     title="Auto-assegna porta libera"
                   >
-                    <span>⚡ Auto</span>
+                    <span>Auto</span>
                   </button>
                 </div>
                 <input

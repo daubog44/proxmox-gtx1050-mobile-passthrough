@@ -1,0 +1,79 @@
+--- gstunixfdsink.c
++++ gstunixfdsink.c
+@@ -363,12 +363,25 @@
+     goto out;
+   }
+ 
+-  if (!g_socket_bind (self->socket, addr, TRUE, &error)) {
+-    GST_ERROR_OBJECT (self, "Failed to bind socket: %s", error->message);
+-    g_clear_object (&self->socket);
+-    ret = FALSE;
+-    goto out;
+-  }
++  /* Wolf can start the next app before the previous pipeline has stopped.
++   * Keep both sockets distinct; each pipeline unlinks only its own path. */
++  gchar *base_path = g_strdup (self->socket_path);
++  for (guint suffix = 0; !g_socket_bind (self->socket, addr, TRUE, &error); suffix++) {
++    if (self->socket_type != G_UNIX_SOCKET_ADDRESS_PATH ||
++        !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_ADDRESS_IN_USE)) {
++      GST_ERROR_OBJECT (self, "Failed to bind socket: %s", error->message);
++      g_clear_object (&self->socket);
++      g_free (base_path);
++      ret = FALSE;
++      goto out;
++    }
++    g_clear_error (&error);
++    g_clear_object (&addr);
++    g_free (self->socket_path);
++    self->socket_path = g_strdup_printf ("%s.%u", base_path, suffix);
++    addr = g_unix_socket_address_new (self->socket_path);
++  }
++  g_free (base_path);
+ 
+   if (!g_socket_listen (self->socket, &error)) {
+     GST_ERROR_OBJECT (self, "Failed to listen socket: %s", error->message);
+@@ -486,8 +499,44 @@
+   return n_meta;
+ }
+ 
++/* Backport heap-memory support for mpegtsmux to the Wolf GStreamer 1.26 ABI.
++ * Use GStreamer's native memfd allocator; encoded bytes are never re-encoded. */
++static GstFlowReturn gst_unix_fd_sink_render_fd (GstBaseSink *, GstBuffer *);
++
+ static GstFlowReturn
+ gst_unix_fd_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
++{
++  GstUnixFdSink *self = (GstUnixFdSink *) bsink;
++  GST_OBJECT_LOCK (self);
++  gboolean absent = !self->wait_for_connection && g_hash_table_size (self->clients) == 0;
++  GST_OBJECT_UNLOCK (self);
++  if (absent)
++    return GST_FLOW_OK;
++  gboolean fd_only = TRUE;
++  for (guint i = 0; i < gst_buffer_n_memory (buffer); i++)
++    fd_only &= gst_is_fd_memory (gst_buffer_peek_memory (buffer, i));
++  if (fd_only)
++    return gst_unix_fd_sink_render_fd (bsink, buffer);
++  GstAllocator *allocator = gst_shm_allocator_get ();
++  GstBuffer *copy = gst_buffer_new_allocate (allocator, gst_buffer_get_size (buffer), NULL);
++  gst_object_unref (allocator);
++  if (copy == NULL)
++    return GST_FLOW_ERROR;
++  GstMapInfo map = GST_MAP_INFO_INIT;
++  if (!gst_buffer_map (copy, &map, GST_MAP_WRITE)) {
++    gst_buffer_unref (copy);
++    return GST_FLOW_ERROR;
++  }
++  gboolean complete = gst_buffer_extract (buffer, 0, map.data, map.size) == map.size;
++  gst_buffer_unmap (copy, &map);
++  gst_buffer_copy_into (copy, buffer, GST_BUFFER_COPY_METADATA, 0, -1);
++  GstFlowReturn ret = complete ? gst_unix_fd_sink_render_fd (bsink, copy) : GST_FLOW_ERROR;
++  gst_buffer_unref (copy);
++  return ret;
++}
++
++static GstFlowReturn
++gst_unix_fd_sink_render_fd (GstBaseSink * bsink, GstBuffer * buffer)
+ {
+   GstUnixFdSink *self = (GstUnixFdSink *) bsink;
+   GstFlowReturn ret = GST_FLOW_OK;

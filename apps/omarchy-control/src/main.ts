@@ -1,15 +1,19 @@
 import { api, type RecordingItem } from "./services/api";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { renderTelemetryWidget } from "./components/telemetry";
 import { renderSessionsList, renderLiveMonitorModal, renderPipelineBadges } from "./components/sessions";
 import { renderRecordingsView, renderRecordingPlayerModal } from "./components/recordings";
 import { createLiveVideoPlayer, type LiveVideoPlayer } from "./utils/live_video";
 import { startWebRtcVideo, type WebRtcSession } from "./utils/webrtc_video";
-import { renderUsersList, renderAddUserModal, renderEditUserModal, renderMoonlightInviteModal, renderPairDeviceModal } from "./components/users";
-import { renderUpdateModal } from "./components/updater";
+import { renderUsersList, renderAddUserModal, renderEditUserModal, renderMoonlightInviteModal, renderPairDeviceModal, buildInviteMessage } from "./components/users";
+import { renderUpdateModal, renderUpdateButton, initUpdater } from "./components/updater";
 import { renderLoginScreen, renderSetupScreen } from "./components/login";
 import { renderSshNodeModal } from "./components/ssh_node_modal";
-import { renderEnterpriseDashboard, renderNasMountModal } from "./components/enterprise";
+import { renderEnterpriseDashboard, renderNasMountModal, refreshNasMountModal } from "./components/enterprise";
 import { Icons } from "./components/ui/icons";
+import { confirmDialog } from "./components/confirm";
+import { openUserStorage } from "./components/storage";
+import { wireRemoteInput } from "./utils/remote_input";
 import QRCode from "qrcode";
 import type {
   Check,
@@ -50,7 +54,6 @@ let displays: DisplayInfo[] = [];
 let autoRefreshTimer: number | null = null;
 let autoRefreshActive = true;
 let latestUpdateInfo: UpdateInfo | null = null;
-let updateInstalling = false;
 let currentSession: AuthSession | null = null;
 let availableNodes: NodeEntry[] = [];
 let activeNode: NodeEntry | null = null;
@@ -111,6 +114,75 @@ function formatToastMessage(raw: unknown): string {
   if (str.startsWith("error: ")) str = str.substring(7);
 
   return str;
+}
+
+/**
+ * Re-render a section that contains a form without wiping what the user is
+ * typing: the 4 s live refresh skips it while a field is focused or edited.
+ * `force` (after a save, or on first load) always renders.
+ */
+const lastRendered = new WeakMap<HTMLElement, string>();
+
+function renderEditableSection(container: HTMLElement, html: string, wire: () => void, force = false) {
+  if (!container.dataset.editTracking) {
+    container.dataset.editTracking = "1";
+    const markDirty = () => { container.dataset.dirty = "1"; };
+    container.addEventListener("input", markDirty);
+    container.addEventListener("change", markDirty);
+  }
+  const active = document.activeElement;
+  const editing = active instanceof HTMLElement && container.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName);
+  if (!force && (editing || container.dataset.dirty === "1")) return;
+  // Unchanged data: keep the DOM (open menus, revealed PINs, scroll) as it is.
+  if (!force && lastRendered.get(container) === html) return;
+  lastRendered.set(container, html);
+  container.innerHTML = html;
+  delete container.dataset.dirty;
+  wire();
+}
+
+// Live monitor and recording player release resources on close: they handle Escape themselves.
+const SELF_CLOSING_DIALOGS = new Set(["live-monitor-modal", "recording-player-modal"]);
+let escapeWired = false;
+// Pairing requests: which one the dialog shows, and which the admin closed.
+let pairModalOpenFor: string | null = null;
+const dismissedPairings = new Set<string>();
+
+/**
+ * A Moonlight waiting for a PIN opens the pairing dialog by itself (once per
+ * device): the admin only types the 4 digits Moonlight shows.
+ */
+function promptPendingPairings() {
+  const pending = multiUser?.pair_pending ?? [];
+  const waiting = new Set(pending.map((p) => p.client_ip));
+  for (const ip of [...dismissedPairings]) if (!waiting.has(ip)) dismissedPairings.delete(ip);
+  const fresh = pending.find((p) => !dismissedPairings.has(p.client_ip));
+  if (!fresh || pairModalOpenFor) return;
+  const otherDialogOpen = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].some(
+    (el) => !el.classList.contains("hidden") && el.getClientRects().length > 0,
+  );
+  if (otherDialogOpen) return;
+  dismissedPairings.add(fresh.client_ip);
+  openPairDeviceModal("", fresh.username ?? "", fresh.client_ip);
+  showToast(`Moonlight chiede il PIN (${fresh.client_ip})`, "info");
+}
+let nasModalWired = false;
+
+/** Escape closes the topmost open dialog through its own close button. */
+function wireEscapeToClose() {
+  if (escapeWired) return;
+  escapeWired = true;
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const open = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].filter(
+      (el) => !el.classList.contains("hidden") && el.getClientRects().length > 0,
+    );
+    const top = open[open.length - 1];
+    if (!top || SELF_CLOSING_DIALOGS.has(top.id)) return;
+    const close = top.querySelector<HTMLElement>("[data-close], .btn-close-modal, .btn-close-ssh-modal");
+    if (close) close.click();
+    else top.classList.add("hidden");
+  });
 }
 
 function showToast(rawMessage: unknown, level: "ok" | "error" | "info" = "info", duration = 4200) {
@@ -624,25 +696,19 @@ function updateGamingSummary() {
   let targetRes = "1920x1080";
   let targetFps = "60 FPS";
   let targetBitrate = "25 Mbps";
-  let modeName = "Prestazioni Competitive (1080p)";
 
   if (mode === "native") {
     targetRes = `${display.width}x${display.height}`;
     targetFps = "60 FPS";
     targetBitrate = display.width > 2000 ? "40 Mbps" : "30 Mbps";
-    modeName = "Qualità Nativa Display";
   }
 
   summary.innerHTML = `
-    <div class="space-y-1.5 text-xs">
-      <div class="flex items-center justify-between text-zinc-400"><span>Profilo</span> <strong class="text-zinc-200 font-medium">${escapeHtml(modeName)}</strong></div>
-      <div class="flex items-center justify-between text-zinc-400"><span>Schermo Target</span> <strong class="text-zinc-200 font-medium">${escapeHtml(display.name)}</strong></div>
-      <div class="flex items-center justify-between text-zinc-400"><span>Risoluzione Stream</span> <strong class="text-emerald-400 font-semibold font-mono">${targetRes}</strong></div>
-      <div class="flex items-center justify-between text-zinc-400"><span>Frame Rate</span> <strong class="text-zinc-200 font-mono">${targetFps}</strong></div>
-      <div class="flex items-center justify-between text-zinc-400"><span>Bitrate Ottimale</span> <strong class="text-zinc-200 font-mono">${targetBitrate}</strong></div>
-      <div class="flex items-center justify-between text-zinc-400"><span>Codec Hardware</span> <strong class="text-zinc-200">HEVC H.265</strong></div>
-      <div class="flex items-center justify-between text-zinc-400"><span>Packet Size UDP</span> <strong class="text-zinc-200 font-mono">1024 Bytes</strong></div>
-    </div>
+    <div class="kv"><span>Risoluzione</span><span>${targetRes}</span></div>
+    <div class="kv"><span>Frame rate</span><span>${targetFps}</span></div>
+    <div class="kv"><span>Bitrate</span><span>${targetBitrate}</span></div>
+    <div class="kv"><span>Codec</span><span>H.265</span></div>
+    <div class="kv"><span>Schermo</span><span>${escapeHtml(display.name)}</span></div>
   `;
 }
 
@@ -700,6 +766,7 @@ async function refreshMultiUserOnly() {
 
 function renderDashboardData() {
   if (!multiUser) return;
+  promptPendingPairings();
 
   updateTopNodeUI();
 
@@ -735,22 +802,20 @@ function renderDashboardData() {
   // Users list
   const usersContainer = document.querySelector<HTMLElement>("#users-container");
   if (usersContainer) {
-    usersContainer.innerHTML = renderUsersList(multiUser.users, isAdminSession());
-    wireUserActions();
+    renderEditableSection(usersContainer, renderUsersList(multiUser.users, isAdminSession()), wireUserActions);
   }
 
   // Enterprise tab
   const enterpriseContainer = document.querySelector<HTMLElement>("#enterprise-container");
   if (enterpriseContainer) {
-    enterpriseContainer.innerHTML = renderEnterpriseDashboard(
-      multiUser,
-      enterpriseSettings,
-      vpnPeersList,
-      savegamesList,
-      multiUser.users,
-      ddnsStatusInfo,
+    enterpriseSettings = multiUser.settings ?? enterpriseSettings;
+    savegamesList = multiUser.savegames ?? savegamesList;
+    vpnPeersList = multiUser.vpn_peers ?? vpnPeersList;
+    renderEditableSection(
+      enterpriseContainer,
+      renderEnterpriseDashboard(multiUser, enterpriseSettings, vpnPeersList, savegamesList, multiUser.users, ddnsStatusInfo),
+      wireEnterpriseActions,
     );
-    wireEnterpriseActions();
   }
 
   // Diagnostics & Requirements tab
@@ -760,39 +825,23 @@ function renderDashboardData() {
     if (dashboard.dependencies && dashboard.dependencies.length > 0) {
       depHtml = dashboard.dependencies.map((d) => {
         const isOk = d.state === "ready";
-        const badgeColor = isOk ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20" : "text-amber-400 bg-amber-500/10 border-amber-500/20";
+        const badgeColor = isOk ? "!text-emerald-400" : "!text-amber-400";
         return `
-          <div class="flex items-center justify-between p-3.5 rounded-xl bg-zinc-950/60 border border-zinc-800/80">
-            <div class="space-y-0.5">
-              <div class="text-xs font-medium text-zinc-200">${escapeHtml(d.name)}</div>
-              <div class="text-[11px] text-zinc-400">${escapeHtml(d.detail || labelFor(d.state))}</div>
-            </div>
-            <span class="px-2.5 py-1 rounded-lg text-[11px] font-mono border ${badgeColor}">
-              ${escapeHtml(labelFor(d.state))}
-            </span>
-          </div>
+          <div class="kv" title="${escapeHtml(d.detail || "")}"><span>${escapeHtml(d.name)}</span><span class="${badgeColor}">${escapeHtml(labelFor(d.state))}</span></div>
         `;
       }).join("");
     } else {
       const checkItems = [
-        { name: "Client Moonlight macOS", check: dashboard.checks?.moonlight },
-        { name: "Connettività Gateway SSH", check: dashboard.checks?.ssh },
-        { name: "Receiver Stream Sunshine", check: dashboard.checks?.guest_receiver },
-        { name: "Configurazione Ambiente Host", check: dashboard.checks?.setup },
+        { name: "Moonlight", check: dashboard.checks?.moonlight },
+        { name: "SSH", check: dashboard.checks?.ssh },
+        { name: "Ricevitore Sunshine", check: dashboard.checks?.guest_receiver },
+        { name: "Configurazione host", check: dashboard.checks?.setup },
       ];
       depHtml = checkItems.map((item) => {
         const isOk = item.check?.state === "ready";
-        const badgeColor = isOk ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20" : "text-amber-400 bg-amber-500/10 border-amber-500/20";
+        const badgeColor = isOk ? "!text-emerald-400" : "!text-amber-400";
         return `
-          <div class="flex items-center justify-between p-3.5 rounded-xl bg-zinc-950/60 border border-zinc-800/80">
-            <div class="space-y-0.5">
-              <div class="text-xs font-medium text-zinc-200">${escapeHtml(item.name)}</div>
-              <div class="text-[11px] text-zinc-400">${escapeHtml(item.check?.detail || labelFor(item.check?.state || "unknown"))}</div>
-            </div>
-            <span class="px-2.5 py-1 rounded-lg text-[11px] font-mono border ${badgeColor}">
-              ${escapeHtml(labelFor(item.check?.state || "unknown"))}
-            </span>
-          </div>
+          <div class="kv" title="${escapeHtml(item.check?.detail || "")}"><span>${escapeHtml(item.name)}</span><span class="${badgeColor}">${escapeHtml(labelFor(item.check?.state || "unknown"))}</span></div>
         `;
       }).join("");
     }
@@ -800,7 +849,6 @@ function renderDashboardData() {
   }
 }
 
-let activeMonitorTimer: number | null = null;
 let closeActiveMonitor: (() => void) | null = null;
 // While a session action is in flight the 4s auto-refresh must not re-render
 // the list, otherwise the busy button is replaced and can be clicked again.
@@ -815,6 +863,55 @@ function brokerMessage(raw: string, fallback: string): { ok: boolean; message: s
   }
 }
 
+/** Native window fullscreen also works in WKWebView, with the toolbar still available. */
+function wireMediaFullscreen(modal: HTMLElement): () => void {
+  const button = modal.querySelector<HTMLButtonElement>("[data-media-fullscreen]");
+  const appWindow = getCurrentWindow();
+  let previousFullscreen = false;
+  let closed = false;
+  let changing = false;
+  const toggle = async () => {
+    if (closed || changing || !button) return;
+    changing = true;
+    button.disabled = true;
+    const enter = !modal.classList.contains("media-fullscreen");
+    try {
+      if (enter) previousFullscreen = await appWindow.isFullscreen();
+      if (closed) return;
+      await appWindow.setFullscreen(enter || previousFullscreen);
+      if (closed) {
+        await appWindow.setFullscreen(previousFullscreen);
+        return;
+      }
+      modal.classList.toggle("media-fullscreen", enter);
+      button.textContent = enter ? "Riduci" : "Schermo intero";
+      button.setAttribute("aria-pressed", String(enter));
+    } catch (err) {
+      showToast(`Schermo intero non disponibile: ${err}`, "error");
+    } finally {
+      changing = false;
+      button.disabled = false;
+    }
+  };
+  const onKey = (event: KeyboardEvent) => {
+    if (modal.dataset.controlling === "true") return;
+    if (event.key !== "Escape" || !modal.classList.contains("media-fullscreen")) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void toggle();
+  };
+  button?.addEventListener("click", toggle);
+  document.addEventListener("keydown", onKey, true);
+  return () => {
+    closed = true;
+    button?.removeEventListener("click", toggle);
+    document.removeEventListener("keydown", onKey, true);
+    if (modal.classList.contains("media-fullscreen")) {
+      void appWindow.setFullscreen(previousFullscreen).catch((err) => console.debug("Restore fullscreen:", err));
+    }
+  };
+}
+
 function openLiveMonitorModal(session: {
   sessionId: string;
   username: string;
@@ -824,7 +921,7 @@ function openLiveMonitorModal(session: {
   bitrateMbps: number;
   vramMb: number;
   isRecording: boolean;
-}) {
+}, quality = "original") {
   const portal = document.querySelector<HTMLElement>("#modal-portal");
   if (!portal) return;
 
@@ -842,21 +939,59 @@ function openLiveMonitorModal(session: {
   const ageLabel = portal.querySelector<HTMLElement>("#live-monitor-age");
   const toggleRecBtn = portal.querySelector<HTMLButtonElement>("#btn-monitor-toggle-rec");
   const recBadge = portal.querySelector<HTMLElement>("#monitor-rec-badge");
-  const takeoverBtn = portal.querySelector<HTMLButtonElement>("#btn-monitor-takeover");
+  const takeoverBtn = portal.querySelector<HTMLButtonElement>("#btn-monitor-moonlight");
+  const releaseInput = modal && currentSession ? wireRemoteInput(modal, session.sessionId, currentSession.token, m => showToast(m, "error")) : () => undefined;
+  const qualitySelect = portal.querySelector<HTMLSelectElement>("#live-quality");
+  if (qualitySelect) {
+    qualitySelect.value = quality;
+    qualitySelect.onchange = () => { const selected = qualitySelect.value; cleanup(); openLiveMonitorModal(session, selected); };
+  }
+  const restoreFullscreen = modal ? wireMediaFullscreen(modal) : () => undefined;
 
   let closed = false;
   let failures = 0;
   let lastFrameAt = 0;
   let videoLive = false;
   let player: LiveVideoPlayer | null = null;
+  let activeMonitorTimer: number | null = null;
+  let retryTimer: number | null = null;
+  let watchdog: number | null = null;
+  let rtc: WebRtcSession | null = null;
+  let attemptAbort: AbortController | null = null;
+  let viewerId = "";
+  let generation = 0;
+  let retryCount = 0;
+  let useFmp4 = false;
+  const mediaReady = (ready: boolean) => {
+    if (modal) modal.dataset.videoReady = String(ready);
+    const viewport = modal?.querySelector<HTMLElement>("[data-fullscreen-viewport]");
+    if (viewport) {
+      viewport.dataset.remoteCursor = String(ready && !videoEl?.classList.contains("hidden"));
+      viewport.dispatchEvent(new Event("remote-media-state"));
+    }
+  };
+  const stopAttempt = () => {
+    generation += 1;
+    mediaReady(false);
+    attemptAbort?.abort();
+    attemptAbort = null;
+    rtc?.close(); rtc = null;
+    player?.destroy(); player = null;
+    if (viewerId) void api.stopLiveVideo(viewerId).catch(() => undefined);
+    viewerId = "";
+    if (watchdog) clearInterval(watchdog);
+    watchdog = null;
+  };
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") cleanup();
+    if (e.key === "Escape" && modal?.dataset.controlling !== "true") cleanup();
   };
 
   const cleanup = () => {
     if (closed) return;
     closed = true;
+    releaseInput();
+    restoreFullscreen();
     closeActiveMonitor = null;
     if (activeMonitorTimer) {
       clearTimeout(activeMonitorTimer);
@@ -865,9 +1000,8 @@ function openLiveMonitorModal(session: {
     document.removeEventListener("keydown", onKey);
     window.removeEventListener("beforeunload", cleanup);
     if (infoTimer) clearInterval(infoTimer);
-    rtc?.close();
-    player?.destroy();
-    api.stopLiveVideo(session.sessionId).catch(() => undefined);
+    if (retryTimer) clearTimeout(retryTimer);
+    stopAttempt();
     api.stopSessionStream(session.sessionId).catch((err) => {
       console.debug("stopSessionStream error:", err);
     });
@@ -891,7 +1025,7 @@ function openLiveMonitorModal(session: {
 
   const showError = (message: string) => {
     spinner?.classList.add("hidden");
-    if (!lastFrameAt) {
+    if (!snapshotsAvailable || !lastFrameAt) {
       errorBox?.classList.remove("hidden");
       errorBox?.classList.add("flex");
       if (errorText) errorText.textContent = message;
@@ -917,6 +1051,7 @@ function openLiveMonitorModal(session: {
       if (closed || !screenImg || videoLive) return;
       screenImg.src = dataUri;
       screenImg.classList.remove("hidden");
+      mediaReady(true);
       spinner?.classList.add("hidden");
       errorBox?.classList.add("hidden");
       errorBox?.classList.remove("flex");
@@ -926,7 +1061,9 @@ function openLiveMonitorModal(session: {
       lastFrameAt = Date.now();
       if (ageLabel) ageLabel.textContent = `aggiornata ${new Date(lastFrameAt).toLocaleTimeString()}`;
     } catch (err) {
+      if (closed || videoLive) return;
       failures += 1;
+      mediaReady(false);
       console.debug("Live monitor frame capture error:", err);
       showError(String(err));
       if (ageLabel && lastFrameAt) ageLabel.textContent = "connessione instabile, riprovo…";
@@ -941,7 +1078,6 @@ function openLiveMonitorModal(session: {
   void pollFrame();
 
   let transport = "";
-  let rtc: WebRtcSession | null = null;
   const pipelineBox = portal.querySelector<HTMLElement>("#live-monitor-pipeline");
   let fallbackWarned = false;
   let infoTimer: number | null = null;
@@ -950,7 +1086,7 @@ function openLiveMonitorModal(session: {
   const refreshPipelineInfo = async () => {
     if (closed || !pipelineBox) return;
     try {
-      const info = await api.liveInfo(session.sessionId);
+      const info = await api.liveInfo(session.sessionId, quality);
       if (closed) return;
       const codec = (info.codec || "").toUpperCase();
       const transcoded = (info.encode || "").startsWith("transcode");
@@ -967,6 +1103,8 @@ function openLiveMonitorModal(session: {
               : { label: "Cattura ?", ok: false, title: "Stato del publisher non disponibile" },
         codec === "H265" && !transcoded
           ? { label: "H.265", ok: true, title: "Codifica NVENC H.265, copiata senza ricodifica" }
+          : codec === "H265" && quality === "low"
+            ? { label: "Leggera · NVENC", ok: true, title: "Video ridotto e ricodificato per la visione remota" }
           : codec === "H265"
             ? { label: `H.265 (convertito da ${(info.encode || "").split(" ")[1]?.split("->")[0]?.toUpperCase() || "?"})`, ok: false, title: "Il Moonlight dell'ospite usa H.264: convertito in H.265 con NVENC" }
             : { label: codec || "Codec ?", ok: false, title: "Lo stream non è H.265" },
@@ -975,7 +1113,7 @@ function openLiveMonitorModal(session: {
       const fallbacks = badges.filter((b) => !b.ok);
       pipelineBox.innerHTML = renderPipelineBadges(fallbacks);
       const bad = fallbacks.map((b) => b.label);
-      if (bad.length && !fallbackWarned) {
+      if (bad.length && !fallbackWarned && quality === "original") {
         fallbackWarned = true;
         showToast(`Video live in fallback: ${bad.join(", ")}`, "info");
       }
@@ -985,40 +1123,68 @@ function openLiveMonitorModal(session: {
   };
 
   const videoFailed = (message: string) => {
-    if (closed) return;
+    if (closed || retryTimer) return;
     console.warn("Live video:", message);
+    stopAttempt();
     videoLive = false;
-    player?.destroy();
-    player = null;
     videoEl?.classList.add("hidden");
-    if (lastFrameAt) screenImg?.classList.remove("hidden");
-    if (ageLabel) ageLabel.textContent = "video non disponibile, istantanee";
-    showToast(`Video live non disponibile: ${message}`, "error");
+    if (snapshotsAvailable && lastFrameAt) screenImg?.classList.remove("hidden");
+    showError(`Riconnessione automatica… ${message}`);
+    if (ageLabel) ageLabel.textContent = "connessione interrotta, riprovo…";
+    retryTimer = window.setTimeout(() => { retryTimer = null; startVideo(); }, Math.min(5000, 1000 * 2 ** Math.min(retryCount++, 3)));
   };
 
-  // Fallback transport: same GPU stream remuxed to fMP4 over the broker's HTTP.
-  const startFmp4 = (reason: string) => {
+  const startVideo = () => {
     if (closed || !videoEl) return;
-    console.warn("WebRTC non disponibile, uso fMP4:", reason);
-    transport = "fMP4";
-    videoEl.srcObject = null;
-    player = createLiveVideoPlayer(videoEl, videoFailed);
-    api
-      .startLiveVideo(session.sessionId, (msg) => {
-        if (msg instanceof ArrayBuffer) {
-          player?.push(msg);
-        } else if (msg.event === "end" && !closed) {
-          videoFailed(msg.error || "flusso terminato dall'host");
-        }
-      })
-      .catch((err) => videoFailed(String(err)));
+    stopAttempt();
+    const attempt = generation;
+    const abort = new AbortController();
+    attemptAbort = abort;
+    const current = () => !closed && attempt === generation;
+    let lastTime = videoEl.currentTime;
+    let progressed = Date.now();
+    watchdog = window.setInterval(() => {
+      if (!current() || document.hidden) { progressed = Date.now(); return; }
+      if (videoEl.currentTime !== lastTime) { lastTime = videoEl.currentTime; progressed = Date.now(); }
+      if (Date.now() - progressed > (videoLive ? 8000 : 35000)) videoFailed("il video non riceve nuovi fotogrammi");
+    }, 1000);
+
+    const startFmp4 = (reason: string) => {
+      if (!current() || viewerId) return;
+      console.debug("Uso fMP4:", reason);
+      useFmp4 = true;
+      transport = "fMP4";
+      videoEl.srcObject = null;
+      const id = crypto.randomUUID();
+      viewerId = id;
+      const attemptPlayer = createLiveVideoPlayer(videoEl, message => queueMicrotask(() => { if (current()) videoFailed(message); }));
+      player = attemptPlayer;
+      api.startLiveVideo(session.sessionId, id, (msg) => {
+        if (!current()) return;
+        if (msg instanceof ArrayBuffer) attemptPlayer.push(msg);
+        else if (msg.event === "end") videoFailed(msg.error || "flusso terminato dall'host");
+      }, quality).then(() => {
+        // Closing while start is in flight must cancel this reader, never its replacement.
+        if (!current()) void api.stopLiveVideo(id).catch(() => undefined);
+      }).catch((err) => { if (current()) videoFailed(String(err)); });
+    };
+    if (useFmp4) { startFmp4("riconnessione"); return; }
+    transport = "WebRTC";
+    startWebRtcVideo(videoEl,
+      sdp => api.whepOffer(session.sessionId, sdp, quality),
+      resource => void api.whepClose(session.sessionId, resource).catch(() => undefined),
+      reason => { if (current()) { useFmp4 = true; videoFailed(reason); } }, abort.signal,
+    ).then(s => { if (current()) rtc = s; else s.close(); })
+      .catch(err => { if (current()) startFmp4(String(err)); });
   };
 
   if (videoEl) {
     videoEl.addEventListener("playing", () => {
       if (closed) return;
       videoLive = true;
+      retryCount = 0;
       videoEl.classList.remove("hidden");
+      mediaReady(true);
       screenImg?.classList.add("hidden");
       spinner?.classList.add("hidden");
       errorBox?.classList.add("hidden");
@@ -1029,27 +1195,8 @@ function openLiveMonitorModal(session: {
       void refreshPipelineInfo();
       if (!infoTimer) infoTimer = window.setInterval(() => void refreshPipelineInfo(), 5000);
     });
-
-    transport = "WebRTC";
-    startWebRtcVideo(
-      videoEl,
-      (sdp) => api.whepOffer(session.sessionId, sdp),
-      (resource) => void api.whepClose(session.sessionId, resource).catch(() => undefined),
-      (reason) => {
-        if (closed) return;
-        rtc?.close();
-        rtc = null;
-        videoLive = false;
-        startFmp4(reason);
-      },
-    )
-      .then((s) => {
-        if (closed) s.close();
-        else rtc = s;
-      })
-      .catch((err) => {
-        if (!closed) startFmp4(String(err));
-      });
+    videoEl.addEventListener("error", () => videoFailed(videoEl.error?.message || "errore di riproduzione"));
+    startVideo();
   }
 
   let currentRecording = session.isRecording;
@@ -1063,6 +1210,8 @@ function openLiveMonitorModal(session: {
       const res = brokerMessage(raw, currentRecording ? "Registrazione fermata" : "Registrazione avviata");
       if (!res.ok) throw new Error(res.message);
       currentRecording = !currentRecording;
+      session.isRecording = currentRecording;
+      void refreshMultiUserOnly();
       setBusy(toggleRecBtn, false);
       recBadge?.classList.toggle("hidden", !currentRecording);
       recBadge?.classList.toggle("inline-flex", currentRecording);
@@ -1079,10 +1228,9 @@ function openLiveMonitorModal(session: {
   takeoverBtn?.addEventListener("click", async () => {
     cleanup();
     try {
-      const res = brokerMessage(await api.takeoverUserSession(session.sessionId), "Controllo affiancato");
+      const res = brokerMessage(await api.takeoverUserSession(session.sessionId, currentSession!.token), "Controllo affiancato");
       if (!res.ok) throw new Error(res.message);
-      showToast(`${res.message}. Apertura Moonlight in corso…`, "ok");
-      await api.launchMoonlight();
+      showToast(res.message, "ok");
       await refreshMultiUserOnly();
     } catch (err) {
       showToast(String(err), "error");
@@ -1113,7 +1261,7 @@ function renderRecordingsTab() {
   container.querySelectorAll<HTMLButtonElement>(".btn-delete-recording").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.id;
-      if (!id || !window.confirm(`Eliminare definitivamente ${btn.dataset.file ?? "la registrazione"}?`)) return;
+      if (!id || !(await confirmDialog(`Eliminare ${btn.dataset.file ?? "la registrazione"}?`))) return;
       try {
         setBusy(btn, true);
         const res = brokerMessage(await api.deleteRecording(id, currentSession?.token), "Registrazione eliminata");
@@ -1147,7 +1295,10 @@ function openRecordingPlayer(item: RecordingItem) {
   portal.innerHTML = renderRecordingPlayerModal(item, owner);
   const video = portal.querySelector<HTMLVideoElement>("#recording-video");
   const errorBox = portal.querySelector<HTMLElement>("#recording-player-error");
+  const modal = portal.querySelector<HTMLElement>("#recording-player-modal");
+  const restoreFullscreen = modal ? wireMediaFullscreen(modal) : () => undefined;
   const close = () => {
+    restoreFullscreen();
     void api.cancelRecordingDownload(item.id).catch(() => undefined);
     // Stop the Range requests to the server before dropping the element.
     if (video) {
@@ -1244,10 +1395,9 @@ function wireSessionActions() {
         setBusy(btn, true, "Affianco…");
         // Wolf sessions join the guest's shared lobby: the broker explains why
         // when that is not possible (no lobby, PIN, no Moonlight session).
-        const res = brokerMessage(await api.takeoverUserSession(id), "Controllo affiancato");
+        const res = brokerMessage(await api.takeoverUserSession(id, currentSession!.token), "Controllo affiancato");
         if (!res.ok) throw new Error(res.message);
-        showToast(`${res.message}. Apertura Moonlight in corso…`, "ok");
-        await api.launchMoonlight();
+        showToast(res.message, "ok");
       } catch (err) {
         showToast(String(err), "error");
       } finally {
@@ -1324,10 +1474,24 @@ function wireSessionActions() {
 // Wolf serves guests on its own ports (scripts/omarchy-wolf-install); Sunshine keeps 47989.
 const WOLF_HTTP_PORT = 49989;
 
-function openPairDeviceModal(defaultPin = "", username = "") {
+function openPairDeviceModal(defaultPin = "", username = "", clientIp = "") {
   const portal = document.querySelector<HTMLElement>("#modal-portal");
   if (!portal) return;
-  portal.innerHTML = renderPairDeviceModal(defaultPin, multiUser?.users ?? [], username);
+  const pending = multiUser?.pair_pending ?? [];
+  const device = clientIp || (pending.length === 1 ? pending[0].client_ip : "");
+  const knownUser = username || pending.find((p) => p.client_ip === device)?.username || "";
+  portal.innerHTML = renderPairDeviceModal(defaultPin, multiUser?.users ?? [], knownUser, pending, device);
+  pairModalOpenFor = device || "manual";
+  const pinInput = portal.querySelector<HTMLInputElement>("#pair-pin-input");
+  pinInput?.addEventListener("input", () => {
+    pinInput.value = pinInput.value.replace(/\D/g, "").slice(0, 4);
+  });
+  window.setTimeout(() => pinInput?.focus(), 50);
+  portal.querySelector<HTMLSelectElement>("#pair-device-select")?.addEventListener("change", (e) => {
+    const ip = (e.target as HTMLSelectElement).value;
+    const hidden = portal.querySelector<HTMLInputElement>("#pair-client-ip");
+    if (hidden) hidden.value = ip;
+  });
 
   const userSelect = portal.querySelector<HTMLSelectElement>("#pair-user-select");
   const targetSelect = portal.querySelector<HTMLSelectElement>("#pair-target-select");
@@ -1347,6 +1511,7 @@ function openPairDeviceModal(defaultPin = "", username = "") {
 
   const close = () => {
     if (portal) portal.innerHTML = "";
+    pairModalOpenFor = null;
   };
 
   portal.querySelectorAll(".btn-close-modal").forEach((b) => b.addEventListener("click", close));
@@ -1370,13 +1535,19 @@ function openPairDeviceModal(defaultPin = "", username = "") {
 
     try {
       const target = (targetSelect?.value || "auto") as "auto" | "sunshine" | "wolf";
-      const res = await api.pairMoonlightDevice(pin, name || undefined, currentSession?.token, target, userSelect?.value || undefined);
+      const clientIp = portal.querySelector<HTMLInputElement>("#pair-client-ip")?.value || undefined;
+      const res = brokerMessage(
+        await api.pairMoonlightDevice(pin, name || undefined, currentSession?.token, target, userSelect?.value || undefined, clientIp),
+        "Dispositivo accoppiato",
+      );
+      if (!res.ok) throw new Error(res.message);
       if (feedback) {
         feedback.className = "rounded-lg p-2.5 border bg-emerald-950/50 border-emerald-500/50 text-emerald-300 text-xs";
-        feedback.innerHTML = `<span>✅ ${escapeHtml(brokerMessage(res, "Dispositivo accoppiato").message)}</span>`;
+        feedback.textContent = res.message;
       }
-      showToast("Dispositivo accoppiato: il lucchetto in Moonlight sparirà subito.", "ok");
-      setTimeout(close, 1400);
+      if (clientIp) dismissedPairings.add(clientIp);
+      showToast("Dispositivo accoppiato", "ok");
+      setTimeout(close, 1200);
     } catch (err) {
       if (feedback) {
         feedback.className = "rounded-lg p-2.5 border bg-red-950/50 border-red-500/50 text-red-300 text-xs";
@@ -1389,7 +1560,17 @@ function openPairDeviceModal(defaultPin = "", username = "") {
   });
 }
 
+function wireStorageActions() {
+  document.querySelectorAll<HTMLButtonElement>(".btn-user-storage").forEach(btn => {
+    btn.onclick = () => {
+      if (btn.dataset.username && currentSession) openUserStorage(btn.dataset.username, currentSession.token,
+        (message, failed) => showToast(message, failed ? "error" : "ok"), () => void refreshMultiUserOnly());
+    };
+  });
+}
+
 function wireUserActions() {
+  wireStorageActions();
   // PIN reveal toggle
   document.querySelectorAll<HTMLButtonElement>(".pin-toggle").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1431,17 +1612,18 @@ function wireUserActions() {
       // 1. Local LAN (Prima opzione consigliata per uso locale su questo Mac)
       const lanHostWithPort = `${currentHost}${portSuffix}`;
       availableHosts.push({
-        label: `🏠 Nodo Attivo (LAN Wi-Fi Locale) [Porta ${streamPort}] — Consigliato per questo Mac`,
+        label: `LAN · ${currentHost}`,
         host: lanHostWithPort,
       });
 
       // 2. DuckDNS Globale (Zero VPN) - Uses node-specific DDNS if configured or global active DDNS
       const nodeDdns = normalizeDdnsDomain(activeNode?.ddns_domain || ddnsStatusInfo?.domain);
-      const duckHostWithPort = `${nodeDdns}${portSuffix}`;
-      availableHosts.push({
-        label: `🌐 DuckDNS Globale [Porta ${streamPort}] — Per amici & fuori casa (4G/5G)`,
-        host: duckHostWithPort,
-      });
+      if (nodeDdns) {
+        availableHosts.push({
+          label: `Internet · ${nodeDdns}`,
+          host: `${nodeDdns}${portSuffix}`,
+        });
+      }
 
       // 3. Public WAN IP (with explicit port)
       try {
@@ -1450,7 +1632,7 @@ function wireUserActions() {
           const wanWithPort = `${publicIp.trim()}${portSuffix}`;
           if (!availableHosts.some((h) => h.host === wanWithPort)) {
             availableHosts.push({
-              label: `IP Pubblico Modem / WAN (${publicIp.trim()}) [Porta ${streamPort}]`,
+              label: `IP pubblico · ${publicIp.trim()}`,
               host: wanWithPort,
             });
           }
@@ -1468,7 +1650,7 @@ function wireUserActions() {
             const targetWithPort = `${target}${portSuffix}`;
             if (!availableHosts.some((h) => h.host === targetWithPort)) {
               availableHosts.push({
-                label: `Tailscale MagicDNS: ${tn.hostname} (${tn.online ? "🟢 Online" : "⚪ Offline"}) [Porta ${streamPort}]`,
+                label: `Tailscale · ${tn.hostname}${tn.online ? "" : " (offline)"}`,
                 host: targetWithPort,
               });
             }
@@ -1481,7 +1663,7 @@ function wireUserActions() {
       // Fallback PVE magicdns if not already in list
       const pveMagicDns = `pve.tail65d87d.ts.net${portSuffix}`;
       if (!availableHosts.some((h) => h.host === pveMagicDns)) {
-        availableHosts.push({ label: `Tailscale MagicDNS (Proxmox Router) [Porta ${streamPort}]`, host: pveMagicDns });
+        availableHosts.push({ label: `Tailscale · Proxmox`, host: pveMagicDns });
       }
 
       // Default to Local LAN for this Mac
@@ -1518,13 +1700,17 @@ function wireUserActions() {
 
       if (hostSelect && linkInput && qrContainer && copyMsgBtn) {
         const updateInviteLink = async () => {
-          const { fullTarget, baseHost } = getActiveEndpoint();
+          const { fullTarget, currentPortVal } = getActiveEndpoint();
           const newDeepLink = `moonlight://${fullTarget}`;
           linkInput.value = newDeepLink;
 
           if (testFeedback) {
-            testFeedback.classList.add("hidden");
-            testFeedback.innerHTML = "";
+            // A guest on any other port would reach Sunshine, the owner's desktop.
+            const wrongPort = user.role === "guest" && currentPortVal !== WOLF_HTTP_PORT;
+            testFeedback.classList.toggle("hidden", !wrongPort);
+            testFeedback.innerHTML = wrongPort
+              ? `<span class="text-amber-300">Gli ospiti devono usare la porta ${WOLF_HTTP_PORT} (Wolf): su altre porte si arriva al desktop admin.</span>`
+              : "";
           }
 
           try {
@@ -1532,24 +1718,7 @@ function wireUserActions() {
             qrContainer.innerHTML = newQr;
           } catch {}
 
-          const hostDisplay = baseHost;
-          const updatedMsg = `🎮 Ciao ${user.display_name}! Ecco il tuo accesso a Omarchy Gaming:
-
-1️⃣ Scarica l'app gratuita Moonlight per il tuo dispositivo:
-👉 https://moonlight-stream.org
-
-2️⃣ Connettiti al server:
-📱 Da Smartphone / Tablet (iPhone o Android):
-Tocca direttamente questo link:
-${newDeepLink}
-
-💻 Da PC (Windows o Mac):
-Apri Moonlight, clicca sull'icona '+' in alto a destra e inserisci:
-${hostDisplay}
-
-3️⃣ Primo collegamento (solo la prima volta):
-Moonlight ti mostrerà a schermo un codice di 4 cifre (es. 1234).
-👉 Inviamelo qui in chat: lo approvo al volo dal mio pannello e sei pronto per giocare! (Nessun codice ti sarà più richiesto) 🚀`;
+          const updatedMsg = buildInviteMessage(user.display_name, fullTarget, user.pin, user.role === "guest");
           copyMsgBtn.dataset.msg = updatedMsg;
         };
 
@@ -1683,6 +1852,12 @@ Moonlight ti mostrerà a schermo un codice di 4 cifre (es. 1234).
       $<HTMLInputElement>("#edit-pin-input").value = "";
       $<HTMLSelectElement>("#edit-role-select").value = user.role;
       $<HTMLSelectElement>("#edit-bitrate-select").value = String(user.max_bitrate_mbps);
+      const storageInput = $<HTMLInputElement>("#edit-storage-input");
+      storageInput.value = String(user.storage_limit_gb ?? 0);
+      storageInput.dataset.original = storageInput.value;
+      $("#edit-storage-usage").textContent = user.storage_used_gb == null
+        ? "Spazio occupato: non ancora disponibile"
+        : `Spazio occupato: ${user.storage_used_gb.toFixed(2)} GB`;
 
       $<HTMLInputElement>("#edit-app-steam").checked = user.allowed_apps.includes("steam");
       $<HTMLInputElement>("#edit-app-desktop").checked = user.allowed_apps.includes("desktop");
@@ -1709,12 +1884,14 @@ Moonlight ti mostrerà a schermo un codice di 4 cifre (es. 1234).
       const u = btn.dataset.username;
       if (!u) return;
       try {
-        const res = await api.banMultiUser(u, "Disattivato dall'amministratore", currentSession?.token);
-        showToast(res, "ok");
+        setBusy(btn, true, "Banno…");
+        const res = brokerMessage(await api.banMultiUser(u, "Disattivato dall'amministratore", currentSession?.token), "Utente bannato");
+        if (!res.ok) throw new Error(res.message);
+        showToast(res.message, "ok");
         await refreshMultiUserOnly();
       } catch (err) {
         showToast(String(err), "error");
-      }
+      } finally { setBusy(btn, false); }
     });
   });
 
@@ -1723,19 +1900,21 @@ Moonlight ti mostrerà a schermo un codice di 4 cifre (es. 1234).
       const u = btn.dataset.username;
       if (!u) return;
       try {
-        const res = await api.unbanMultiUser(u, currentSession?.token);
-        showToast(res, "ok");
+        setBusy(btn, true);
+        const res = brokerMessage(await api.unbanMultiUser(u, currentSession?.token), "Utente riattivato");
+        if (!res.ok) throw new Error(res.message);
+        showToast(res.message, "ok");
         await refreshMultiUserOnly();
       } catch (err) {
         showToast(String(err), "error");
-      }
+      } finally { setBusy(btn, false); }
     });
   });
 
   document.querySelectorAll<HTMLButtonElement>(".btn-remove-user").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const u = btn.dataset.username;
-      if (!u || !confirm(`Sei sicuro di voler rimuovere il profilo "${u}"?`)) return;
+      if (!u || !(await confirmDialog(`Eliminare l'utente "${u}"?`))) return;
       try {
         const res = await api.removeMultiUser(u, false, currentSession?.token);
         showToast(res, "ok");
@@ -1748,6 +1927,7 @@ Moonlight ti mostrerà a schermo un codice di 4 cifre (es. 1234).
 }
 
 function wireEnterpriseActions() {
+  wireStorageActions();
   // Push / Pull Savegames
   document.querySelector<HTMLButtonElement>("#btn-manual-sync-push")?.addEventListener("click", async () => {
     const user = (document.querySelector<HTMLSelectElement>("#sync-user-select")?.value) || "admin";
@@ -1807,7 +1987,13 @@ function wireEnterpriseActions() {
     const valType = (document.querySelector<HTMLSelectElement>("#cfg-savegames-type")?.value) || "nas";
     const valPath = (document.querySelector<HTMLInputElement>("#cfg-savegames-path")?.value) || "";
     const valSync = String(document.querySelector<HTMLInputElement>("#cfg-savegames-autosync")?.checked ?? false);
-    const valMaxSnaps = (document.querySelector<HTMLInputElement>("#cfg-savegames-maxsnaps")?.value) || "5";
+    const inputs = ["cfg-savegames-maxsnaps", "cfg-recordings-days", "cfg-savegames-path", "cfg-recordings-path", "cfg-local-saves-path", "cfg-local-recordings-path"];
+    for (const id of inputs) {
+      const input = document.querySelector<HTMLInputElement>(`#${id}`);
+      if (!input || !input.reportValidity()) return;
+    }
+    const valMaxSnaps = document.querySelector<HTMLInputElement>("#cfg-savegames-maxsnaps")!.value;
+    const valDays = document.querySelector<HTMLInputElement>("#cfg-recordings-days")!.value;
 
     if (btn) setBusy(btn, true, "Salvataggio…");
     try {
@@ -1816,8 +2002,11 @@ function wireEnterpriseActions() {
         api.updateEnterpriseSetting("savegames_nas_path", valPath, currentSession?.token),
         api.updateEnterpriseSetting("savegames_auto_sync", valSync, currentSession?.token),
         api.updateEnterpriseSetting("retention_saves_max_snapshots", valMaxSnaps, currentSession?.token),
+        api.updateEnterpriseSetting("retention_recordings_days", valDays, currentSession?.token),
+        ...[["recordings_nas_path", "cfg-recordings-path"], ["local_saves_path", "cfg-local-saves-path"], ["local_recordings_path", "cfg-local-recordings-path"]].map(([key, id]) => api.updateEnterpriseSetting(
+          key, document.querySelector<HTMLInputElement>(`#${id}`)!.value, currentSession?.token)),
       ]);
-      showToast("Configurazione salvataggi salvata con successo!", "ok");
+      showToast("Configurazione backup e registrazioni salvata", "ok");
       await loadEnterpriseData();
     } catch (err) {
       showToast(`Errore salvataggio: ${String(err)}`, "error");
@@ -1830,11 +2019,16 @@ function wireEnterpriseActions() {
   document.querySelector<HTMLButtonElement>("#btn-save-settings-admission")?.addEventListener("click", async () => {
     const btn = document.querySelector<HTMLButtonElement>("#btn-save-settings-admission");
     const valMaxStreams = (document.querySelector<HTMLInputElement>("#cfg-admission-maxstreams")?.value) || "2";
+    const desktopScale = document.querySelector<HTMLInputElement>("#cfg-desktop-scale");
+    if (!desktopScale?.reportValidity()) return;
 
     if (btn) setBusy(btn, true, "Salvataggio…");
     try {
-      await api.updateEnterpriseSetting("max_concurrent_streams", valMaxStreams, currentSession?.token);
-      showToast("Limiti encoder aggiornati con successo!", "ok");
+      await Promise.all([
+        api.updateEnterpriseSetting("max_concurrent_streams", valMaxStreams, currentSession?.token),
+        api.updateEnterpriseSetting("desktop_scale", String(Number(desktopScale.value) / 100), currentSession?.token),
+      ]);
+      showToast("Impostazioni streaming salvate", "ok");
       await loadEnterpriseData();
     } catch (err) {
       showToast(`Errore salvataggio: ${String(err)}`, "error");
@@ -1846,11 +2040,15 @@ function wireEnterpriseActions() {
   // NAS Mount Modal Handlers
   document.querySelector<HTMLButtonElement>("#btn-open-nas-modal")?.addEventListener("click", () => {
     const modal = document.querySelector<HTMLElement>("#nas-mount-modal");
+    refreshNasMountModal(multiUser?.storage);
     if (modal) modal.classList.remove("hidden");
     const feedback = document.querySelector<HTMLElement>("#nas-test-feedback");
     if (feedback) feedback.classList.add("hidden");
   });
 
+  // The NAS modal is static: wire it once, not on every page refresh.
+  if (!nasModalWired) {
+  nasModalWired = true;
   const closeNasModal = () => {
     document.querySelector<HTMLElement>("#nas-mount-modal")?.classList.add("hidden");
   };
@@ -1901,16 +2099,17 @@ function wireEnterpriseActions() {
     }
   });
 
-  document.querySelector<HTMLButtonElement>("#btn-save-mount-nas")?.addEventListener("click", async () => {
+  document.querySelector<HTMLButtonElement>("#btn-save-mount-nas")?.addEventListener("click", async (e) => {
+    e.preventDefault();
     const server = document.querySelector<HTMLInputElement>("#nas-input-server")?.value.trim() || "";
     const share = document.querySelector<HTMLInputElement>("#nas-input-share")?.value.trim() || "";
-    const mountpoint = document.querySelector<HTMLInputElement>("#nas-input-mountpoint")?.value.trim() || "/mnt/nvme1-recordings";
+    const mountpoint = document.querySelector<HTMLInputElement>("#nas-input-mountpoint")?.value.trim() || "";
     const username = document.querySelector<HTMLInputElement>("#nas-input-user")?.value.trim() || undefined;
     const password = document.querySelector<HTMLInputElement>("#nas-input-pass")?.value || undefined;
     const feedback = document.querySelector<HTMLElement>("#nas-test-feedback");
 
-    if (!server || !share) {
-      showToast("Specifica Server e Share NAS", "error");
+    if (!server || !share || !mountpoint) {
+      showToast("Specifica server, condivisione e punto di mount NAS", "error");
       return;
     }
 
@@ -1939,6 +2138,7 @@ function wireEnterpriseActions() {
       }
     }
   });
+  }
 
   // DuckDNS Actions
   document.querySelector<HTMLButtonElement>("#btn-sync-ddns-now")?.addEventListener("click", async () => {
@@ -1956,10 +2156,10 @@ function wireEnterpriseActions() {
   document.querySelector<HTMLButtonElement>("#btn-save-ddns-config")?.addEventListener("click", async () => {
     const subInput = document.querySelector<HTMLInputElement>("#cfg-ddns-subdomain");
     const tokInput = document.querySelector<HTMLInputElement>("#cfg-ddns-token");
-    const subdomain = subInput?.value.trim() || "cloudgamingadrian";
+    const subdomain = subInput?.value.trim() || "";
     const token = tokInput?.value.trim() || "";
-    if (!token) {
-      showToast("Inserisci il token DuckDNS", "error");
+    if (!subdomain) {
+      showToast("Inserisci il sottodominio DuckDNS", "error");
       return;
     }
     try {
@@ -1983,9 +2183,9 @@ function wireEnterpriseActions() {
 async function loadEnterpriseData() {
   try {
     const [settings, peers, saves, ddns] = await Promise.all([
-      api.getEnterpriseSettings().catch(() => ({})),
-      api.listVpnPeers(undefined, currentSession?.token).catch(() => []),
-      api.listUserSavegames(undefined, currentSession?.token).catch(() => []),
+      api.getEnterpriseSettings().catch(() => multiUser?.settings ?? {}),
+      api.listVpnPeers(undefined, currentSession?.token).catch(() => multiUser?.vpn_peers ?? []),
+      api.listUserSavegames(undefined, currentSession?.token).catch(() => multiUser?.savegames ?? []),
       api.getDdnsStatus().catch(() => null),
     ]);
     enterpriseSettings = settings;
@@ -1995,15 +2195,12 @@ async function loadEnterpriseData() {
 
     const enterpriseContainer = document.querySelector<HTMLElement>("#enterprise-container");
     if (enterpriseContainer && multiUser) {
-      enterpriseContainer.innerHTML = renderEnterpriseDashboard(
-        multiUser,
-        enterpriseSettings,
-        vpnPeersList,
-        savegamesList,
-        multiUser.users,
-        ddnsStatusInfo,
+      renderEditableSection(
+        enterpriseContainer,
+        renderEnterpriseDashboard(multiUser, enterpriseSettings, vpnPeersList, savegamesList, multiUser.users, ddnsStatusInfo),
+        wireEnterpriseActions,
+        true,
       );
-      wireEnterpriseActions();
     }
   } catch {
     // ignore
@@ -2083,8 +2280,8 @@ function mountMainShell(session: AuthSession) {
           </a>
         </nav>
 
-        <div class="brand-text p-4 border-t border-zinc-800/80 text-[11px] text-zinc-500">
-          <span id="app-version-pill" class="font-mono">v0.3.0</span>
+        <div class="p-2.5 border-t border-zinc-800/80">
+          ${renderUpdateButton()}
         </div>
       </aside>
 
@@ -2157,30 +2354,17 @@ function mountMainShell(session: AuthSession) {
 
           <!-- Tab 2: Sessions -->
           <div class="tab-content hidden" id="tab-sessions">
-            <div class="flex items-center justify-between mb-4">
-              <div>
-                <h2 class="text-base font-semibold text-zinc-100">Sessioni Streaming</h2>
-                <p class="text-xs text-zinc-400">Desktop amministratore (Sunshine) e sandbox ospiti (Wolf) in tempo reale</p>
-              </div>
-            </div>
+            <div class="page-head"><h2>Sessioni</h2></div>
             <div id="sessions-container"></div>
           </div>
 
           <!-- Tab 3: Users -->
           <div class="tab-content hidden" id="tab-users">
-            <div class="flex items-center justify-between mb-4">
-              <div>
-                <h2 class="text-base font-semibold text-zinc-100">Profili Utente & Sandbox</h2>
-                <p class="text-xs text-zinc-400">Gestione autorizzazioni, PIN di accesso isolati e quote bitrate</p>
-              </div>
+            <div class="page-head">
+              <h2>Utenti</h2>
               <div class="flex items-center gap-2">
-                <button type="button" id="open-pair-device-modal" class="px-3.5 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold shadow-sm transition flex items-center gap-1.5 cursor-pointer">
-                  ${Icons.key("w-3.5 h-3.5 text-amber-400")}
-                  <span>Accoppia PIN Dispositivo</span>
-                </button>
-                <button type="button" id="open-add-user-modal" class="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm transition cursor-pointer">
-                  + Nuovo Utente
-                </button>
+                <button type="button" id="open-pair-device-modal" class="btn-ghost">Accoppia dispositivo</button>
+                <button type="button" id="open-add-user-modal" class="btn-primary">Nuovo utente</button>
               </div>
             </div>
             <div id="users-container"></div>
@@ -2196,147 +2380,54 @@ function mountMainShell(session: AuthSession) {
             <div id="enterprise-container"></div>
           </div>
 
-          <!-- Tab 5: Schermo & Risoluzione Client (Moonlight) -->
+          <!-- Tab 5: Moonlight on this Mac -->
           <div class="tab-content hidden" id="tab-streaming">
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-              
-              <!-- Left: Configuration Card -->
-              <div class="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-6 shadow-sm space-y-5">
-                <div class="border-b border-zinc-800/80 pb-4">
-                  <h3 class="text-base font-semibold text-zinc-100 flex items-center gap-2">
-                    ${Icons.gamepad("w-5 h-5 text-emerald-400")}
-                    <span>Display & Risoluzione Client</span>
-                  </h3>
-                  <p class="text-xs text-zinc-400 mt-1">
-                    Configura l'app Moonlight sul tuo Mac per ottimizzare la risoluzione dello schermo e il bitrate video.
-                  </p>
-                </div>
-
-                <div class="space-y-4 text-xs">
-                  <div>
-                    <label class="block text-zinc-400 font-medium mb-1.5">Seleziona Schermo Mac o Monitor Esterno</label>
-                    <div class="flex gap-2">
-                      <select id="gaming-display" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2.5 text-zinc-100 text-xs outline-none focus:border-emerald-500 transition"></select>
-                      <button type="button" id="refresh-displays" class="p-2.5 bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/60 text-zinc-200 rounded-xl font-medium transition cursor-pointer" title="Ricarica schermi">
-                        ${Icons.refresh("w-4 h-4 text-zinc-300")}
-                      </button>
-                    </div>
+            <div class="page-head"><h2>Display</h2></div>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+              <div class="card space-y-4 text-xs">
+                <div>
+                  <label class="block text-zinc-400 mb-1.5" for="gaming-display">Schermo</label>
+                  <div class="flex gap-2">
+                    <select id="gaming-display" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100 text-xs outline-none focus:border-emerald-500"></select>
+                    <button type="button" id="refresh-displays" class="btn-ghost px-2.5" title="Ricarica schermi" aria-label="Ricarica schermi">${Icons.refresh("w-4 h-4")}</button>
                   </div>
-
-                  <div>
-                    <label class="block text-zinc-400 font-medium mb-2">Profilo di Streaming Moonlight</label>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <label class="flex items-start gap-3 p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800 hover:border-zinc-700 cursor-pointer transition">
-                        <input type="radio" name="gaming-quality" value="performance" checked class="text-emerald-500 mt-0.5" />
-                        <div>
-                          <div class="font-semibold text-zinc-200">1080p @ 60 FPS</div>
-                          <div class="text-[11px] text-zinc-400 mt-0.5">Latenza sub-5ms (HEVC), raccomandato per giochi dinamici.</div>
-                        </div>
-                      </label>
-                      <label class="flex items-start gap-3 p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800 hover:border-zinc-700 cursor-pointer transition">
-                        <input type="radio" name="gaming-quality" value="native" class="text-emerald-500 mt-0.5" />
-                        <div>
-                          <div class="font-semibold text-zinc-200">Qualità Nativa Display</div>
-                          <div class="text-[11px] text-zinc-400 mt-0.5">Mappa 1:1 la risoluzione esatta dello schermo o monitor Retina.</div>
-                        </div>
-                      </label>
-                    </div>
-                  </div>
-
-                  <button type="button" id="configure-gaming" class="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition shadow-sm cursor-pointer flex items-center justify-center gap-2">
-                    ${Icons.check("w-4 h-4")}
-                    <span>Salva ed Applica a Moonlight</span>
-                  </button>
                 </div>
+                <div>
+                  <div class="text-zinc-400 mb-1.5">Qualità</div>
+                  <div class="grid grid-cols-2 gap-2">
+                    <label class="flex items-center gap-2 p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 hover:border-zinc-700 cursor-pointer">
+                      <input type="radio" name="gaming-quality" value="performance" checked class="text-emerald-500" />
+                      <span class="text-zinc-200">1080p · 60 FPS</span>
+                    </label>
+                    <label class="flex items-center gap-2 p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 hover:border-zinc-700 cursor-pointer">
+                      <input type="radio" name="gaming-quality" value="native" class="text-emerald-500" />
+                      <span class="text-zinc-200">Nativa</span>
+                    </label>
+                  </div>
+                </div>
+                <button type="button" id="configure-gaming" class="btn-primary w-full">Applica a Moonlight</button>
               </div>
-
-              <!-- Right: Status and Info Cards -->
-              <div class="space-y-6">
-                <div class="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-6 shadow-sm space-y-4">
-                  <div class="border-b border-zinc-800/80 pb-3">
-                    <h4 class="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                      ${Icons.sliders("w-4 h-4 text-emerald-400")}
-                      <span>Parametri Applicati a Moonlight</span>
-                    </h4>
-                    <p class="text-xs text-zinc-400 mt-0.5">Configurazione generata per il profilo selezionato</p>
-                  </div>
-                  <div id="gaming-summary" class="p-4 bg-zinc-950/80 rounded-xl border border-zinc-800 font-mono text-xs text-zinc-300 leading-relaxed">
-                    Caricamento profili display…
-                  </div>
-                </div>
-
-                <div class="bg-zinc-900/40 border border-zinc-800/80 rounded-2xl p-5 text-xs text-zinc-400 space-y-2">
-                  <div class="font-semibold text-zinc-200 flex items-center gap-2">
-                    ${Icons.monitor("w-4 h-4 text-zinc-400")}
-                    <span>Integrazione Nativa macOS</span>
-                  </div>
-                  <p class="leading-relaxed">
-                    Questa schermata applica le impostazioni direttamente nel file delle preferenze locali di Moonlight su macOS, sincronizzando risoluzione, framerate e dimensione pacchetti UDP ottimizzata a 1024 byte per garantire fluidità e stabilità.
-                  </p>
-                </div>
+              <div class="card">
+                <div class="card-title">Impostazioni risultanti</div>
+                <div id="gaming-summary" class="text-xs text-zinc-500">Caricamento…</div>
               </div>
             </div>
           </div>
 
-          <!-- Tab 6: Requirements & Host Diagnostics -->
+          <!-- Tab 6: Diagnostics -->
           <div class="tab-content hidden" id="tab-requirements">
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-              
-              <!-- Left: System Requirements -->
-              <div class="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-6 shadow-sm space-y-4">
-                <div class="border-b border-zinc-800/80 pb-3">
-                  <h3 class="text-base font-semibold text-zinc-100 flex items-center gap-2">
-                    ${Icons.wrench("w-5 h-5 text-emerald-400")}
-                    <span>Diagnostica & Prerequisiti Host</span>
-                  </h3>
-                  <p class="text-xs text-zinc-400 mt-1">
-                    Verifica dello stato operativo dei componenti client e dei servizi server sul nodo attivo.
-                  </p>
-                </div>
-                <div id="dependencies" class="space-y-2.5">
-                  <div class="text-xs text-zinc-500 font-mono">Verifica requisiti in corso…</div>
-                </div>
+            <div class="page-head"><h2>Diagnostica</h2></div>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+              <div class="card">
+                <div class="card-title">Componenti</div>
+                <div id="dependencies"><div class="text-xs text-zinc-500">Verifica in corso…</div></div>
               </div>
-
-              <!-- Right: Gateway Ports & Architecture -->
-              <div class="space-y-6">
-                <div class="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-6 shadow-sm space-y-4">
-                  <div class="border-b border-zinc-800/80 pb-3">
-                    <h4 class="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                      ${Icons.server("w-4 h-4 text-emerald-400")}
-                      <span>Architettura Gateway Sunshine</span>
-                    </h4>
-                    <p class="text-xs text-zinc-400 mt-0.5">Flussi video NVENC a bassa latenza su rete locale o VPN</p>
-                  </div>
-                  <div class="space-y-2.5 text-xs text-zinc-300">
-                    <div class="flex items-center justify-between p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80">
-                      <span class="text-zinc-400">Pannello Web Sunshine</span>
-                      <span class="font-mono text-zinc-200">Porta 47990 (HTTPS)</span>
-                    </div>
-                    <div class="flex items-center justify-between p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80">
-                      <span class="text-zinc-400">Porte Streaming Video (UDP)</span>
-                      <span class="font-mono text-zinc-200">47989, 47998–48010</span>
-                    </div>
-                    <div class="flex items-center justify-between p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80">
-                      <span class="text-zinc-400">Session Broker API</span>
-                      <span class="font-mono text-zinc-200">Porta 47995 (HTTP)</span>
-                    </div>
-                    <div class="flex items-center justify-between p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80">
-                      <span class="text-zinc-400">Dimensione Pacchetti UDP</span>
-                      <span class="font-mono text-emerald-400">1024 Bytes</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="bg-zinc-900/40 border border-zinc-800/80 rounded-2xl p-5 text-xs text-zinc-400 space-y-2">
-                  <div class="font-semibold text-zinc-200 flex items-center gap-2">
-                    ${Icons.shield("w-4 h-4 text-zinc-400")}
-                    <span>Isolamento e Crittografia</span>
-                  </div>
-                  <p class="leading-relaxed">
-                    Il server Sunshine gira all'interno della VM Omarchy su Proxmox VE. I client remoti comunicano esclusivamente attraverso canali cifrati Moonlight con certificato x509 dedicato.
-                  </p>
-                </div>
+              <div class="card">
+                <div class="card-title">Porte</div>
+                <div class="kv"><span>Sunshine (admin)</span><span>47989 · 47998–48010</span></div>
+                <div class="kv"><span>Wolf (ospiti)</span><span>49989 · 49999–50200</span></div>
+                <div class="kv"><span>Broker API</span><span>47995</span></div>
+                <div class="kv"><span>Live view (WebRTC)</span><span>8189</span></div>
               </div>
             </div>
           </div>
@@ -2364,8 +2455,9 @@ function mountMainShell(session: AuthSession) {
       document.querySelectorAll(".nav-tab").forEach((t) => t.removeAttribute("aria-current"));
       tab.setAttribute("aria-current", "page");
 
-      document.querySelectorAll(".tab-content").forEach((tc) => {
+      document.querySelectorAll<HTMLElement>(".tab-content").forEach((tc) => {
         tc.classList.add("hidden");
+        tc.querySelectorAll<HTMLElement>("[data-dirty]").forEach((el) => delete el.dataset.dirty);
       });
       const activeContent = document.querySelector<HTMLElement>(`#tab-${target}`);
       if (activeContent) activeContent.classList.remove("hidden");
@@ -2373,6 +2465,9 @@ function mountMainShell(session: AuthSession) {
       if (target === "recordings") void loadRecordings();
     });
   });
+
+  void initUpdater();
+  wireEscapeToClose();
 
   // Topbar and SSH modal buttons
   $("#btn-node-switcher").addEventListener("click", openSshModal);
@@ -2464,7 +2559,8 @@ function mountMainShell(session: AuthSession) {
     const autoRecord = (form.elements.namedItem("new_user_auto_record") as HTMLInputElement)?.checked ?? false;
 
     try {
-      const res = await api.addMultiUser(username, display, pin, role, apps, bitrate, allowedNodes, currentSession?.token, autoRecord);
+      const storageLimitGb = Number((form.elements.namedItem("new_storage_gb") as HTMLInputElement).value);
+      const res = await api.addMultiUser(username, display, pin, role, apps, bitrate, allowedNodes, currentSession?.token, autoRecord, storageLimitGb);
       showToast(res, "ok");
       $("#add-user-modal")?.classList.add("hidden");
       form.reset();
@@ -2489,6 +2585,8 @@ function mountMainShell(session: AuthSession) {
     const role = $<HTMLSelectElement>("#edit-role-select").value;
     const bitrate = Number($<HTMLSelectElement>("#edit-bitrate-select").value);
     const autoRecord = $<HTMLInputElement>("#edit-user-auto-record")?.checked ?? false;
+    const storageInput = $<HTMLInputElement>("#edit-storage-input");
+    const storageLimitGb = Number(storageInput.value);
 
     const apps: string[] = [];
     if ($<HTMLInputElement>("#edit-app-steam").checked) apps.push("steam");
@@ -2516,6 +2614,7 @@ function mountMainShell(session: AuthSession) {
           maxBitrateMbps: bitrate,
           allowedNodes,
           autoRecord,
+          storageLimitGb: storageLimitGb !== Number(storageInput.dataset.original) ? storageLimitGb : undefined,
         },
         currentSession?.token,
       );

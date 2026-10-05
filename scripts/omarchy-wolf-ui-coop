@@ -23,6 +23,13 @@ readonly WOLF_UI_REF="${WOLF_UI_REF:-60908b949a601b092d1f1096809d7c7ff1c63e40}"
 readonly IMAGE="${OMARCHY_WOLF_UI_IMAGE:-omarchy/wolf-ui:coop}"
 readonly SRC="${OMARCHY_WOLF_UI_SRC:-/var/cache/omarchy/wolf-ui}"
 readonly WOLF_CONFIG="${WOLF_CONFIG:-/etc/wolf/cfg/config.toml}"
+# Wolf UI talks to Wolf through this socket. The broker serves a filtered copy
+# of Wolf's API on it: identical, except that the profile list only holds the
+# profile of the user whose device is running that session (Wolf itself has no
+# per-client profile binding, and Wolf UI would list everyone).
+WOLF_UI_API_SOCKET="${OMARCHY_WOLF_UI_SOCKET:-/var/run/wolf/wolf-ui.sock}"
+readonly WOLF_UI_API_SOCKET
+export WOLF_UI_API_SOCKET
 readonly WOLF_CONTAINER="${WOLF_CONTAINER:-wolf}"
 
 die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
@@ -75,7 +82,12 @@ path, image = sys.argv[1], sys.argv[2]
 c = tomllib.load(open(path, "rb"))
 p = next((p for p in c.get("profiles", []) if p.get("id") == "moonlight-profile-id"), None)
 apps = [a for a in (p or {}).get("apps", []) if "wolf-ui" in str((a.get("runner") or {}).get("image", "")) or a.get("title") == "Wolf UI"]
-ok = apps and all(a["runner"].get("image") == image and "WOLF_UI_AUTOUPDATE=False" in a["runner"].get("env", []) for a in apps)
+import os
+proxy = os.environ["WOLF_UI_API_SOCKET"]
+def mounted_ok(runner):
+    return any(m.split(":")[0] == proxy for m in runner.get("mounts", []))
+ok = apps and all(a["runner"].get("image") == image and "WOLF_UI_AUTOUPDATE=False" in a["runner"].get("env", [])
+                  and mounted_ok(a["runner"]) for a in apps)
 sys.exit(0 if ok else 1)
 PY2
   then
@@ -103,6 +115,10 @@ for i, block in enumerate(blocks):
         if not m:
             continue
         app = app[:m.start()] + f"{m.group(1)}'{image}'" + app[m.end():]
+        # Wolf UI must reach Wolf through the broker's filtering socket.
+        proxy = __import__("os").environ["WOLF_UI_API_SOCKET"]
+        app = re.sub(r"'/var/run/wolf/[A-Za-z0-9._-]+\.sock:(/var/run/wolf/wolf\.sock:[a-z]+)'",
+                     lambda mm: f"'{proxy}:{mm.group(1)}'", app)
         if "WOLF_UI_AUTOUPDATE=False" not in app:
             app = re.sub(r"WOLF_UI_AUTOUPDATE=\w+", "WOLF_UI_AUTOUPDATE=False", app)
         apps[j] = app

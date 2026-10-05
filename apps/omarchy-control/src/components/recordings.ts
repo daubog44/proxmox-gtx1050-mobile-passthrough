@@ -107,19 +107,22 @@ export function renderRecordingsView(
 export function renderRecordingPlayerModal(item: RecordingItem, ownerName: string): string {
   return `
     <div id="recording-player-modal" class="modal-backdrop fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="Registrazione di ${escapeHtml(ownerName)}">
-      <div class="bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl w-full max-w-5xl max-h-full flex flex-col overflow-hidden">
-        <div class="flex items-center justify-between gap-3 px-4 py-3 border-b border-zinc-800 bg-zinc-900/60">
+      <div data-fullscreen-panel class="bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl w-full max-w-5xl max-h-full flex flex-col overflow-hidden">
+        <div class="flex items-center justify-between gap-3 px-4 py-3 border-b border-zinc-800 bg-zinc-900/60 shrink-0">
           <div class="min-w-0 text-xs">
             <span class="font-semibold text-zinc-100">${escapeHtml(ownerName)}</span>
             <span class="text-zinc-500"> · ${escapeHtml(item.date ?? "")} ${escapeHtml(item.time ?? "")} · ${formatDuration(item.duration_s)}</span>
           </div>
-          <button type="button" id="close-recording-player" class="w-8 h-8 flex items-center justify-center text-lg leading-none text-zinc-400 hover:text-zinc-100 rounded-lg hover:bg-zinc-800 cursor-pointer" aria-label="Chiudi">&times;</button>
+          <div class="flex items-center gap-2 shrink-0">
+            <button type="button" data-media-fullscreen aria-pressed="false" class="btn-ghost text-xs" title="Schermo intero (Esc per uscire)">Schermo intero</button>
+            <button type="button" id="close-recording-player" class="w-8 h-8 flex items-center justify-center text-lg leading-none text-zinc-400 hover:text-zinc-100 rounded-lg hover:bg-zinc-800 cursor-pointer" aria-label="Chiudi">&times;</button>
+          </div>
         </div>
-        <div class="bg-black flex items-center justify-center">
+        <div data-fullscreen-viewport class="relative bg-black flex items-center justify-center flex-1 overflow-hidden">
           <video id="recording-video" controls autoplay playsinline preload="metadata" class="block w-full max-h-[75vh] bg-black" src="${escapeHtml(recordingUrl(item.id))}"></video>
         </div>
         <div id="recording-player-error" class="hidden px-4 py-2 text-xs text-red-300 bg-red-950/40 border-t border-red-900/50"></div>
-        <div class="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-t border-zinc-800 bg-zinc-900/60 text-xs">
+        <div class="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-t border-zinc-800 bg-zinc-900/60 text-xs shrink-0">
           <span class="text-zinc-500 font-mono truncate">${escapeHtml(item.file)} · ${formatSize(item.size_mb)}</span>
           <div class="flex items-center gap-2">
             <span id="recording-download-status" class="text-zinc-400 font-mono" aria-live="polite"></span>

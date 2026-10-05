@@ -24,6 +24,8 @@ pub struct UserStorageUsage {
 pub struct StorageTelemetry {
     pub nas_mounted: bool,
     pub nas_path: String,
+    #[serde(default)]
+    pub nas_mountpoint: String,
     pub storage_type: String,
     pub max_concurrent_streams: u32,
     pub vpn_peers_count: usize,
@@ -177,8 +179,8 @@ pub struct ActiveSession {
     pub started_at: u64,
     pub state: String,
     pub takeover_by: Option<String>,
-    #[serde(default)]
-    pub recording_active: bool,
+    #[serde(default, alias = "recording_active")]
+    pub is_recording: bool,
     #[serde(default)]
     pub recording_file: Option<String>,
     #[serde(default)]
@@ -202,6 +204,12 @@ pub struct UserRecord {
     pub created_at: u64,
     #[serde(default)]
     pub auto_record: bool,
+    #[serde(default)]
+    pub storage_limit_gb: f64,
+    #[serde(default)]
+    pub storage_used_gb: Option<f64>,
+    #[serde(default)]
+    pub storage_quota_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +235,18 @@ pub struct MultiUserOverview {
     pub vpn_peers: Vec<VpnPeer>,
     #[serde(default)]
     pub savegames: Vec<SavegameManifest>,
+    /// Moonlight clients waiting for a pairing PIN (Wolf).
+    #[serde(default)]
+    pub pair_pending: Vec<PendingPairing>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPairing {
+    pub client_ip: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub username: Option<String>,
 }
 
 pub fn current_timestamp() -> u64 {
@@ -241,10 +261,10 @@ pub fn fallback_overview() -> MultiUserOverview {
     let mut default_settings = HashMap::new();
     default_settings.insert("max_concurrent_streams".into(), "2".into());
     default_settings.insert("savegames_storage_type".into(), "nas".into());
-    default_settings.insert("savegames_nas_path".into(), "smb://192.168.0.39/nvme1/omarchy-saves".into());
+    default_settings.insert("savegames_nas_path".into(), String::new());
     default_settings.insert("savegames_auto_sync".into(), "true".into());
-    default_settings.insert("retention_recordings_days".into(), "30".into());
-    default_settings.insert("retention_saves_max_snapshots".into(), "5".into());
+    default_settings.insert("retention_recordings_days".into(), "0".into());
+    default_settings.insert("retention_saves_max_snapshots".into(), "0".into());
     default_settings.insert("wireguard_enabled".into(), "true".into());
     default_settings.insert("wireguard_subnet".into(), "10.66.0.0/24".into());
     default_settings.insert("wireguard_endpoint".into(), "omarchy.local:51820".into());
@@ -255,8 +275,8 @@ pub fn fallback_overview() -> MultiUserOverview {
         telemetry: GpuTelemetry::default(),
         wolf_online: false,
         nas_mounted: false,
-        nas_path: "smb://192.168.0.39/nvme1/omarchy-recordings".into(),
-        nas_mountpoint: "/mnt/nvme1-recordings".into(),
+        nas_path: String::new(),
+        nas_mountpoint: String::new(),
         active_sessions_count: 0,
         registered_users_count: 2,
         sessions: Vec::new(),
@@ -273,6 +293,9 @@ pub fn fallback_overview() -> MultiUserOverview {
                 status: "active".into(),
                 created_at: now.saturating_sub(86400 * 7),
                 auto_record: false,
+                storage_limit_gb: 0.0,
+                storage_used_gb: None,
+                storage_quota_active: false,
             },
             UserRecord {
                 id: 2,
@@ -286,6 +309,9 @@ pub fn fallback_overview() -> MultiUserOverview {
                 status: "active".into(),
                 created_at: now.saturating_sub(86400 * 2),
                 auto_record: false,
+                storage_limit_gb: 0.0,
+                storage_used_gb: None,
+                storage_quota_active: false,
             },
         ],
         admission: Some(AdmissionStatus {
@@ -299,12 +325,13 @@ pub fn fallback_overview() -> MultiUserOverview {
         settings: Some(default_settings),
         storage: Some(StorageTelemetry {
             nas_mounted: false,
-            nas_path: "smb://192.168.0.39/nvme1/omarchy-recordings".into(),
+            nas_path: String::new(),
+            nas_mountpoint: String::new(),
             storage_type: "nas".into(),
             max_concurrent_streams: 2,
             vpn_peers_count: 0,
             savegame_snapshots_count: 0,
-            retention_recordings_days: 30,
+            retention_recordings_days: 0,
             nas_total_gb: 0.0,
             nas_free_gb: 0.0,
             recordings_mb: 0.0,
@@ -313,6 +340,7 @@ pub fn fallback_overview() -> MultiUserOverview {
         }),
         vpn_peers: Vec::new(),
         savegames: Vec::new(),
+        pair_pending: Vec::new(),
     }
 }
 
@@ -456,7 +484,7 @@ pub fn dispatch_broker_call(
         http_path,
         http_body,
         ssh_args,
-        std::time::Duration::from_millis(3000),
+        std::time::Duration::from_secs(if http_method == "GET" { 3 } else { 20 }),
     )
 }
 
@@ -555,6 +583,7 @@ pub fn create_user(
     max_bitrate_mbps: u32,
     allowed_nodes: &[String],
     auto_record: bool,
+    storage_limit_gb: f64,
 ) -> Result<String, String> {
     if username.trim().is_empty() || pin.trim().is_empty() {
         return Err("Username e PIN sono obbligatori".into());
@@ -572,6 +601,8 @@ pub fn create_user(
         role.into(),
         "--bitrate".into(),
         max_bitrate_mbps.to_string(),
+        "--storage-gb".into(),
+        storage_limit_gb.to_string(),
     ];
     if !apps.is_empty() {
         args.push("--apps".into());
@@ -605,8 +636,10 @@ pub fn create_user(
         "max_bitrate_mbps": max_bitrate_mbps,
         "allowed_nodes": allowed_nodes,
         "auto_record": auto_record,
+        "storage_limit_gb": storage_limit_gb,
     });
     dispatch_broker_call(vm_host, ssh_user, "POST", "/api/users", Some(body), &str_args)
+        .map_err(humanize_broker_error)
 }
 
 /// Turns "Errore HTTP 400: {\"status\":\"error\",\"message\":\"...\"}" into the message.
@@ -688,6 +721,26 @@ fn broker_http(
         }
     }
     Err(last_err)
+}
+
+pub fn json_request(vm_host: &str, path: &str, body: serde_json::Value, timeout_s: u64) -> Result<serde_json::Value, String> {
+    let port = std::env::var("OMARCHY_API_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(47995);
+    let token = std::env::var("OMARCHY_API_TOKEN").ok();
+    let mut last = String::from("Nodo non raggiungibile");
+    for host in [vm_host.trim(), "10.66.0.1"] {
+        match execute_broker_http(host, port, token.as_deref(), "POST", path, Some(&body), std::time::Duration::from_secs(timeout_s)) {
+            Ok(raw) => {
+                let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+                if value["status"] != "ok" {
+                    return Err(value["message"].as_str().unwrap_or("Operazione non riuscita").into());
+                }
+                return Ok(value);
+            }
+            Err(err) if err.retryable => last = err.message,
+            Err(err) => return Err(humanize_broker_error(err.message)),
+        }
+    }
+    Err(last)
 }
 
 /// Recorded sessions on the NAS / local spool (GET /api/recordings).
@@ -788,6 +841,16 @@ pub fn download_recording(
     recording_id: &str,
     dest: &std::path::Path,
     cancel: &std::sync::atomic::AtomicBool,
+    on_progress: impl FnMut(u64, Option<u64>) -> bool,
+) -> Result<u64, String> {
+    download_file(vm_host, &format!("/api/recordings/stream?id={}", urlencode(recording_id)), dest, cancel, on_progress)
+}
+
+pub fn download_file(
+    vm_host: &str,
+    http_path: &str,
+    dest: &std::path::Path,
+    cancel: &std::sync::atomic::AtomicBool,
     mut on_progress: impl FnMut(u64, Option<u64>) -> bool,
 ) -> Result<u64, String> {
     use std::io::{Read, Write};
@@ -808,7 +871,7 @@ pub fn download_recording(
         if host.is_empty() {
             continue;
         }
-        let url = format!("http://{host}:{api_port}/api/recordings/stream?id={}", urlencode(recording_id));
+        let url = format!("http://{host}:{api_port}{http_path}");
         let mut req = agent.get(&url);
         if !token.trim().is_empty() {
             req = req.set("Authorization", &format!("Bearer {}", token.trim()));
@@ -878,7 +941,7 @@ pub fn download_recording(
     }
 }
 
-fn urlencode(value: &str) -> String {
+pub fn urlencode(value: &str) -> String {
     value
         .bytes()
         .map(|b| match b {
@@ -900,6 +963,7 @@ pub fn edit_user(
     max_bitrate_mbps: Option<u32>,
     allowed_nodes: Option<&[String]>,
     auto_record: Option<bool>,
+    storage_limit_gb: Option<f64>,
 ) -> Result<String, String> {
     if username.trim().is_empty() {
         return Err("Username non specificato".into());
@@ -962,6 +1026,9 @@ pub fn edit_user(
             args.push("--no-auto-record".into());
         }
     }
+    if let Some(limit) = storage_limit_gb {
+        args.extend(["--storage-gb".into(), limit.to_string()]);
+    }
 
     if vm_host.trim().is_empty() {
         return Ok(format!("Utente '{username}' aggiornato nel profilo simulato"));
@@ -980,8 +1047,12 @@ pub fn edit_user(
     if let Some(ar) = auto_record {
         body["auto_record"] = serde_json::json!(ar);
     }
+    if let Some(limit) = storage_limit_gb {
+        body["storage_limit_gb"] = serde_json::json!(limit);
+    }
     let path = format!("/api/users/{username}");
     dispatch_broker_call(vm_host, ssh_user, "PUT", &path, Some(body), &str_args)
+        .map_err(humanize_broker_error)
 }
 
 pub fn delete_user(
@@ -1027,7 +1098,8 @@ pub fn ban_user(
 
     let body = serde_json::json!({ "reason": reason });
     let path = format!("/api/users/{username}/ban");
-    dispatch_broker_call(vm_host, ssh_user, "POST", &path, Some(body), &args)
+    dispatch_broker_call_with_timeout(vm_host, ssh_user, "POST", &path, Some(body), &args,
+                                     std::time::Duration::from_secs(20))
 }
 
 pub fn unban_user(
@@ -1219,14 +1291,14 @@ fn broker_http_json(
 
 /// WebRTC (WHEP) signalling for the live view, relayed by the broker to
 /// MediaMTX. Media then flows peer-to-peer over UDP/TCP 8189.
-pub fn whep_offer(vm_host: &str, session_id: &str, sdp: &str) -> Result<WhepAnswer, String> {
+pub fn whep_offer(vm_host: &str, session_id: &str, sdp: &str, quality: &str) -> Result<WhepAnswer, String> {
     if session_id.trim().is_empty() {
         return Err("ID sessione non specificato".into());
     }
     let res = broker_http_json(
         vm_host,
         &format!("/api/sessions/{session_id}/whep"),
-        &serde_json::json!({ "sdp": sdp }),
+        &serde_json::json!({ "sdp": sdp, "quality": quality }),
         // An on-demand path answers only once the GPU publisher is running.
         std::time::Duration::from_secs(30),
     )?;
@@ -1249,13 +1321,13 @@ pub fn whep_offer(vm_host: &str, session_id: &str, sdp: &str) -> Result<WhepAnsw
 
 /// Live pipeline status of a session (capture backend, copy/transcode, codec
 /// served by MediaMTX) so the UI can show when a fallback is in use.
-pub fn live_info(vm_host: &str, session_id: &str) -> Result<serde_json::Value, String> {
+pub fn live_info(vm_host: &str, session_id: &str, quality: &str) -> Result<serde_json::Value, String> {
     let api_port: u16 = std::env::var("OMARCHY_API_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(47995);
     let api_token = std::env::var("OMARCHY_API_TOKEN").ok();
-    let path = format!("/api/sessions/{session_id}/live/info");
+    let path = format!("/api/sessions/{session_id}/live/info?quality={}", urlencode(quality));
     let mut last_err = String::from("Host non specificato");
     for host in [vm_host.trim(), "10.66.0.1"] {
         if host.is_empty() {
@@ -1287,6 +1359,7 @@ pub fn whep_close(vm_host: &str, session_id: &str, resource: &str) -> Result<(),
 pub fn stream_live_video(
     vm_host: &str,
     session_id: &str,
+    quality: &str,
     stop: &std::sync::atomic::AtomicBool,
     mut on_chunk: impl FnMut(Vec<u8>) -> bool,
 ) -> Result<(), String> {
@@ -1306,14 +1379,16 @@ pub fn stream_live_video(
     let api_token = std::env::var("OMARCHY_API_TOKEN").ok();
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_millis(1500))
-        // Encoder start-up plus one keyframe; afterwards frames flow at 30 FPS.
-        .timeout_read(std::time::Duration::from_secs(8))
+        // MediaMTX can spend 25s starting an on-demand publisher. The old 8s
+        // deadline killed it before its first keyframe, then repeated forever.
+        .timeout_read(std::time::Duration::from_secs(30))
         .build();
 
     let mut last_err = String::new();
     let mut response = None;
     for host in [vm_host.trim(), "10.66.0.1"] {
-        let url = format!("http://{host}:{api_port}/api/sessions/{session_id}/live.mp4");
+        if stop.load(Ordering::Relaxed) { return Ok(()); }
+        let url = format!("http://{host}:{api_port}/api/sessions/{session_id}/live.mp4?quality={}", urlencode(quality));
         let mut req = agent.get(&url);
         if let Some(tok) = api_token.as_deref().filter(|t| !t.trim().is_empty()) {
             req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
@@ -1447,6 +1522,7 @@ pub fn update_enterprise_setting(
     }
     let body = serde_json::json!({ "key": key, "value": value });
     dispatch_broker_call(vm_host, ssh_user, "POST", "/api/settings", Some(body), &["set-setting", "--key", key, "--value", value])
+        .map_err(humanize_broker_error)
 }
 
 pub fn check_admission(
@@ -1721,12 +1797,12 @@ pub fn prune_nas_storage(
         let dummy = serde_json::json!({
             "status": "ok",
             "dry_run": dry_run,
-            "retention_recordings_days": 30,
+            "retention_recordings_days": 0,
             "pruned_recordings_count": 0,
             "freed_recordings_mb": 0.0,
-            "storage_total_gb": 2000.0,
-            "storage_free_gb": 1250.0,
-            "nas_mounted": true
+            "storage_total_gb": 0.0,
+            "storage_free_gb": 0.0,
+            "nas_mounted": false
         });
         return Ok(dummy.to_string());
     }
@@ -1941,13 +2017,13 @@ pub struct DdnsStatus {
 pub fn get_ddns_status(vm_host: &str, ssh_user: &str) -> Result<DdnsStatus, String> {
     if vm_host.trim().is_empty() {
         return Ok(DdnsStatus {
-            status: "ok".into(),
-            enabled: true,
-            domain: "cloudgamingadrian.duckdns.org".into(),
-            ip: Some("101.58.7.26".into()),
+            status: "disabled".into(),
+            enabled: false,
+            domain: String::new(),
+            ip: None,
             timestamp: None,
             provider: Some("duckdns".into()),
-            message: Some("Configurazione predefinita (simulato)".into()),
+            message: Some("Nessun nodo selezionato".into()),
         });
     }
     let res_json = dispatch_broker_call(vm_host, ssh_user, "GET", "/api/ddns", None, &["status-json"])?;
@@ -1972,4 +2048,3 @@ pub fn update_ddns_config(
     });
     dispatch_broker_call(vm_host, ssh_user, "POST", "/api/ddns", Some(body), &["status-json"])
 }
-

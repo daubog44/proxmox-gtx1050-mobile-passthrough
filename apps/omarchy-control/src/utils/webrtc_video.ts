@@ -36,6 +36,7 @@ export async function startWebRtcVideo(
   signal: Signal,
   onClose: (resource: string) => void,
   onDisconnect: (reason: string) => void,
+  abort: AbortSignal,
 ): Promise<WebRtcSession> {
   const h265 = (RTCRtpReceiver.getCapabilities?.("video")?.codecs ?? []).filter((c) => c.mimeType.toLowerCase() === "video/h265");
   if (h265.length === 0) throw new Error("questa webview non decodifica H.265 via WebRTC");
@@ -43,13 +44,22 @@ export async function startWebRtcVideo(
   const pc = new RTCPeerConnection({ bundlePolicy: "max-bundle" });
   let resource = "";
   let closed = false;
+  let stream: MediaStream | null = null;
+  let rejectPlaying: ((reason: Error) => void) | undefined;
+  let connectTimer: ReturnType<typeof setTimeout> | undefined;
   const close = () => {
     if (closed) return;
     closed = true;
+    clearTimeout(connectTimer);
+    rejectPlaying?.(new Error("Visualizzazione chiusa"));
     pc.close();
-    video.srcObject = null;
+    abort.removeEventListener("abort", close);
+    if (stream && video.srcObject === stream) video.srcObject = null;
     if (resource) onClose(resource);
   };
+
+  if (abort.aborted) throw new Error("Visualizzazione chiusa");
+  abort.addEventListener("abort", close, {once: true});
 
   try {
     const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
@@ -62,33 +72,38 @@ export async function startWebRtcVideo(
     if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 0;
 
     pc.ontrack = (ev) => {
-      video.srcObject = ev.streams[0] ?? new MediaStream([ev.track]);
+      if (closed) return;
+      stream = ev.streams[0] ?? new MediaStream([ev.track]);
+      video.srcObject = stream;
       video.play().catch(() => undefined);
     };
 
     await pc.setLocalDescription(await pc.createOffer());
     await waitForIceGathering(pc);
+    if (closed) throw new Error("Visualizzazione chiusa");
     const answer = await signal(pc.localDescription!.sdp);
     resource = answer.resource;
-    await pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+    if (closed) { if (resource) onClose(resource); throw new Error("Visualizzazione chiusa"); }
 
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("connessione WebRTC scaduta (porta 8189 bloccata?)")), CONNECT_TIMEOUT_MS);
-      video.addEventListener("playing", () => { clearTimeout(timer); resolve(); }, { once: true });
+    // Register before the answer: a fast peer can start playing immediately.
+    const playing = new Promise<void>((resolve, reject) => {
+      const done = () => { clearTimeout(connectTimer); rejectPlaying = undefined; resolve(); };
+      rejectPlaying = reject;
+      connectTimer = setTimeout(() => reject(new Error("connessione WebRTC scaduta")), CONNECT_TIMEOUT_MS);
+      video.addEventListener("playing", done, {once: true, signal: abort});
       pc.addEventListener("connectionstatechange", () => {
-        if (pc.connectionState === "failed") {
-          clearTimeout(timer);
-          reject(new Error("connessione WebRTC fallita (porta 8189 UDP/TCP raggiungibile?)"));
-        }
-      });
+        if (pc.connectionState === "failed") reject(new Error("connessione WebRTC fallita"));
+      }, {signal: abort});
     });
+    // A rejected setRemoteDescription must not leave an unobserved promise.
+    await Promise.all([pc.setRemoteDescription({ type: "answer", sdp: answer.sdp }), playing]);
   } catch (err) {
     close();
     throw err;
   }
 
   pc.addEventListener("connectionstatechange", () => {
-    if (!closed && (pc.connectionState === "failed" || pc.connectionState === "closed")) {
+    if (!closed && (pc.connectionState === "failed" || pc.connectionState === "closed" || pc.connectionState === "disconnected")) {
       onDisconnect(`WebRTC ${pc.connectionState}`);
     }
   });

@@ -582,6 +582,7 @@ case "$1" in
               require_root
               install -m 0755 "$repo_root/scripts/omarchy-session-broker" /usr/local/bin/omarchy-session-broker
               install -m 0644 "$repo_root/systemd/omarchy-session-broker.service" /etc/systemd/system/omarchy-session-broker.service
+              install -m 0644 "$repo_root/systemd/omarchy-storage-prune.service" "$repo_root/systemd/omarchy-storage-prune.timer" /etc/systemd/system/
               install -m 0755 "$repo_root/scripts/omarchy-resource-reaper" /usr/local/bin/omarchy-resource-reaper
               install -m 0644 "$repo_root/systemd/omarchy-resource-reaper.service" /etc/systemd/system/omarchy-resource-reaper.service
               install -m 0644 "$repo_root/systemd/omarchy-resource-reaper.timer" /etc/systemd/system/omarchy-resource-reaper.timer
@@ -651,6 +652,8 @@ case "$1" in
             if (( apply )); then
               require_root
               install -m 0755 "$repo_root/scripts/omarchy-wolf-live-tap" /usr/local/bin/omarchy-wolf-live-tap
+              install -Dm0644 "$repo_root/packaging/wolf/unixfd-heap-memory.patch" /usr/share/omarchy/wolf/unixfd-heap-memory.patch
+              [[ -f /etc/omarchy/wolf/gst-plugins/libgstunixfd.so ]] || omarchy-wolf-live-tap build-unixfd
               omarchy-wolf-live-tap apply
             else
               "$repo_root/scripts/omarchy-wolf-live-tap" status

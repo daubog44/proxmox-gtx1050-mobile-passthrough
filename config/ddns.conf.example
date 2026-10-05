@@ -1,7 +1,8 @@
 # Omarchy Dynamic DNS Configuration
 # Posizione consigliata sul nodo: /etc/omarchy/ddns.conf (chmod 600)
-ENABLED=true
+ENABLED=false
 PROVIDER=duckdns
-DOMAIN=cloudgamingadrian
-TOKEN=767c2b1f-452f-4b64-b6a6-5e100c940a84
+# Sottodominio senza .duckdns.org e token dell'account DuckDNS (https://www.duckdns.org).
+DOMAIN=
+TOKEN=
 INTERVAL_SECONDS=300

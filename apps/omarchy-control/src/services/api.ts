@@ -24,6 +24,13 @@ export interface LiveInfo {
   readers: string[];
 }
 
+export interface UserStorageListing {
+  path: string;
+  items: { name: string; path: string; directory: boolean; size_bytes: number | null; modified: number }[];
+  backups: SavegameManifest[];
+  message?: string;
+}
+
 export type LiveVideoMessage = ArrayBuffer | { event: "end"; error?: string | null };
 import type {
   Check,
@@ -33,6 +40,7 @@ import type {
   SaveResult,
   SetupConfig,
   UpdateInfo,
+  UpdateOutcome,
   AuthSession,
   NodeEntry,
   ApiTestResult,
@@ -50,6 +58,17 @@ import type {
 
 
 export const api = {
+  async sessionControl(sessionId: string, body: Record<string, unknown>, token: string): Promise<{lease?: string}> {
+    return invoke("session_control", { sessionId, body, token });
+  },
+  async userStorage(username: string, body: Record<string, unknown>, token: string): Promise<UserStorageListing> {
+    return invoke("user_storage", { username, body, token });
+  },
+  async downloadUserFile(username: string, relative: string, token: string, progress: (received: number, total?: number) => void): Promise<string> {
+    const onProgress = new Channel<{received: number; total?: number}>();
+    onProgress.onmessage = (m) => progress(m.received, m.total);
+    return invoke("download_user_file", { username, relative, token, onProgress });
+  },
   async inspectSetup(): Promise<Dashboard> {
     return invoke<Dashboard>("inspect_setup");
   },
@@ -103,6 +122,7 @@ export const api = {
     allowedNodes?: string[],
     token?: string,
     autoRecord = false,
+    storageLimitGb = 0,
   ): Promise<string> {
     return invoke<string>("add_multi_user", {
       username,
@@ -114,6 +134,7 @@ export const api = {
       allowedNodes: allowedNodes || null,
       token: token || null,
       autoRecord,
+      storageLimitGb,
     });
   },
 
@@ -123,6 +144,7 @@ export const api = {
     token?: string,
     target: "auto" | "sunshine" | "wolf" = "auto",
     username?: string,
+    clientIp?: string,
   ): Promise<string> {
     return invoke<string>("pair_moonlight_device", {
       pin,
@@ -130,7 +152,7 @@ export const api = {
       token: token || null,
       target,
       username: username || null,
-      clientIp: null,
+      clientIp: clientIp || null,
     });
   },
 
@@ -173,6 +195,7 @@ export const api = {
       maxBitrateMbps?: number;
       allowedNodes?: string[];
       autoRecord?: boolean;
+      storageLimitGb?: number;
     },
     token?: string,
   ): Promise<string> {
@@ -186,6 +209,7 @@ export const api = {
       maxBitrateMbps: opts.maxBitrateMbps ?? null,
       allowedNodes: opts.allowedNodes || null,
       autoRecord: opts.autoRecord ?? null,
+      storageLimitGb: opts.storageLimitGb ?? null,
       token: token || null,
     });
   },
@@ -206,8 +230,8 @@ export const api = {
     return invoke<string>("kill_user_session", { sessionId, reason });
   },
 
-  async takeoverUserSession(sessionId: string): Promise<string> {
-    return invoke<string>("takeover_user_session", { sessionId });
+  async takeoverUserSession(sessionId: string, token: string): Promise<string> {
+    return invoke<string>("takeover_user_session", { token, sessionId });
   },
 
   async spectateUserSession(sessionId: string): Promise<string> {
@@ -234,27 +258,27 @@ export const api = {
    * Streams the session's low-latency fMP4 video. `onMessage` receives raw
    * ArrayBuffer chunks, then one `{ event: "end" }` object when the feed stops.
    */
-  async startLiveVideo(sessionId: string, onMessage: (msg: LiveVideoMessage) => void): Promise<void> {
+  async startLiveVideo(sessionId: string, viewerId: string, onMessage: (msg: LiveVideoMessage) => void, quality = "original"): Promise<void> {
     const channel = new Channel<LiveVideoMessage>();
     channel.onmessage = onMessage;
-    return invoke<void>("start_live_video", { sessionId, onChunk: channel });
+    return invoke<void>("start_live_video", { sessionId, viewerId, onChunk: channel, quality });
   },
 
   /** WebRTC (WHEP) signalling relayed by the broker to MediaMTX. */
-  async whepOffer(sessionId: string, sdp: string): Promise<{ sdp: string; resource: string }> {
-    return invoke<{ sdp: string; resource: string }>("whep_offer", { sessionId, sdp });
+  async whepOffer(sessionId: string, sdp: string, quality = "original"): Promise<{ sdp: string; resource: string }> {
+    return invoke<{ sdp: string; resource: string }>("whep_offer", { sessionId, sdp, quality });
   },
 
-  async liveInfo(sessionId: string): Promise<LiveInfo> {
-    return invoke<LiveInfo>("live_info", { sessionId });
+  async liveInfo(sessionId: string, quality = "original"): Promise<LiveInfo> {
+    return invoke<LiveInfo>("live_info", { sessionId, quality });
   },
 
   async whepClose(sessionId: string, resource: string): Promise<void> {
     return invoke<void>("whep_close", { sessionId, resource });
   },
 
-  async stopLiveVideo(sessionId: string): Promise<void> {
-    return invoke<void>("stop_live_video", { sessionId });
+  async stopLiveVideo(viewerId: string): Promise<void> {
+    return invoke<void>("stop_live_video", { viewerId });
   },
 
   async stopSessionStream(sessionId: string): Promise<string> {
@@ -269,8 +293,12 @@ export const api = {
     return invoke<UpdateInfo>("check_for_updates");
   },
 
-  async installUpdate(downloadUrl: string): Promise<string> {
-    return invoke<string>("install_update", { downloadUrl });
+  async installUpdate(downloadUrl: string): Promise<UpdateOutcome> {
+    return invoke<UpdateOutcome>("install_update", { downloadUrl });
+  },
+
+  async finishUpdate(outcome: UpdateOutcome): Promise<void> {
+    return invoke<void>("finish_update", { outcome });
   },
 
   async login(username: string, password: string): Promise<AuthSession> {
@@ -498,6 +526,3 @@ export const api = {
     return invoke<string>("open_moonlight_url", { url });
   },
 };
-
-
-

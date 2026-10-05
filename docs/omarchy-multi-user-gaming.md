@@ -17,11 +17,65 @@ L'infrastruttura differenzia nettamente i due scenari d'uso:
    - Vengono eseguite tramite **Wolf** (Games on Whales) in ambienti containerizzati e isolati.
    - Ogni utente secondario ha:
      - Un account Linux senza shell di login.
-     - Uno spazio di archiviazione dedicato in `/var/lib/omarchy-sessions/<username>`.
+     - Dati e salvataggi propri in `/etc/wolf/profile-data/omarchy-<username>/`, con backup automatico su NAS.
      - Un profilo Steam separato o una sessione Big Picture dedicata.
      - Un PIN di pairing personale inserito nell'app Moonlight del client.
 
 ## Sandbox di sicurezza per le sessioni Wolf
+
+La home del desktop Docker è `/home/retro`, montata in lettura/scrittura dalla cartella
+`/etc/wolf/profile-data/omarchy-<username>/WolfXFCE`. Ogni app ha la propria home nello
+stesso profilo persistente; il backup NAS comprende queste home.
+
+Da **Utenti & Accessi → Modifica** si imposta il **limite home desktop e giochi (GB)**,
+con spazio occupato visibile nella scheda utente. `0` significa illimitato. Le quote
+native Btrfs coprono tutte le home del profilo e bloccano nuove allocazioni oltre il
+limite; aumenti e riduzioni si applicano alla sessione già aperta. Una riduzione sotto
+lo spazio occupato viene rifiutata, senza eliminare dati. Backup e registrazioni sul
+NAS mantengono la loro retention separata.
+
+In **Infrastruttura → Backup e registrazioni** si impostano le copie per utente,
+i giorni di conservazione dei video e le cartelle NAS/locali. `0` conserva tutte
+le copie o disattiva la scadenza dei video; non ci sono tetti in GB per gli archivi.
+I valori iniziali (5 copie e video senza scadenza) sono configurazione persistente, senza un
+massimo imposto dall'interfaccia. La pulizia quotidiana legge queste impostazioni
+e salta i video ancora in registrazione. Cambiando cartella, i video già archiviati
+restano disponibili. Il NAS mostra capacità e spazio libero reali del filesystem.
+Con **Backup automatico a fine sessione** attivo, il broker avvia una copia entro
+30 secondi dalla disconnessione, anche a control plane chiuso; la terminazione
+amministrativa la avvia subito. Il timer quotidiano fa pulizia, non backup periodici.
+
+**Utenti & Accessi → Sfoglia file e backup** apre la home persistente dell'utente:
+si navigano le cartelle, scaricano o eliminano file e gestiscono le singole copie.
+Il ripristino salva prima lo stato attuale; quello forzato interrompe le sessioni
+e i container dell'utente prima di sovrascrivere i file della copia scelta.
+
+Nella vista live **Prendi controllo** abilita mouse e tastiera nella stessa finestra;
+**Controllo con Moonlight** resta un'azione separata.
+**Schermo intero** espande la visualizzazione senza cambiare la risoluzione o la
+scala del desktop. La qualità
+**Originale** riusa il video Wolf; **Leggera** lo ricodifica con NVENC a 1280 pixel
+di larghezza, 30 FPS e 4 Mbps. Le registrazioni continuano a leggere l'originale.
+Il tap usa UnixFD e tollera i lettori che escono o si ricollegano.
+La visualizzazione si riconnette dopo un’interruzione; il controllo si rilascia
+quando manca il video. I click ignorano le bande nere e seguono l’immagine anche
+a schermo intero. Nella visione live viene mostrato solo il cursore remoto.
+
+**Infrastruttura → Streaming → Dimensione desktop (%)** usa inizialmente il 100%:
+la risoluzione interna delle nuove lobby XFCE coincide con quella richiesta da Moonlight.
+Un valore maggiore ingrandisce uniformemente il desktop, comprese icone e finestre,
+riducendo la risoluzione interna; la risoluzione dello stream non cambia.
+
+I nuovi profili sono subvolumi Btrfs. Un vecchio profilo ordinario si converte una
+sola volta a desktop/giochi chiusi, conservando la cartella originale come
+`.omarchy-<username>.before-quota-*`. La copia evita reflink per contabilizzare tutti
+i dati nella quota semplice; i GB occupati sono lo spazio su disco dopo compressione.
+Si usano le [quote semplici Btrfs](https://btrfs.readthedocs.io/en/latest/btrfs-quota.html#simple-quotas-squota)
+per evitare il costo del conteggio dei riferimenti degli snapshot del sistema.
+
+Nel control plane **Schermo intero** espande l'anteprima live o la registrazione
+all'intero schermo, mantenendo i comandi. **Esc** torna all'anteprima; chiudendo il
+video si ripristina lo stato precedente della finestra.
 
 Ogni gioco o desktop di un ospite gira in un container Docker avviato da Wolf. Cosa separa davvero
 l'ospite dall'admin e dagli altri ospiti:
@@ -34,9 +88,11 @@ l'ospite dall'admin e dagli altri ospiti:
 - **Rete isolata** (sezione seguente).
 
 Limiti noti (accettati per non rompere Steam): i container mantengono i permessi con cui Games on
-Whales li distribuisce (`SYS_ADMIN`, `NET_ADMIN`, seccomp/AppArmor `unconfined`, IPC dell'host),
+Whales li distribuisce (`SYS_ADMIN`, `NET_ADMIN`, AppArmor `unconfined`, IPC dell'host),
 necessari alla sandbox interna di Steam (pressure-vessel, usata anche da Proton). È un isolamento da
 container, non da VM: kernel, driver NVIDIA e GPU sono condivisi. Adatto a ospiti di fiducia.
+Il filtro seccomp lascia disponibili le normali chiamate di sistema, incluso il codice a 32 bit,
+e blocca l'amministrazione delle quote Btrfs e la creazione di subvolumi non contabilizzati dall'ospite.
 
 ## Isolamento di rete (rete ospiti e firewall)
 
@@ -50,10 +106,61 @@ Gli ospiti devono poter scaricare giochi e giocare online, ma **non raggiungere 
 - catena `OMARCHY-GUESTS`: DNS consentito; respinti `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
   (LAN, NAS, Proxmox, router), `100.64.0.0/10` (tailnet) e `169.254.0.0/16`; il resto (Internet)
   esce con il NAT di Docker;
-- catena `OMARCHY-GUESTS-IN`: nessuna porta della VM raggiungibile dai container (SSH, broker,
-  web UI di Sunshine, MediaMTX).
+- catena `OMARCHY-GUESTS-IN`: solo DNS TCP/UDP 53 verso il resolver della VM; SSH, broker,
+  web UI di Sunshine e MediaMTX restano bloccati. Serve anche con il DNS interno Docker
+  (`127.0.0.11`), che inoltra le richieste al resolver configurato nel demone.
 
 Lo streaming non passa dai container: Moonlight parla con Wolf, che usa la rete dell'host.
+
+**Ogni ospite vede solo il proprio profilo.** Wolf non lega un client a un profilo: Wolf UI elenca
+tutti i profili (protetti dal PIN). Il broker espone quindi su `/var/run/wolf/wolf-ui.sock` una copia
+filtrata dell'API di Wolf e `omarchy-wolf-ui-coop apply` monta quel socket nel container di Wolf UI al
+posto di `wolf.sock`. Il filtro riconosce il chiamante dal PID (cgroup -> container `Wolf-UI_<sessione>`
+-> sessione Wolf -> IP del client -> utente) e su `GET /api/v1/profiles` restituisce solo il profilo di
+quell'utente; tutto il resto, compreso lo stream di eventi, passa invariato. Un dispositivo non
+riconosciuto riceve la risposta originale. Wolf UI resta quella upstream, quindi gli aggiornamenti non
+richiedono nuove patch. Nota: con il broker fermo Wolf UI non raggiunge l'API di Wolf.
+Il proxy chiude ogni risposta HTTP finita come fa l'API HTTP/1.0 di Wolf; lasciarla aperta
+faceva riutilizzare a Wolf UI una connessione già chiusa a monte, impedendo `/lobbies/create`
+con `Broken pipe`. Lo stream degli eventi resta aperto.
+
+**Dispositivi grafici.** Al container di Wolf vanno solo i nodi NVIDIA (`WOLF_CARD_NODE` e
+`WOLF_RENDER_NODE` in `/etc/omarchy/wolf/.env`, rilevati da `omarchy-wolf-install`). Passando tutta
+`/dev/dri` entra anche la GPU virtio di Proxmox: GStreamer la sonda per VA-API e il driver
+`virtio_gpu` può bloccare il processo nel kernel (stato D, non terminabile), impedendo l'avvio di
+Wolf. Sintomi: `gst-plugin-scan` in stato D, `virtio_gpu_drv_video.so init failed` nei log, Wolf che
+non apre le porte. L'unico rimedio a blocco avvenuto è riavviare la VM.
+
+**Zero-copy su Pascal.** Verificato il 28 settembre 2026 con GTX 1050, driver 580.178.04 e
+Wolf `a1edc1bf44cbb21d3a9b1c1da57294c508eebba9`: il compositor produce
+`video/x-raw(memory:CUDAMemory)` e NVENC riceve NV12 in memoria CUDA. Wolf UI è visibile in
+Moonlight a 2560×1600, con 60 FPS e 0% di frame persi nel campione H.264; verificato anche HEVC
+e l'avvio dopo il riavvio del container. L'installer mantiene `WOLF_USE_ZERO_COPY=TRUE` anche su
+Pascal; `OMARCHY_WOLF_ZERO_COPY=FALSE` sceglie esplicitamente il percorso legacy.
+
+**Avvio e riconnessione del desktop.** Con il compositor `0.4.0-016b4fc`, dopo la chiusura
+di una sessione è stato riprodotto `Failed to push CUDA context`: `new_from_gstreamer`
+e `set_context` costruiscono due wrapper sulla stessa referenza ottenuta dal callback
+`NEED_CONTEXT` di Wolf. `packaging/wolf/cuda-context-ownership.c`, caricata dal compose,
+assegna la referenza mancante al wrapper esterno solo per quel compositor e il contesto
+condiviso di Wolf. L'installer la compila; il pacchetto Arch la include già compilata.
+I fotogrammi restano in memoria CUDA. Sono verificati anche il desktop XFCE e l'accesso
+a Flathub dalla rete ospiti: senza DNS, la prima configurazione Flatpak bloccava il desktop.
+
+**Nota su `wolf:stable`.** Il compose imposta `WOLF_SKIP_WAYLAND_SOCKET_WAIT=TRUE`: senza, ogni avvio
+fallisce con "Wayland endpoint /tmp/sockets/ exists but is not a socket" e Moonlight mostra
+"Something went wrong on your host PC" (bug upstream games-on-whales/wolf#462).
+
+**Porte sul router (UPnP).** `omarchy-wolf-install` installa `omarchy-upnp-ports` e il timer
+`omarchy-upnp-ports.timer`: ogni nodo chiede al router di inoltrare verso il proprio IP LAN TCP
+49984/49989/50010 e UDP 49999/50100/50200, con lease di 1 h rinnovata ogni 30 minuti (i router
+perdono le regole UPnP al riavvio). Le porte sono condivise da tutti gli utenti Wolf del nodo: un
+nuovo utente non richiede nuove porte. Serve UPnP attivo sul router (Sky Wifi Hub: Avanzate →
+Rilevamento dispositivi). La scoperta del router usa SSDP multicast: lo script consente in UFW il
+traffico UDP dal solo gateway, altrimenti le risposte del router vengono scartate;
+`OMARCHY_UPNP_URL` in `/etc/omarchy/upnp.env` salta la scoperta.
+Una regola manuale già presente per la stessa porta conta come aperta. Disattivazione:
+`OMARCHY_UPNP=0` in `/etc/omarchy/upnp.env`; stato: `omarchy-upnp-ports status`.
 Verifica: `sudo omarchy-wolf-network-isolation status`.
 
 ## Registrazione sessioni su NAS Samba (`smb://192.168.0.39/nvme1`)
@@ -94,7 +201,7 @@ Minecraft (Java con Sodium/Fabric o Bedrock) ha un'impronta ideale per la virtua
 Dall'applicazione desktop `omarchy-control`, l'Owner dispone del pannello di controllo unificato per:
 - **Monitoraggio live**: visualizza FPS, risoluzione, bitrate effettivo e VRAM occupata per ciascuna sessione aperta.
 - **Spectator / Affiancamento**: visualizzazione dello stream del guest senza interrompere i suoi comandi (utile per supporto o condivisione schermo).
-- **Takeover esclusivo**: acquisizione del controllo della sessione con sospensione degli input remoti del client guest.
+- **Controllo nella visualizzazione**: mouse e tastiera inviati direttamente al desktop; un solo Control Plane alla volta può acquisire il controllo, mentre l'ospite può continuare a interagire.
 - **Disconnessione forzata (Kick)**: arresto immediato del container o del processo della sessione qualora la GPU raggiunga temperature elevate o saturazione VRAM.
 - **Comando Ban / Unban**: consente all'amministratore di revocare all'istante l'accesso a un utente indesiderato, terminando forzatamente qualsiasi processo attivo ma **mantenendo intatta al 100% la cartella home e i salvataggi**. L'utente può essere sbannato in un click senza perdite di dati.
 
@@ -114,21 +221,22 @@ Il chip NVIDIA Pascal GP107 integrato nella GTX 1050 Mobile possiede un encoder 
 
 ## Funzionamento del Live Takeover e della Registrazione
 
-### 1. Visualizza e Prendi Controllo
-
-Le due azioni sono distinte e non richiedono variabili d'ambiente di Wolf: Wolf non ha un
-interruttore di "session sharing". La condivisione di una sessione tra piu' client Moonlight si fa
-con le **lobby** della sua API HTTP (socket `/var/run/wolf/wolf.sock`, `games-on-whales/wolf`
-`api/unix_socket_server.cpp`).
+### 1. Visualizzazione, controllo diretto e Moonlight
 
 - **Visualizza** (silenziosa, nessun input): video dallo stream gia' codificato. Sessioni Sunshine
   dall'output `omarchy-gtx`, sessioni Wolf dal tap `omarchy-wolf-live-tap`. Non viene inviato nulla a
   Wolf e l'ospite non riceve notifiche.
-- **Prendi Controllo**:
+- **Prendi controllo**, nella finestra di visualizzazione: invia mouse, tastiera e testo incollato
+  alla sessione tramite l'API input di Wolf, oppure `uinput` per il desktop Sunshine. Il controllo
+  si rilascia dal pulsante, con `Ctrl+Alt+Shift+Esc`, perdendo il focus o chiudendo la finestra.
+  Un controllo abbandonato scade dopo 15 secondi e rilascia i tasti premuti.
+- **Controllo con Moonlight**, azione separata:
   - Sunshine: lo stato diventa `shadowed`, l'ospite riceve la notifica `hyprctl notify` e l'Owner si
     collega con Moonlight allo stesso desktop.
-  - Wolf: l'Owner deve avere **una sessione Moonlight gia' aperta verso Wolf** dallo stesso
-    dispositivo (porta `49989`). Il broker trova la lobby in cui gioca l'ospite
+  - Wolf: Control apre Wolf UI in Moonlight sul dispositivo dell'Owner (porta `49989`),
+    attende la connessione e poi raggiunge la lobby dell'ospite. Se la sessione è già aperta
+    dallo stesso dispositivo, porta in primo piano Moonlight. Il broker trova la lobby
+    in cui gioca l'ospite
     (`GET /api/v1/lobbies`, campo `connected_sessions`), individua la sessione dell'Owner dal suo IP
     (`GET /api/v1/sessions`) e la sposta nella lobby con `POST /api/v1/lobbies/join`
     (`{"lobby_id", "moonlight_session_id", "pin"}`). Da quel momento l'Owner vede lo stesso gioco e
@@ -154,19 +262,42 @@ in `profile-data/<profilo>/`, separati dagli altri. Il profilo generico "User" d
 nessun PIN) resta solo come catalogo e viene bloccato con un PIN casuale. Sincronizzazione completa
 all'avvio del broker o con `omarchy-session-broker wolf-sync-profiles`.
 
+**Backup dei salvataggi.** A fine sessione Wolf (rilevata dal broker ogni 30 s, anche con il control
+plane chiuso) il broker archivia `profile-data/omarchy-<utente>/` in
+`/mnt/nvme1-recordings/saves/<utente>/save_<utente>_<data>.tar.gz` (in locale se il NAS non è montato),
+tenendo gli ultimi N snapshot (impostazione "snapshot per utente"). Esclusi, perché reinstallabili e
+troppo grandi: `steamapps/common|downloading|shadercache|temp`, `drive_c/windows` e `Program Files`
+dei prefissi Proton e `.cache`. Documenti, download, dati del desktop e impostazioni delle app
+sono inclusi anche oltre 512 MB. La home XFCE (`WolfXFCE/`, montata in `/home/retro`) persiste tra
+i container; il NAS viene raggiunto dal broker sulla VM, senza aprire la LAN al desktop ospite.
+Internet e Flathub sono consentiti, con DNS UDP/TCP 53 anche verso il resolver della VM.
+Attivo di default; si disattiva in Infrastruttura →
+Salvataggi. "Ripristina" estrae l'ultimo snapshot sopra i dati attuali (estrazione sicura, proprietario
+uid 1000).
+
 Installazione completa del server con un solo comando: `sudo scripts/omarchy-setup guest multi-user deploy --apply`.
 
 ### 2. Registrazione video con FFmpeg
+Il tap Wolf usa `unixfdsink` e `unixfdsrc` per distribuire il video già codificato: la
+disconnessione di un lettore non arresta il produttore. Viene selezionato il socket realmente
+in ascolto, comprese le varianti `.0`, `.1` create da GStreamer. GOP finito e intestazioni
+SPS/PPS ripetute permettono di iniziare la visione o registrazione a sessione già avviata.
+Il codec rilevato da ffprobe viene letto una volta, anche quando MPEG-TS lo elenca sia nel
+programma sia nello stream: HEVC viene copiato, senza avviare una ricodifica HEVC → HEVC.
+
 Il Session Broker gestisce la registrazione direttamente dal backend:
 1. All'avvio della registrazione (**"⏺ Registra"**), il broker genera un processo in background `ffmpeg`.
-2. FFmpeg intercetta il buffer grafico della sessione guest dal frame grabber PipeWire/DRM o via stream loopback, senza alcun impatto prestazionale per il giocatore.
-3. Codifica il flusso in **MP4 H.265 / HEVC a 60 FPS** ad alta efficienza (`hevc_nvenc` hardware o `libx265`, con tag `hvc1` per compatibilità nativa macOS/iOS), riducendo l'impronta su disco e banda del 40% rispetto ad H.264.
+2. FFmpeg legge lo stream del publisher MediaMTX. Per Wolf il tap è dopo l'encoder della partita;
+   Sunshine richiede la cattura del desktop e la sua codifica.
+3. Scrive **MP4 H.265 / HEVC** con tag `hvc1`: Wolf mantiene risoluzione e FPS dello stream
+   dell'ospite; Sunshine usa la cattura a 30 FPS. Lo stream HEVC viene copiato dal publisher
+   MediaMTX; un ospite H.264 richiede invece conversione a HEVC con NVENC.
 4. Il flusso video viene scritto **in streaming continuo direttamente nel punto di mount Samba** (`/mnt/nvme1-recordings/recordings/<user>/...`).
 5. Alla pressione di **"⏹ Ferma Rec"**, il broker invia un segnale `SIGINT` (non un `SIGKILL`) a FFmpeg: questo consente la corretta scrittura dell'atom `moov` finale dell'MP4, rendendo il file immediatamente riproducibile e non corrotto.
 
 ## Isolamento Account Steam e Ciclo di Vita dei Salvataggi
 
-Ogni utente guest creato tramite il broker riceve un'infrastruttura completamente autonoma in `/var/lib/omarchy-sessions/<username>`:
+Ogni utente guest ha i propri dati Wolf in `/etc/wolf/profile-data/omarchy-<username>/`:
 - **Steam Separato**: ogni ospite esegue la propria istanza di Steam con le proprie credenziali personali (Steam Guard, token di sessione, lista amici, libreria giochi). Nessun ospite può accedere all'account dell'Owner né a quello di altri ospiti.
 - **Prefissi Proton Isolati**: la cartella `compatdata/<appid>` (registro Windows virtuale, AppData) è confinata alla cartella home dell'utente con permessi restrittivi `0750`.
 - **Steam Cloud**: i giochi che supportano Steam Cloud sincronizzano automaticamente i salvataggi sui server di Valve al termine di ogni sessione.
@@ -221,4 +352,3 @@ La spiegazione risiede nella **separazione dei Network Namespace di Linux**:
 2. **FFmpeg e il Broker risiedono nel root namespace dell'host**: la registrazione non viene eseguita all'interno del container guest! Viene eseguita dall'host/VM madre, che ha accesso completo alla rete locale fisica (`ens18`).
 3. **Flusso di registrazione**: FFmpeg cattura i fotogrammi dalla memoria grafica dell'host e scrive su `/mnt/nvme1-recordings`, che è una share CIFS montata dal sistema operativo host.
 4. **Sicurezza totale garantita**: l'utente secondario non può né vedere né attaccare il NAS Samba, mentre il sistema di amministrazione archivia le registrazioni in tempo reale senza violare le regole di isolamento.
-

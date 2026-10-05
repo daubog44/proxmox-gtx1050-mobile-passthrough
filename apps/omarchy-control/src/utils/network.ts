@@ -34,12 +34,12 @@ export function areIpsInSameSubnet(ipA: string, ipB: string): boolean {
 }
 
 /**
- * Normalizes a DDNS domain or subdomain (e.g. 'cloudgamingadrian' -> 'cloudgamingadrian.duckdns.org')
+ * Normalizes a DDNS domain or subdomain (e.g. 'myhome' -> 'myhome.duckdns.org')
  */
 export function normalizeDdnsDomain(raw?: string | null): string {
-  if (!raw) return "cloudgamingadrian.duckdns.org";
+  if (!raw) return "";
   const trimmed = raw.trim().toLowerCase();
-  if (!trimmed) return "cloudgamingadrian.duckdns.org";
+  if (!trimmed) return "";
   if (!trimmed.includes(".")) {
     return `${trimmed}.duckdns.org`;
   }

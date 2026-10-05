@@ -21,6 +21,22 @@ services:
       - XDG_RUNTIME_DIR=/tmp/sockets
       - HOST_APPS_STATE_FOLDER=/etc/wolf
       - WOLF_SOCKET_PATH=/var/run/wolf/wolf.sock
+      # wolf:stable checks the app's Wayland socket with an empty name and
+      # aborts every launch ("Wayland endpoint /tmp/sockets/ exists but is not
+      # a socket"): games-on-whales/wolf#462. Skipping the check is the fix
+      # confirmed there; the compositor itself starts normally.
+      - WOLF_SKIP_WAYLAND_SOCKET_WAIT=TRUE
+      # Zero copy also works on Pascal. FALSE is an explicit legacy override.
+      - WOLF_USE_ZERO_COPY=${WOLF_USE_ZERO_COPY:-TRUE}
+      # Fix CUDA context ownership on compositor 0.4.0-016b4fc; other revisions pass through.
+      - LD_PRELOAD=/opt/omarchy/libwolf-cuda-ownership.so
+      - GST_PLUGIN_PATH=/opt/omarchy/gst-plugins
+      # INFO from .env; diagnostics: WOLF_LOG_LEVEL=DEBUG docker compose up -d
+      # Empty by default; for diagnosing the Wayland compositor / encoder:
+      # GST_DEBUG=waylanddisplaysrc:6,cuda*:5 RUST_LOG=debug docker compose up -d
+      - GST_DEBUG=${GST_DEBUG:-}
+      - RUST_LOG=${RUST_LOG:-}
+      - WOLF_LOG_LEVEL=${WOLF_LOG_LEVEL:-INFO}
       - WOLF_RENDER_NODE=${WOLF_RENDER_NODE}
       - WOLF_ENCODER_NODE=${WOLF_RENDER_NODE}
       - WOLF_HTTP_PORT=${WOLF_HTTP_PORT:-49989}
@@ -30,6 +46,8 @@ services:
       - WOLF_VIDEO_PING_PORT=${WOLF_VIDEO_PING_PORT:-50100}
       - WOLF_AUDIO_PING_PORT=${WOLF_AUDIO_PING_PORT:-50200}
     volumes:
+      - ./libwolf-cuda-ownership.so:/opt/omarchy/libwolf-cuda-ownership.so:ro
+      - ./gst-plugins:/opt/omarchy/gst-plugins:ro
       - /etc/wolf/:/etc/wolf:rw
       - /tmp/sockets:/tmp/sockets:rw
       - /var/run/wolf:/var/run/wolf:rw
@@ -38,7 +56,12 @@ services:
       - /run/udev:/run/udev:rw
       - nvidia-driver-vol:/usr/nvidia:rw
     devices:
-      - /dev/dri
+      # Only the NVIDIA nodes (set by omarchy-wolf-install in .env). Passing the
+      # whole /dev/dri exposes the Proxmox virtio-gpu too: GStreamer probes it
+      # for VA-API and the virtio_gpu driver can hang the process in the kernel
+      # (uninterruptible D state), which blocks Wolf's startup entirely.
+      - ${WOLF_CARD_NODE:-/dev/dri/card0}
+      - ${WOLF_RENDER_NODE}
       - /dev/uinput
       - /dev/uhid
       - /dev/nvidia-uvm

@@ -68,14 +68,16 @@ validate_stream_mode() {
 }
 
 write_monitor_block() {
-  local mode=$1
+  local mode=$1 scale
+  scale="$(sed -n 's/.*output = "omarchy-gtx".*scale = \([0-9.]*\).*/\1/p' "$MONITORS_FILE" | tail -n 1)"
+  [[ "$scale" =~ ^[1-4](\.[0-9]+)?$ ]] || scale=1
   sed -i '/-- BEGIN sunshine-virtual-display (managed locally)/,/-- END sunshine-virtual-display/d' "$MONITORS_FILE"
   printf '%s\n' \
     '' \
     '-- BEGIN sunshine-virtual-display (managed locally)' \
     '-- schema: 2 (16:9 default; explicit user modes are preserved)' \
     '-- GTX-only Wayland output for Sunshine/Moonlight; no VirtIO display ownership.' \
-    "hl.monitor({ output = \"omarchy-gtx\", mode = \"$mode\", position = \"0x0\", scale = 1 })" \
+    "hl.monitor({ output = \"omarchy-gtx\", mode = \"$mode\", position = \"0x0\", scale = $scale })" \
     '-- END sunshine-virtual-display' \
     >>"$MONITORS_FILE"
   chown "$USER_NAME:$USER_NAME" "$MONITORS_FILE"
@@ -212,10 +214,12 @@ hyprland_env() {
 }
 
 apply_mode() {
-  local mode=$1
+  local mode=$1 scale
+  scale="$(sed -n 's/.*output = "omarchy-gtx".*scale = \([0-9.]*\).*/\1/p' "$MONITORS_FILE" | tail -n 1)"
+  [[ "$scale" =~ ^[1-4](\.[0-9]+)?$ ]] || scale=1
   # Hyprland 0.55+ uses the Lua API. `hyprctl keyword monitor` is a legacy
   # parser and silently does not change an Omarchy 0.56 monitor.
-  hyprctl eval "hl.monitor({ output = \"$OUTPUT\", mode = \"$mode\", position = \"0x0\", scale = 1 })" >/dev/null
+  hyprctl eval "hl.monitor({ output = \"$OUTPUT\", mode = \"$mode\", position = \"0x0\", scale = $scale })" >/dev/null
   printf 'Moonlight dynamic resolution applied: %s\n' "$mode"
 }
 

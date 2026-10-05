@@ -75,9 +75,11 @@ apply_isolation() {
     iptables -A "$CHAIN_FWD" -d "$range" -j REJECT --reject-with icmp-admin-prohibited
   done
   iptables -A "$CHAIN_FWD" -j RETURN
-  # Guest -> this VM (any of its addresses): nothing.
+  # Guest -> this VM: DNS only (Docker can use the VM's resolver).
   iptables -N "$CHAIN_IN" 2>/dev/null || iptables -F "$CHAIN_IN"
   iptables -A "$CHAIN_IN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A "$CHAIN_IN" -p udp --dport 53 -j ACCEPT
+  iptables -A "$CHAIN_IN" -p tcp --dport 53 -j ACCEPT
   iptables -A "$CHAIN_IN" -j DROP
   ensure_jump FORWARD "$CHAIN_FWD"
   ensure_jump INPUT "$CHAIN_IN"

@@ -7,6 +7,7 @@ arch=('x86_64')
 url="https://github.com/omarchy/omarchy"
 license=('MIT')
 depends=('python' 'sqlite' 'systemd' 'sudo')
+makedepends=('gcc')
 optdepends=(
     'nvidia-utils: GPU telemetry and NVENC stream monitoring'
     'sunshine: Self-hosted game stream host for Moonlight'
@@ -32,6 +33,8 @@ source=(
     "omarchy-wolf-network-isolation::file://${PWD}/scripts/omarchy-wolf-network-isolation"
     "omarchy-mount-nas::file://${PWD}/scripts/omarchy-mount-nas"
     "omarchy-session-broker.service::file://${PWD}/systemd/omarchy-session-broker.service"
+    "omarchy-storage-prune.service::file://${PWD}/systemd/omarchy-storage-prune.service"
+    "omarchy-storage-prune.timer::file://${PWD}/systemd/omarchy-storage-prune.timer"
     "omarchy-capture-publish::file://${PWD}/scripts/omarchy-capture-publish"
     "omarchy-capture-picker::file://${PWD}/scripts/omarchy-capture-picker"
     "omarchy-build-gsr-legacy-nvenc::file://${PWD}/scripts/omarchy-build-gsr-legacy-nvenc"
@@ -41,9 +44,18 @@ source=(
     "mediamtx-omarchy.yml::file://${PWD}/config/mediamtx-omarchy.yml"
     "omarchy-mediamtx.service::file://${PWD}/systemd/omarchy-mediamtx.service"
     "wolf-docker-compose.yml::file://${PWD}/packaging/wolf/docker-compose.yml"
+    "cuda-context-ownership.c::file://${PWD}/packaging/wolf/cuda-context-ownership.c"
+    "unixfd-heap-memory.patch::file://${PWD}/packaging/wolf/unixfd-heap-memory.patch"
     "omarchy-wolf-network-isolation.service::file://${PWD}/systemd/omarchy-wolf-network-isolation.service"
+    "omarchy-upnp-ports::file://${PWD}/scripts/omarchy-upnp-ports"
+    "omarchy-upnp-ports.service::file://${PWD}/systemd/omarchy-upnp-ports.service"
+    "omarchy-upnp-ports.timer::file://${PWD}/systemd/omarchy-upnp-ports.timer"
 )
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+build() {
+    cc -shared -fPIC -O2 -std=c11 -Wall -Wextra -Werror "${srcdir}/cuda-context-ownership.c" -ldl -o "${srcdir}/libwolf-cuda-ownership.so"
+}
 
 package() {
     # Binaries
@@ -54,16 +66,22 @@ package() {
 
     # Systemd Service
     sed 's|/usr/local/bin/|/usr/bin/|g' "${srcdir}/omarchy-session-broker.service" | install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/omarchy-session-broker.service"
+    sed 's|/usr/local/bin/|/usr/bin/|g' "${srcdir}/omarchy-storage-prune.service" | install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/omarchy-storage-prune.service"
+    install -Dm644 "${srcdir}/omarchy-storage-prune.timer" "${pkgdir}/usr/lib/systemd/system/omarchy-storage-prune.timer"
 
     # Live view / recordings (MediaMTX) and Wolf
     local script
-    for script in omarchy-capture-publish omarchy-capture-picker omarchy-build-gsr-legacy-nvenc omarchy-wolf-live-tap omarchy-wolf-install omarchy-wolf-ui-coop; do
+    for script in omarchy-capture-publish omarchy-capture-picker omarchy-build-gsr-legacy-nvenc omarchy-wolf-live-tap omarchy-wolf-install omarchy-wolf-ui-coop omarchy-upnp-ports; do
         install -Dm755 "${srcdir}/${script}" "${pkgdir}/usr/bin/${script}"
     done
     # The repo files reference /usr/local/bin (omarchy-setup layout); the package uses /usr/bin.
     sed 's|/usr/local/bin/|/usr/bin/|g' "${srcdir}/mediamtx-omarchy.yml" | install -Dm644 /dev/stdin "${pkgdir}/etc/omarchy/mediamtx.yml"
     install -Dm644 "${srcdir}/omarchy-mediamtx.service" "${pkgdir}/usr/lib/systemd/system/omarchy-mediamtx.service"
     install -Dm644 "${srcdir}/wolf-docker-compose.yml" "${pkgdir}/usr/share/omarchy/wolf/docker-compose.yml"
+    install -Dm755 "${srcdir}/libwolf-cuda-ownership.so" "${pkgdir}/usr/share/omarchy/wolf/libwolf-cuda-ownership.so"
+    install -Dm644 "${srcdir}/unixfd-heap-memory.patch" "${pkgdir}/usr/share/omarchy/wolf/unixfd-heap-memory.patch"
+    sed 's|/usr/local/bin/|/usr/bin/|g' "${srcdir}/omarchy-upnp-ports.service" | install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/omarchy-upnp-ports.service"
+    install -Dm644 "${srcdir}/omarchy-upnp-ports.timer" "${pkgdir}/usr/lib/systemd/system/omarchy-upnp-ports.timer"
     sed 's|/usr/local/bin/|/usr/bin/|g' "${srcdir}/omarchy-wolf-network-isolation.service" | install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/omarchy-wolf-network-isolation.service"
 
     # State directory

@@ -17,20 +17,22 @@ Il broker e' progettato per garantire il principio del minimo privilegio:
 | `status-json` | Restituisce lo stato globale del multi-utente, telemetria GPU e lista sessioni | JSON strutturato |
 | `list-sessions` | Elenca le sessioni Wolf/guest attualmente attive con risoluzione, FPS e bitrate | JSON array |
 | `list-users` | Elenca tutti gli utenti registrati, i rispettivi PIN e i permessi applicativi | JSON array |
-| `add-user --username <user> --display <name> --pin <pin>` | Registra un nuovo utente e alloca lo spazio isolato in `/var/lib/omarchy-sessions/<user>` | Esito JSON |
+| `add-user --username <user> --display <name> --pin <pin> [--storage-gb <GB>]` | Registra un utente e prepara il profilo Wolf persistente con quota; `0` = illimitato | Esito JSON |
+| `edit-user --username <user> --storage-gb <GB>` | Cambia subito il limite della home Wolf (desktop e giochi) senza riavviare la sessione; rifiuta limiti sotto lo spazio occupato | Esito JSON |
 | `remove-user --username <user> [--archive]` | Elimina l'utente (o ne archivia lo stato) e rimuove i container associati | Esito JSON |
 | `ban-user --username <user>` | Banna l'utente interrompendo sessioni/processi attivi, preservando al 100% i salvataggi e la cartella home | Esito JSON |
 | `unban-user --username <user>` | Riabilita un utente bannato ripristinando lo stato attivo e la possibilità di avviare giochi | Esito JSON |
-| `kill-session --id <session-id>` | Interrompe forzatamente una sessione in streaming, rilascia il contesto NVENC ed esegue l'auto-push dei salvataggi su NAS | Esito JSON |
+| `kill-session --id <session-id>` | Interrompe forzatamente una sessione in streaming, rilascia il contesto NVENC; alla fine della sessione Wolf il broker fa il backup automatico dei salvataggi | Esito JSON |
 | `shadow-session --id <session-id>` | Abilita l'Owner ad affiancare o prendere il controllo della sessione | Parametri stream JSON |
 | `start-recording --id <session-id>` | Registra sul NAS Samba (`smb://192.168.0.39/nvme1`) lo stesso flusso H.265 GPU del video live, in MP4 frammentato | Esito JSON |
 | `stop-recording --id <session-id>` | Conclude e finalizza in modo pulito il file MP4 registrato | Esito JSON |
+| `wolf-tap-socket --id <session-id>` | Restituisce il socket video Wolf realmente in ascolto, ignorando i socket abbandonati dopo una riconnessione | Percorso, errore se il tap non è attivo |
 | `get-settings` | Restituisce tutte le impostazioni Enterprise del broker in formato JSON | JSON dictionary |
 | `set-setting --key <k> --value <v>` | Aggiorna un parametro di sistema (limiti NVENC, retention, percorsi NAS) | Esito JSON |
 | `check-admission [--vram <MB>]` | Verifica disponibilità VRAM ed encoder Pascal GP107 per nuovi flussi | Esito JSON |
 | `sync-saves --username <u> [--direction push\|pull]` | Esegue la sincronizzazione Dual-Tier tra NVMe locale e archivio Samba NAS | Esito JSON |
 | `list-saves [--username <u>]` | Elenca tutti gli snapshot dei salvataggi salvati su Samba NAS | JSON array |
-| `prune-nas [--dry-run]` | Esegue la pulizia automatica di video vecchi e snapshot storici oltre la quota | Esito JSON |
+| `prune-nas [--dry-run]` | Applica giorni e numero di copie configurati, escludendo video attivi; `0` disattiva la rispettiva pulizia | Esito JSON |
 | `vpn-peer-add --username <u> --client-name <n>` | Alloca IP Mesh, genera chiavi Curve25519 e crea il file `.conf` WireGuard | Parametri e conf base64 |
 | `vpn-peer-list [--username <u>]` | Elenca i peer WireGuard configurati | JSON array |
 | `vpn-peer-del --id <peer-id>` | Revoca ed elimina un peer WireGuard | Esito JSON |

@@ -1,0 +1,9 @@
+[Unit]
+Description=Apply configured Omarchy backup and recording retention
+After=network.target omarchy-session-broker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omarchy-session-broker prune-nas
+Nice=19
+IOSchedulingClass=idle

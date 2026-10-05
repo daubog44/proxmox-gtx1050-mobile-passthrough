@@ -30,6 +30,7 @@ die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
 # Works from the repository (omarchy-setup) and from the Arch package.
 compose_src="$repo_root/packaging/wolf/docker-compose.yml"
 [[ -f "$compose_src" ]] || compose_src=/usr/share/omarchy/wolf/docker-compose.yml
+cuda_src="$repo_root/packaging/wolf/cuda-context-ownership.c"
 live_tap="$repo_root/scripts/omarchy-wolf-live-tap"
 [[ -x "$live_tap" ]] || live_tap="$(command -v omarchy-wolf-live-tap || true)"
 wolf_ui_coop="$repo_root/scripts/omarchy-wolf-ui-coop"
@@ -38,6 +39,14 @@ note() { printf '==> %s\n' "$*"; }
 
 compose() {
   if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi
+}
+
+nvidia_card_node() {
+  local node
+  for node in /sys/class/drm/card*; do
+    [[ "$(basename "$(readlink -f "$node/device/driver")")" == nvidia ]] && { echo "/dev/dri/$(basename "$node")"; return; }
+  done
+  return 1
 }
 
 nvidia_render_node() {
@@ -81,6 +90,15 @@ build_driver_volume() {
     || docker create --rm --mount source=nvidia-driver-vol,destination=/usr/nvidia gow/nvidia-driver:latest sh >/dev/null
 }
 
+# Pascal supports compositor -> CUDA -> NVENC: verified on GTX 1050 / 580.178.04.
+# Keep Wolf's zero-copy default; legacy mode requires an explicit override.
+wolf_zero_copy() {
+  local value
+  value="$(printf '%s' "${OMARCHY_WOLF_ZERO_COPY:-TRUE}" | tr '[:lower:]' '[:upper:]')"
+  [[ "$value" == TRUE || "$value" == FALSE ]] || die 'OMARCHY_WOLF_ZERO_COPY deve essere TRUE oppure FALSE'
+  echo "$value"
+}
+
 open_firewall() {
   command -v ufw >/dev/null || return 0
   local port
@@ -94,23 +112,42 @@ case "$action" in
     ;;
   apply)
     (( EUID == 0 )) || die 'eseguire come root'
+    zero_copy="$(wolf_zero_copy)"
     preflight || die 'prerequisiti Wolf mancanti (vedi sopra)'
     render_node="$(nvidia_render_node)"
-    install -d -m 0755 "$INSTALL_DIR" /etc/wolf /tmp/sockets /var/run/wolf
+    card_node="$(nvidia_card_node)" || die 'nodo card NVIDIA non trovato in /dev/dri'
+    install -d -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/gst-plugins" /etc/wolf /tmp/sockets /var/run/wolf
     [[ -f "$compose_src" ]] || die "docker-compose di Wolf non trovato ($compose_src)"
+    if [[ -f "$cuda_src" ]]; then
+      command -v cc >/dev/null || die 'compilatore C assente: installare gcc per la correzione CUDA di Wolf'
+      cc -shared -fPIC -O2 -std=c11 -Wall -Wextra -Werror "$cuda_src" -ldl -o "$INSTALL_DIR/libwolf-cuda-ownership.so.new"
+      mv "$INSTALL_DIR/libwolf-cuda-ownership.so.new" "$INSTALL_DIR/libwolf-cuda-ownership.so"
+    else
+      install -m 0755 /usr/share/omarchy/wolf/libwolf-cuda-ownership.so "$INSTALL_DIR/libwolf-cuda-ownership.so"
+    fi
     install -m 0644 "$compose_src" "$INSTALL_DIR/docker-compose.yml"
     cat > "$INSTALL_DIR/.env" <<EOF
 WOLF_RENDER_NODE=$render_node
+WOLF_CARD_NODE=$card_node
 WOLF_HTTP_PORT=49989
 WOLF_HTTPS_PORT=49984
 WOLF_CONTROL_PORT=49999
 WOLF_RTSP_SETUP_PORT=50010
 WOLF_VIDEO_PING_PORT=50100
 WOLF_AUDIO_PING_PORT=50200
+WOLF_USE_ZERO_COPY=$zero_copy
+WOLF_LOG_LEVEL=${OMARCHY_WOLF_LOG_LEVEL:-INFO}
 EOF
     # /tmp is cleared at boot: recreate the shared sockets dir before Docker.
     printf 'd /tmp/sockets 0755 root root -\nd /var/run/wolf 0755 root root -\n' > /etc/tmpfiles.d/omarchy-wolf.conf
     build_driver_volume
+    # Without persistence mode the driver tears the GPU down whenever nothing
+    # uses it: every Wolf launch then pays ~8 s of CUDA/EGL init, past
+    # Moonlight's first-frame timeout ("No video received from host").
+    if command -v nvidia-persistenced >/dev/null; then
+      systemctl enable --now nvidia-persistenced.service >/dev/null 2>&1 \
+        || note 'nvidia-persistenced non avviato: il primo frame Wolf può superare il timeout di Moonlight'
+    fi
     # A "wolf" container started outside this compose (e.g. by hand) would
     # block `up` with a name conflict and may lack the API socket/mounts.
     # Its state lives in /etc/wolf, so replacing the container keeps it.
@@ -128,7 +165,8 @@ EOF
       sed -i "s|^WOLF_RENDER_NODE=.*|WOLF_RENDER_NODE=$render_node|" /etc/omarchy/wolf.env
     fi
     compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$INSTALL_DIR/.env" pull -q
-    compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$INSTALL_DIR/.env" up -d
+    # The compiled library is replaced atomically: recreate to mount its new inode.
+    compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$INSTALL_DIR/.env" up -d --force-recreate
     open_firewall
 
     note 'attendo che Wolf generi /etc/wolf/cfg/config.toml'
@@ -164,6 +202,18 @@ EOF
     else
       note 'omarchy-wolf-network-isolation non trovato: i giochi ospite vedranno la LAN'
     fi
+    # Router port forwarding through UPnP, renewed every 30 min (OMARCHY_UPNP=0
+    # in /etc/omarchy/upnp.env to keep manual forwarding only).
+    upnp_src="$repo_root/scripts/omarchy-upnp-ports"
+    if [[ -x "$upnp_src" ]]; then
+      install -m 0755 "$upnp_src" /usr/local/bin/omarchy-upnp-ports
+      install -m 0644 "$repo_root/systemd/omarchy-upnp-ports.service" "$repo_root/systemd/omarchy-upnp-ports.timer" /etc/systemd/system/
+      systemctl daemon-reload
+    fi
+    if command -v omarchy-upnp-ports >/dev/null; then
+      systemctl enable --now omarchy-upnp-ports.timer >/dev/null 2>&1 || true
+      omarchy-upnp-ports apply || note 'UPnP non disponibile sul router: inoltra a mano TCP 49984/49989/50010 e UDP 49999/50100/50200'
+    fi
     # One Wolf profile (PIN + allowed apps, own save data) per Omarchy user.
     if command -v omarchy-session-broker >/dev/null; then
       omarchy-session-broker wolf-sync-profiles >/dev/null \
@@ -172,6 +222,7 @@ EOF
     fi
 
     [[ -n "$live_tap" ]] || die 'omarchy-wolf-live-tap non trovato'
+    [[ -f "$INSTALL_DIR/gst-plugins/libgstunixfd.so" ]] || "$live_tap" build-unixfd
     WOLF_CONFIG=/etc/wolf/cfg/config.toml "$live_tap" apply --restart
     systemctl try-restart omarchy-session-broker.service || true
     note "Wolf attivo. In Moonlight aggiungi il PC come <ip-vm>:49989 (Sunshine resta su 47989)"
@@ -188,6 +239,7 @@ EOF
     [[ -n "$live_tap" ]] && "$live_tap" status || true
     [[ -n "$wolf_ui_coop" ]] && "$wolf_ui_coop" status || true
     command -v omarchy-wolf-network-isolation >/dev/null && omarchy-wolf-network-isolation status || true
+    command -v omarchy-upnp-ports >/dev/null && omarchy-upnp-ports status || true
     ;;
   *) die 'azione: check, apply oppure status' ;;
 esac

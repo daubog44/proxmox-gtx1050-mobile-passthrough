@@ -57,6 +57,7 @@ export function createLiveVideoPlayer(video: HTMLVideoElement, onError: (message
   const pending: Uint8Array[] = [];
   let header = new Uint8Array(0);
   let sourceBuffer: SourceBuffer | null = null;
+  let initializing = false;
   let objectUrl = "";
 
   if (!MediaSourceImpl) {
@@ -119,22 +120,27 @@ export function createLiveVideoPlayer(video: HTMLVideoElement, onError: (message
   return {
     push(chunk: ArrayBuffer) {
       if (destroyed) return;
-      const bytes = new Uint8Array(chunk);
+    const bytes = new Uint8Array(chunk);
+      if (pending.reduce((size, chunk) => size + chunk.length, 0) + bytes.length > 16 * 1024 * 1024) {
+        onError("Decodifica video in ritardo: riconnessione necessaria");
+        return;
+      }
       pending.push(bytes);
       if (sourceBuffer) {
         pump();
         return;
       }
       // Wait for the init segment (moov/hvcC) to learn the exact codec string.
-      if (header.length < 256 * 1024) {
+      if (!initializing && header.length < 256 * 1024) {
         const merged = new Uint8Array(header.length + bytes.length);
         merged.set(header);
         merged.set(bytes, header.length);
         header = merged;
         const codec = findCodec(header);
         if (codec) {
+          initializing = true;
           header = new Uint8Array(0);
-          void setup(codec);
+          void setup(codec).catch((err) => { if (!destroyed) onError(String(err)); });
         }
       }
     },

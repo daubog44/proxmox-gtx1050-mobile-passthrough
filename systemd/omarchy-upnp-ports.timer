@@ -1,0 +1,9 @@
+[Unit]
+Description=Omarchy: renew UPnP port mappings (routers forget them on reboot)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=30min
+
+[Install]
+WantedBy=timers.target

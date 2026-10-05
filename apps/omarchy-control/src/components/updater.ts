@@ -1,58 +1,155 @@
+import { getVersion } from "@tauri-apps/api/app";
+import { api } from "../services/api";
+import type { UpdateInfo } from "../types";
+import { Icons } from "./ui/icons";
+
+const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+let latest: UpdateInfo | null = null;
+let installing = false;
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#039;", '"': "&quot;" })[c] ?? c);
+}
+
+/** Sidebar footer entry: current version, highlighted when an update exists. */
+export function renderUpdateButton(): string {
+  return `
+    <button type="button" id="btn-open-update" class="nav-tab w-full" title="Aggiornamenti">
+      ${Icons.download()}
+      <span class="nav-label text-left">Aggiornamenti</span>
+      <span id="update-pill-dot" class="update-dot hidden"></span>
+      <span id="update-pill-label" class="nav-count">v…</span>
+    </button>`;
+}
+
 export function renderUpdateModal(): string {
   return `
-    <div id="update-modal" class="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4 hidden" role="dialog" aria-modal="true" aria-labelledby="update-modal-title">
-      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl max-w-md w-full overflow-hidden animate-in fade-in duration-200">
-        
-        <div class="flex items-center justify-between p-4 px-5 border-b border-zinc-800">
-          <div>
-            <div class="text-[10px] font-bold uppercase tracking-wider text-emerald-400">Aggiornamento Software</div>
-            <h3 class="text-sm font-semibold text-zinc-100" id="update-modal-title">Verifica Versioni</h3>
-          </div>
-          <button type="button" class="btn-close-update-modal text-zinc-400 hover:text-zinc-100 p-1 rounded-lg hover:bg-zinc-800 transition cursor-pointer" aria-label="Chiudi">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-            </svg>
-          </button>
+    <div id="update-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="update-modal-title">
+      <div class="modal-card max-w-sm">
+        <div class="modal-head">
+          <h3 id="update-modal-title">Aggiornamento</h3>
+          <button type="button" class="modal-x" data-close aria-label="Chiudi">&times;</button>
         </div>
-
-        <div class="p-5 space-y-3.5 text-xs">
-          <div class="flex items-center justify-between">
-            <span id="update-status-badge" class="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Verifica in corso…</span>
-            <span class="text-zinc-500 text-[11px]" id="update-date"></span>
-          </div>
-
-          <div class="grid grid-cols-2 gap-2.5 p-3 bg-zinc-950/60 border border-zinc-800 rounded-xl text-center">
-            <div>
-              <div class="text-[10px] text-zinc-500 uppercase font-medium">Installata</div>
-              <div class="text-xs font-bold text-zinc-300 font-mono mt-0.5" id="update-current-ver">-</div>
-            </div>
-            <div>
-              <div class="text-[10px] text-emerald-400 uppercase font-semibold">Disponibile</div>
-              <div class="text-xs font-bold text-emerald-400 font-mono mt-0.5" id="update-latest-ver">-</div>
-            </div>
-          </div>
-
-          <div>
-            <div class="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1.5">Note di Rilascio</div>
-            <div class="p-3 bg-zinc-950 border border-zinc-800 rounded-xl max-h-36 overflow-y-auto font-mono text-[11px] text-zinc-300 whitespace-pre-wrap leading-relaxed" id="update-notes-text">Caricamento note…</div>
-          </div>
-
-          <div id="update-progress-container" class="hidden space-y-2">
-            <p id="update-progress-status" class="text-zinc-400 text-xs text-center">Download e installazione in corso…</p>
-            <div class="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-              <div class="h-full bg-emerald-500 animate-pulse-slow"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="p-3.5 px-5 border-t border-zinc-800 flex justify-end gap-2 bg-zinc-950/40">
-          <button type="button" class="btn-close-update-modal h-8 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium transition cursor-pointer">Chiudi</button>
-          <button type="button" class="h-8 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer" id="btn-apply-update" disabled>
-            Scarica e Installa
-          </button>
-        </div>
-
+        <div class="modal-body" id="update-body"></div>
+        <div class="modal-foot" id="update-foot"></div>
       </div>
-    </div>
-  `;
+    </div>`;
+}
+
+function renderState(state: "checking" | "info" | "installing" | "done" | "error", message = "", outcome?: "restart" | "quit"): void {
+  const body = document.querySelector<HTMLElement>("#update-body");
+  const foot = document.querySelector<HTMLElement>("#update-foot");
+  if (!body || !foot) return;
+  const current = latest?.current_version ?? "";
+  if (state === "checking") {
+    body.innerHTML = `<p class="muted">Controllo in corso…</p>`;
+    foot.innerHTML = "";
+    return;
+  }
+  if (state === "installing") {
+    body.innerHTML = `<p class="muted">Download e installazione di v${escapeHtml(latest?.latest_version ?? "")}…</p><div class="progress-indeterminate"></div>`;
+    foot.innerHTML = "";
+    return;
+  }
+  if (state === "done") {
+    body.innerHTML = outcome === "quit"
+      ? `<p>L'installer è pronto: l'app si chiude per completare l'aggiornamento.</p>`
+      : `<p>v${escapeHtml(latest?.latest_version ?? "")} installata.</p>`;
+    foot.innerHTML = `<button type="button" class="btn-primary" id="btn-finish-update">${outcome === "quit" ? "Chiudi e aggiorna" : "Riavvia"}</button>`;
+    foot.querySelector("#btn-finish-update")?.addEventListener("click", () => void api.finishUpdate(outcome ?? "restart"));
+    return;
+  }
+  if (state === "error") {
+    body.innerHTML = `<p class="text-red-300">${escapeHtml(message)}</p>`;
+    foot.innerHTML = `<button type="button" class="btn-ghost" data-close>Chiudi</button><button type="button" class="btn-primary" id="btn-retry-update">Riprova</button>`;
+    foot.querySelector("#btn-retry-update")?.addEventListener("click", () => void checkNow(true));
+    return;
+  }
+  if (!latest?.reachable) {
+    body.innerHTML = `<p class="muted">Server degli aggiornamenti non raggiungibile.</p>`;
+    foot.innerHTML = `<button type="button" class="btn-primary" id="btn-recheck-update">Riprova</button>`;
+  } else if (latest.has_update) {
+    const notes = latest.notes
+      .split("\n")
+      .map((l) => l.replace(/^[•\-*]\s*/, "").trim())
+      .filter(Boolean)
+      .map((l) => `<li>${escapeHtml(l)}</li>`)
+      .join("");
+    body.innerHTML = `
+      <p class="update-versions"><span>v${escapeHtml(current)}</span> → <strong>v${escapeHtml(latest.latest_version)}</strong></p>
+      ${notes ? `<ul class="update-notes">${notes}</ul>` : ""}`;
+    foot.innerHTML = `<button type="button" class="btn-ghost" data-close>Più tardi</button><button type="button" class="btn-primary" id="btn-apply-update">Installa</button>`;
+    foot.querySelector("#btn-apply-update")?.addEventListener("click", () => void install());
+    return;
+  } else {
+    body.innerHTML = `<p>Hai già l'ultima versione <span class="font-mono">v${escapeHtml(current)}</span>.</p>`;
+    foot.innerHTML = `<button type="button" class="btn-ghost" id="btn-recheck-update">Controlla di nuovo</button>`;
+  }
+  foot.querySelector("#btn-recheck-update")?.addEventListener("click", () => void checkNow(true));
+}
+
+function paintPill(): void {
+  const label = document.querySelector<HTMLElement>("#update-pill-label");
+  const dot = document.querySelector<HTMLElement>("#update-pill-dot");
+  const pill = document.querySelector<HTMLElement>("#btn-open-update");
+  if (!label || !dot || !pill) return;
+  const available = Boolean(latest?.has_update);
+  label.textContent = available ? `v${latest?.latest_version}` : `v${latest?.current_version ?? ""}`;
+  pill.title = available ? `Aggiornamento disponibile: v${latest?.latest_version}` : "Aggiornamenti";
+  dot.classList.toggle("hidden", !available);
+  pill.classList.toggle("update-pill-available", available);
+}
+
+async function checkNow(showInModal: boolean): Promise<void> {
+  if (installing) return;
+  if (showInModal) renderState("checking");
+  try {
+    latest = await api.checkForUpdates();
+  } catch (err) {
+    if (showInModal) renderState("error", String(err));
+    return;
+  }
+  paintPill();
+  if (showInModal) renderState("info");
+}
+
+async function install(): Promise<void> {
+  if (!latest?.download_url || installing) return;
+  installing = true;
+  renderState("installing");
+  try {
+    const outcome = await api.installUpdate(latest.download_url);
+    renderState("done", "", outcome);
+  } catch (err) {
+    renderState("error", `Aggiornamento non riuscito: ${String(err)}`);
+  } finally {
+    installing = false;
+  }
+}
+
+export function openUpdateModal(): void {
+  document.querySelector("#update-modal")?.classList.remove("hidden");
+  if (latest) renderState("info");
+  void checkNow(true);
+}
+
+/** Shows the installed version, checks at start and every 6 hours. */
+export async function initUpdater(): Promise<void> {
+  const label = document.querySelector<HTMLElement>("#update-pill-label");
+  try {
+    const version = await getVersion();
+    if (label) label.textContent = `v${version}`;
+  } catch {
+    /* not running inside Tauri */
+  }
+  document.querySelector("#btn-open-update")?.addEventListener("click", openUpdateModal);
+  document.querySelector("#update-modal")?.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    if (!installing && (target.id === "update-modal" || target.closest("[data-close]"))) {
+      document.querySelector("#update-modal")?.classList.add("hidden");
+    }
+  });
+  void checkNow(false);
+  window.setInterval(() => void checkNow(false), CHECK_INTERVAL_MS);
 }

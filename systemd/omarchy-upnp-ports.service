@@ -1,0 +1,8 @@
+[Unit]
+Description=Omarchy: open this node's Wolf ports on the router (UPnP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omarchy-upnp-ports apply

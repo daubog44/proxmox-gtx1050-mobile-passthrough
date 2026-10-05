@@ -1,7 +1,7 @@
 [Unit]
 Description=Omarchy Multi-User Session Broker and Telemetry Service
 After=network.target
-Wants=network.target
+Wants=network.target omarchy-storage-prune.timer
 
 [Service]
 Type=simple

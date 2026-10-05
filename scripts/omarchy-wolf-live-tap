@@ -6,18 +6,19 @@
 # (games-on-whales/wolf state/configTOML.cpp). We wrap default_sink with a tee:
 #
 #   ... NVENC ! tee ! queue ! rtpmoonlightpay_video ! appsink        (player, unchanged)
-#               tee. ! queue leaky=downstream ! mpegtsmux ! shmsink  (tap)
+#               tee. ! queue leaky=downstream ! mpegtsmux ! unixfdsink (tap)
 #
 # The tap copies the already-encoded stream (no second encode). A leaky queue
 # means a slow or absent reader drops tap frames instead of ever stalling the
-# player, and shmsink with wait-for-connection=false never blocks or errors
-# when nobody listens. The socket lands in /tmp/sockets (Wolf's XDG_RUNTIME_DIR,
-# shared with the host) as omarchy-live-<session_id>; omarchy-capture-publish
+# player. UnixFD drops buffers when no reader is connected and handles reader
+# disconnects without shmsink's STREAM/FAILED error. The socket lands in
+# /tmp/sockets (shared with the host) as omarchy-live-fd-<session_id>; the publisher
 # forwards it to MediaMTX only while someone watches or records.
 #
 # Wolf's NVENC pipelines default to gop-size=-1 (keyframes only when Moonlight
 # asks), so a late viewer or recording could wait forever for an IDR. The tap
 # sets a finite GOP (default 120 frames: 2 s at 60 FPS) on nvcodec encoders.
+# Repeated sequence headers let late readers decode that next keyframe.
 set -euo pipefail
 
 readonly MARKER='omarchy-wolf-live-tap'
@@ -31,9 +32,10 @@ note() { printf '==> %s\n' "$*"; }
 
 usage() {
   cat <<EOF
-Uso: omarchy-wolf-live-tap <status|apply|rollback> [--config FILE] [--container NOME] [--restart]
+Uso: omarchy-wolf-live-tap <status|apply|build-unixfd|rollback> [--config FILE] [--container NOME] [--restart]
   status    mostra se il tap è installato e se Wolf lo supporta
   apply     verifica prerequisiti, salva un backup e modifica config.toml
+  build-unixfd compila il plugin ufficiale con copia in memoria FD per Wolf
   rollback  ripristina l'ultimo backup
   --restart riavvia il container Wolf (termina le sessioni in corso)
 EOF
@@ -51,19 +53,69 @@ done
 
 docker_bin="$(command -v docker || command -v podman || true)"
 
+build_unixfd() {
+  local destination="${OMARCHY_WOLF_PLUGIN_DIR:-/etc/omarchy/wolf/gst-plugins}" image builder output patch_file
+  patch_file="$(dirname "$(dirname "$(readlink -f "$0")")")/packaging/wolf/unixfd-heap-memory.patch"
+  [[ -f "$patch_file" ]] || patch_file=/usr/share/omarchy/wolf/unixfd-heap-memory.patch
+  [[ -f "$patch_file" ]] || die 'patch UnixFD non trovata'
+  install -d -m 0755 "$destination"
+  builder="$(mktemp -d)"
+  # Build only the official plugin against the running image's ABI. GStreamer
+  # 1.26 cannot pass mpegtsmux's heap memory to UnixFD. Backport just that copy,
+  # using its native memfd allocator; a newer core/compositor is not required.
+  cp "$patch_file" "$builder/"
+  image="$("$docker_bin" inspect -f '{{.Config.Image}}' "$container")"
+  cat > "$builder/Dockerfile" <<'EOF'
+ARG WOLF_IMAGE=ghcr.io/games-on-whales/wolf:stable
+FROM ${WOLF_IMAGE}
+USER root
+ENV LD_PRELOAD=""
+RUN (apt-get update -qq || { sed -i -E 's#https?://(archive|security).ubuntu.com/ubuntu#https://old-releases.ubuntu.com/ubuntu#g' /etc/apt/sources.list.d/ubuntu.sources; apt-get update -qq; }) && \
+    apt-get install -y --no-install-recommends gcc pkg-config curl patch ca-certificates libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libglib2.0-dev
+WORKDIR /build
+COPY unixfd-heap-memory.patch .
+RUN for file in gstunixfd.c gstunixfd.h gstunixfdsink.c gstunixfdsrc.c; do \
+      curl -fsSLo "$file" "https://raw.githubusercontent.com/GStreamer/gstreamer/c5a5c302f5e7218182c0633decec16b25de82add/subprojects/gst-plugins-bad/gst/unixfd/$file"; done && \
+    patch -p0 < unixfd-heap-memory.patch && \
+    gcc -shared -fPIC -O2 -DVERSION='"1.26.7-omarchy"' -DGST_LICENSE='"LGPL"' -DPACKAGE='"gst-plugins-bad"' -DGST_PACKAGE_NAME='"GStreamer Bad Plug-ins"' -DGST_PACKAGE_ORIGIN='"https://gstreamer.freedesktop.org/"' \
+      gstunixfd.c gstunixfdsink.c gstunixfdsrc.c $(pkg-config --cflags --libs gstreamer-base-1.0 gstreamer-allocators-1.0 gio-unix-2.0) -o libgstunixfd.so
+EOF
+  if "$docker_bin" build --build-arg "WOLF_IMAGE=$image" -t omarchy-wolf-unixfd:1.26.7-omarchy "$builder"; then
+    output="$("$docker_bin" create omarchy-wolf-unixfd:1.26.7-omarchy)"
+    "$docker_bin" cp "$output:/build/libgstunixfd.so" "$destination/libgstunixfd.so"
+    "$docker_bin" rm "$output" >/dev/null
+    chmod 0644 "$destination/libgstunixfd.so"
+  else
+    rm -rf "$builder"
+    die 'compilazione del plugin UnixFD non riuscita: configurazione Wolf preservata'
+  fi
+  rm -rf "$builder"
+}
+
 check_prereqs() {
   [[ -f "$config" ]] || die "config Wolf non trovata: $config (usa --config)"
   [[ -n "$docker_bin" ]] || die 'docker/podman non trovato'
   "$docker_bin" inspect "$container" >/dev/null 2>&1 || die "container Wolf '$container' non trovato (usa --container)"
   "$docker_bin" inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$container" | tr ' ' '\n' | grep -qx '/tmp/sockets' \
     || die "il container $container non monta /tmp/sockets: il tap non sarebbe visibile dall'host"
-  local element
-  for element in tee queue mpegtsmux shmsink; do
-    "$docker_bin" exec "$container" gst-inspect-1.0 --exists "$element" 2>/dev/null \
-      || die "elemento GStreamer '$element' assente nell'immagine Wolf: il tap romperebbe gli stream"
+  # gst-inspect inside the container rebuilds its plugin registry: it can hang
+  # for minutes on a busy GPU and answers unreliably (it reports "tee" missing
+  # on an image that streams through a tee). Advisory only: never block the
+  # install on it. Wolf logs a pipeline error if an element is really missing.
+  local element rc
+  for element in tee queue mpegtsmux unixfdsink; do
+    rc=0
+    timeout 30 "$docker_bin" exec "$container" gst-inspect-1.0 --exists "$element" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+      0) ;;
+      124) note "verifica dell'elemento GStreamer '$element' scaduta: proseguo" ;;
+      *) note "verifica di '$element' non riuscita (codice $rc): proseguo" ;;
+    esac
   done
-  command -v gst-launch-1.0 >/dev/null && gst-inspect-1.0 --exists shmsrc 2>/dev/null \
-    || die 'sull host serve gstreamer + gst-plugins-bad (shmsrc)'
+  "$docker_bin" exec "$container" gst-inspect-1.0 unixfdsink 2>/dev/null | grep -E '1\.26\.7-omarchy|1\.(2[8-9]|[3-9][0-9])\.' >/dev/null \
+    || die 'Wolf richiede UnixFD con copia della memoria: esegui build-unixfd e aggiorna il compose'
+  command -v gst-launch-1.0 >/dev/null && gst-inspect-1.0 --exists unixfdsrc 2>/dev/null \
+    || die 'sull host serve gstreamer + gst-plugins-bad (unixfdsrc)'
 }
 
 patch_config() {
@@ -72,10 +124,26 @@ import re, sys, tomllib
 
 path, gop, marker = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(path, encoding="utf-8").read()
+# Apply these also when the tee is already installed. Without repeated
+# SPS/PPS a late reader sees keyframes but cannot decode them.
+text, count = re.subn(r"(nvh26[45]enc[^\n]*?\bgop-size=)(?:-1|0)\b", rf"\g<1>{gop}", text)
+text = re.sub(r"\b(nvh26[45]enc)(\s+[^!\n]*)", lambda m: m[1] + " repeat-sequence-header=true " +
+              re.sub(r"\brepeat-sequence-header=(?:true|false)\b", "", m[2]).strip() + " ", text)
+# Parsers must insert headers too: encoder headers alone are not retained for
+# a UnixFD reader that attaches after the first buffers were dropped.
+text = re.sub(r"\b(h26[45]parse)([^!\n]*)", lambda m: m[1] + " config-interval=1 disable-passthrough=true " +
+              re.sub(r"\b(?:config-interval=-?\d+|disable-passthrough=(?:true|false))\b", "", m[2]).strip(), text)
+# A CUDA producer is already uploaded. cudaupload maps frames using stale
+# dimensions when a lobby has another size, aborting the consumer pipeline.
+text = re.sub(r"(video_params_zero_copy\s*=\s*['\"]{3})cudaupload\s*!\s*(?=cudaconvertscale)", r"\1", text)
 # Wolf rewrites config.toml (and drops comments) whenever profiles change
 # through its API, so detect the tap by content, not by the marker comment.
 if "omarchy_live_tee" in tomllib.loads(text).get("gstreamer", {}).get("video", {}).get("default_sink", ""):
-    print("tap già presente")
+    text = re.sub(r"shmsink socket-path=/tmp/sockets/omarchy-live-\{session_id\}[^\n]*",
+                  "unixfdsink socket-path=/tmp/sockets/omarchy-live-fd-{session_id} wait-for-connection=false sync=false async=false", text)
+    text = text.replace("queue leaky=downstream max-size-buffers=240", "queue flush-on-eos=true leaky=downstream max-size-buffers=240")
+    open(path, "w", encoding="utf-8").write(text)
+    print("tap già presente; GOP finito e intestazioni ripetute aggiornati")
     sys.exit(0)
 
 section = re.search(r"^\[gstreamer\.video\]\s*$", text, re.M)
@@ -88,21 +156,17 @@ if not match:
 
 original = match.group(1).strip("\n")
 tapped = (
-    f'# {marker}: tee verso shmsink per anteprima/registrazione Omarchy\n'
+    f'# {marker}: tee verso UnixFD per anteprima/registrazione Omarchy\n'
     'default_sink = """\n'
     "tee name=omarchy_live_tee allow-not-linked=true ! \\\n"
     f"{original}\n"
-    "omarchy_live_tee. ! queue leaky=downstream max-size-buffers=240 max-size-bytes=0 max-size-time=0 ! \\\n"
+    "omarchy_live_tee. ! queue flush-on-eos=true leaky=downstream max-size-buffers=240 max-size-bytes=0 max-size-time=0 ! \\\n"
     "mpegtsmux alignment=7 ! \\\n"
-    "shmsink socket-path=/tmp/sockets/omarchy-live-{session_id} wait-for-connection=false "
-    "sync=false async=false shm-size=67108864 perms=0660\n"
+    "unixfdsink socket-path=/tmp/sockets/omarchy-live-fd-{session_id} wait-for-connection=false "
+    "sync=false async=false\n"
     '"""'
 )
 text = text[:match.start()] + tapped + text[match.end():]
-
-# Finite GOP on NVENC encoders only (Pascal: H.264/HEVC). -1 is infinite and
-# 0 leaves it to the preset: both can starve a late viewer of keyframes.
-text, count = re.subn(r"(nvh26[45]enc[^\n]*?\bgop-size=)(?:-1|0)\b", rf"\g<1>{gop}", text)
 
 parsed = tomllib.loads(text)  # refuse to write an invalid config
 new_sink = parsed["gstreamer"]["video"]["default_sink"]
@@ -135,6 +199,10 @@ case "$action" in
     else
       note "riavvia Wolf quando nessuno gioca: $docker_bin restart $container"
     fi
+    ;;
+  build-unixfd)
+    (( EUID == 0 )) || die 'eseguire come root'
+    build_unixfd
     ;;
   rollback)
     (( EUID == 0 )) || die 'eseguire come root'

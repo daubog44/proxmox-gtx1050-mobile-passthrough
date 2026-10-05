@@ -22,7 +22,7 @@ def load_config(config_path: str = DEFAULT_CONFIG_PATH) -> dict:
     config = {
         "enabled": True,
         "provider": "duckdns",
-        "domain": "cloudgamingadrian",
+        "domain": "",
         "token": "",
         "interval_seconds": 300,
     }

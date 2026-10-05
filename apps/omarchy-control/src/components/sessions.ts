@@ -136,7 +136,7 @@ export function renderSessionsList(sessions: ActiveSession[]): string {
                 title="Affianca attivamente con mouse e tastiera aprendo Moonlight"
               >
                 ${Icons.gamepad("w-3.5 h-3.5")}
-                <span>Controllo</span>
+                <span>Moonlight</span>
               </button>
               ${recButton}
               <button
@@ -191,7 +191,7 @@ export function renderLiveMonitorModal(session: {
 }): string {
   return `
     <div id="live-monitor-modal" class="modal-backdrop fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="Anteprima sessione ${escapeHtml(session.username)}">
-      <div class="bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl w-full max-w-5xl max-h-full flex flex-col overflow-hidden">
+      <div data-fullscreen-panel class="bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl w-full max-w-5xl h-[85vh] max-h-full flex flex-col overflow-hidden">
 
         <!-- Header -->
         <div class="flex items-center justify-between gap-3 px-4 py-3 border-b border-zinc-800 bg-zinc-900/60 shrink-0">
@@ -203,23 +203,29 @@ export function renderLiveMonitorModal(session: {
               <span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span> REC NAS
             </span>
           </div>
-          <button type="button" class="w-8 h-8 flex items-center justify-center text-lg leading-none text-zinc-400 hover:text-zinc-100 rounded-lg hover:bg-zinc-800 transition cursor-pointer shrink-0" id="close-live-monitor" title="Chiudi" aria-label="Chiudi">&times;</button>
+          <div class="flex items-center gap-2 shrink-0">
+            <select id="live-quality" class="bg-zinc-900 border border-zinc-700 rounded-lg text-xs p-1.5" aria-label="Qualità della visualizzazione" title="La modalità leggera usa NVENC per ridurre il traffico del video live">
+              <option value="original">Originale</option><option value="low">Leggera · 4 Mbps / 30 FPS</option>
+            </select>
+            <button type="button" data-media-fullscreen aria-pressed="false" class="btn-ghost text-xs" title="Schermo intero (Esc per uscire)">Schermo intero</button>
+            <button type="button" class="w-8 h-8 flex items-center justify-center text-lg leading-none text-zinc-400 hover:text-zinc-100 rounded-lg hover:bg-zinc-800 transition cursor-pointer" id="close-live-monitor" title="Chiudi" aria-label="Chiudi">&times;</button>
+          </div>
         </div>
 
         <!-- Screen -->
-        <div class="relative bg-black flex items-center justify-center min-h-[240px] flex-1 overflow-hidden">
+        <div data-fullscreen-viewport class="relative bg-black flex items-center justify-center min-h-[240px] flex-1 overflow-hidden">
           <video
             id="live-monitor-video"
             muted
             autoplay
             playsinline
             disablepictureinpicture
-            class="block max-w-full max-h-[70vh] w-auto h-auto object-contain select-none hidden"
+            class="absolute inset-0 block w-full h-full object-contain select-none hidden"
           ></video>
           <img
             id="live-monitor-screen"
             alt="Anteprima dello schermo della sessione"
-            class="block max-w-full max-h-[70vh] w-auto h-auto object-contain select-none hidden"
+            class="absolute inset-0 block w-full h-full object-contain select-none hidden"
             draggable="false"
           />
           <div id="live-monitor-spinner" class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center px-6">
@@ -236,7 +242,7 @@ export function renderLiveMonitorModal(session: {
         <div class="px-4 py-3 bg-zinc-900/60 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
           <div class="flex items-center gap-2 text-zinc-400 min-w-0">
             ${Icons.eye("w-3.5 h-3.5 text-sky-400 shrink-0")}
-            <span class="truncate">Visione silenziosa · <span id="live-monitor-age">avvio video…</span></span>
+            <span class="truncate"><span id="live-monitor-mode">Visione silenziosa</span> · <span id="live-monitor-age">avvio video…</span></span>
           </div>
           <div id="live-monitor-pipeline" class="flex flex-wrap items-center gap-1.5" aria-live="polite"></div>
           <div class="flex items-center gap-2">
@@ -258,11 +264,12 @@ export function renderLiveMonitorModal(session: {
               id="btn-monitor-takeover"
               class="h-8 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center gap-1.5 transition cursor-pointer"
               data-id="${escapeHtml(session.sessionId)}"
-              title="Passa al controllo attivo aprendo Moonlight"
+              title="Mouse e tastiera direttamente in questa visualizzazione"
             >
               ${Icons.gamepad("w-3.5 h-3.5")}
-              <span>Prendi Controllo</span>
+              <span>Prendi controllo</span>
             </button>
+            <button type="button" class="btn-ghost" id="btn-monitor-moonlight">Controllo con Moonlight</button>
           </div>
         </div>
       </div>

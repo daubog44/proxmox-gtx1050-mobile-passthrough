@@ -39,6 +39,15 @@ for tool in git gcc ninja pkg-config python3; do command -v "$tool" >/dev/null |
 ref="${GSR_REF:-$(pacman -Q gpu-screen-recorder 2>/dev/null | awk '{print $2}' | cut -d- -f1)}"
 [[ -n "$ref" ]] || die 'versione di gpu-screen-recorder sconosciuta: imposta GSR_REF'
 
+# Idempotent: the same gsr version built for the same NVENC API is kept
+# (OMARCHY_GSR_REBUILD=1 forces a rebuild).
+stamp="$PREFIX/.omarchy-build"
+if [[ "${OMARCHY_GSR_REBUILD:-0}" != 1 && -x "$PREFIX/bin/gpu-screen-recorder" \
+      && "$(cat "$stamp" 2>/dev/null)" == "$ref nvenc-$NVENC_API" ]]; then
+  note "gpu-screen-recorder $ref (NVENC API $NVENC_API) già installato in $PREFIX"
+  exit 0
+fi
+
 mkdir -p "$WORK"
 meson_bin="$(command -v meson || true)"
 [[ -n "$meson_bin" || ! -x "$WORK/venv/bin/meson" ]] || meson_bin="$WORK/venv/bin/meson"
@@ -103,4 +112,5 @@ ninja -C "$build" install >/dev/null
 
 bin="$PREFIX/bin/gpu-screen-recorder"
 ldd "$bin" | grep -q "$FFMPEG_ROOT/lib/libavcodec" || die "il binario non usa $FFMPEG_ROOT (rpath)"
+printf '%s nvenc-%s\n' "$ref" "$NVENC_API" > "$stamp"
 note "gpu-screen-recorder $ref (NVENC API $NVENC_API) installato in $bin"

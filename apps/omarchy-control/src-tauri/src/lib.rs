@@ -1820,6 +1820,7 @@ fn add_multi_user(
     max_bitrate_mbps: Option<u32>,
     allowed_nodes: Option<Vec<String>>,
     auto_record: Option<bool>,
+    storage_limit_gb: Option<f64>,
 ) -> AppResult<String> {
     if !auth::is_admin_session(token.as_deref().unwrap_or("")) {
         return Err("Operazione non autorizzata: solo l'amministratore può creare utenti.".into());
@@ -1837,6 +1838,7 @@ fn add_multi_user(
         max_bitrate_mbps.unwrap_or(20),
         &allowed_nodes.unwrap_or_default(),
         auto_record.unwrap_or(false),
+        storage_limit_gb.unwrap_or(0.0),
     )
 }
 
@@ -1958,6 +1960,43 @@ fn cancel_recording_download(id: String) -> AppResult<()> {
     Ok(())
 }
 
+#[tauri::command(async)]
+fn session_control(app: AppHandle, token: String, session_id: String, body: serde_json::Value) -> AppResult<serde_json::Value> {
+    if !auth::is_admin_session(&token) { return Err("Controllo riservato all'amministratore".into()); }
+    sync_active_node_env(&app);
+    let config = detect_config(parse_config(&config_path(&app)?));
+    broker::json_request(&config.vm_host, &format!("/api/sessions/{}/control", broker::urlencode(&session_id)), body, 15)
+}
+
+#[tauri::command(async)]
+fn user_storage(app: AppHandle, token: String, username: String, body: serde_json::Value) -> AppResult<serde_json::Value> {
+    if !auth::is_admin_session(&token) { return Err("Storage riservato all'amministratore".into()); }
+    sync_active_node_env(&app);
+    let config = detect_config(parse_config(&config_path(&app)?));
+    broker::json_request(&config.vm_host, &format!("/api/users/{}/storage", broker::urlencode(&username)), body, 300)
+}
+
+#[tauri::command(async)]
+fn download_user_file(app: AppHandle, token: String, username: String, relative: String,
+                      on_progress: tauri::ipc::Channel<serde_json::Value>) -> AppResult<String> {
+    if !auth::is_admin_session(&token) { return Err("Storage riservato all'amministratore".into()); }
+    sync_active_node_env(&app);
+    let config = detect_config(parse_config(&config_path(&app)?));
+    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name = Path::new(&relative).file_name().and_then(|n| n.to_str()).ok_or("Nome file non valido")?;
+    let dest = unique_download_path(&dir, &format!("{username}_{name}"));
+    let id = format!("storage:{username}:{relative}");
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    download_cancels().lock().map_err(|e| e.to_string())?.insert(id.clone(), cancel.clone());
+    let endpoint = format!("/api/users/{}/storage/file?path={}", broker::urlencode(&username), broker::urlencode(&relative));
+    let result = broker::download_file(&config.vm_host, &endpoint, &dest, &cancel, |received, total| {
+        on_progress.send(serde_json::json!({"received":received,"total":total})).is_ok()
+    });
+    if let Ok(mut map) = download_cancels().lock() { map.remove(&id); }
+    result.map(|_| dest.to_string_lossy().into_owned())
+}
+
 /// Shows a downloaded file in Finder / Explorer / the file manager.
 #[tauri::command(async)]
 fn reveal_in_file_manager(app: AppHandle, path: String) -> AppResult<()> {
@@ -2001,6 +2040,7 @@ fn serve_recording(
                 let mut builder = tauri::http::Response::builder()
                     .status(r.status)
                     .header("Content-Type", r.content_type)
+                    .header("Content-Length", r.body.len().to_string())
                     .header("Accept-Ranges", "bytes");
                 if let Some(content_range) = r.content_range {
                     builder = builder.header("Content-Range", content_range);
@@ -2055,6 +2095,7 @@ fn edit_multi_user(
     max_bitrate_mbps: Option<u32>,
     allowed_nodes: Option<Vec<String>>,
     auto_record: Option<bool>,
+    storage_limit_gb: Option<f64>,
 ) -> AppResult<String> {
     if !auth::is_admin_session(token.as_deref().unwrap_or("")) {
         return Err("Operazione non autorizzata: solo l'amministratore può modificare gli utenti.".into());
@@ -2073,6 +2114,7 @@ fn edit_multi_user(
         max_bitrate_mbps,
         allowed_nodes.as_deref(),
         auto_record,
+        storage_limit_gb,
     )
 }
 
@@ -2101,6 +2143,7 @@ fn ban_multi_user(
     if !auth::is_admin_session(token.as_deref().unwrap_or("")) {
         return Err("Operazione non autorizzata: solo l'amministratore può bannare utenti.".into());
     }
+    sync_active_node_env(&app);
     let path = config_path(&app)?;
     let config = detect_config(parse_config(&path));
     broker::ban_user(
@@ -2120,6 +2163,7 @@ fn unban_multi_user(
     if !auth::is_admin_session(token.as_deref().unwrap_or("")) {
         return Err("Operazione non autorizzata: solo l'amministratore può riabilitare utenti.".into());
     }
+    sync_active_node_env(&app);
     let path = config_path(&app)?;
     let config = detect_config(parse_config(&path));
     broker::unban_user(&config.vm_host, &config.user, &username)
@@ -2144,11 +2188,27 @@ fn kill_user_session(
 #[tauri::command(async)]
 fn takeover_user_session(
     app: AppHandle,
+    window: WebviewWindow,
+    token: String,
     session_id: String,
 ) -> AppResult<String> {
+    if !auth::is_admin_session(&token) { return Err("Controllo riservato all'amministratore".into()); }
+    sync_active_node_env(&app);
     let path = config_path(&app)?;
     let config = detect_config(parse_config(&path));
-    broker::takeover_session(&config.vm_host, &config.user, &session_id)
+    let result = broker::json_request(&config.vm_host, &format!("/api/sessions/{}/moonlight", broker::urlencode(&session_id)), serde_json::json!({}), 15)?;
+    if result["mode"] == "connect" {
+        let monitor = window.current_monitor().map_err(|e| e.to_string())?.ok_or("Schermo non disponibile")?;
+        let resolution = format!("{}x{}", monitor.size().width, monitor.size().height);
+        let host = format!("{}:{}", config.vm_host, result["port"].as_u64().ok_or("Porta Wolf non disponibile")?);
+        let args = ["stream", &host, result["app"].as_str().ok_or("App Wolf non disponibile")?, "--resolution", &resolution,
+                    "--video-codec", "HEVC", "--display-mode", "fullscreen"];
+        let mut command = if cfg!(target_os = "macos") { Command::new("/Applications/Moonlight.app/Contents/MacOS/Moonlight") }
+            else if cfg!(target_os = "linux") { let mut c = Command::new("flatpak"); c.args(["run", "com.moonlight_stream.Moonlight"]); c }
+            else { Command::new(windows_moonlight_path().unwrap_or_else(|| "Moonlight.exe".into())) };
+        command.args(args).spawn().map_err(|e| format!("Avvio Moonlight fallito: {e}"))?;
+    } else { launch_moonlight()?; }
+    Ok(result["message"].as_str().unwrap_or("Moonlight avviato").into())
 }
 
 #[tauri::command(async)]
@@ -2202,17 +2262,17 @@ fn stop_session_recording(
 }
 
 #[tauri::command(async)]
-fn whep_offer(app: AppHandle, session_id: String, sdp: String) -> AppResult<broker::WhepAnswer> {
+fn whep_offer(app: AppHandle, session_id: String, sdp: String, quality: Option<String>) -> AppResult<broker::WhepAnswer> {
     let path = config_path(&app)?;
     let config = detect_config(parse_config(&path));
-    broker::whep_offer(&config.vm_host, &session_id, &sdp)
+    broker::whep_offer(&config.vm_host, &session_id, &sdp, quality.as_deref().unwrap_or("original"))
 }
 
 #[tauri::command(async)]
-fn live_info(app: AppHandle, session_id: String) -> AppResult<serde_json::Value> {
+fn live_info(app: AppHandle, session_id: String, quality: Option<String>) -> AppResult<serde_json::Value> {
     let path = config_path(&app)?;
     let config = detect_config(parse_config(&path));
-    broker::live_info(&config.vm_host, &session_id)
+    broker::live_info(&config.vm_host, &session_id, quality.as_deref().unwrap_or("original"))
 }
 
 #[tauri::command(async)]
@@ -2236,6 +2296,8 @@ fn live_video_stops(
 fn start_live_video(
     app: AppHandle,
     session_id: String,
+    viewer_id: String,
+    quality: Option<String>,
     on_chunk: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> AppResult<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2246,20 +2308,20 @@ fn start_live_video(
     if let Some(previous) = live_video_stops()
         .lock()
         .map_err(|_| "Stato video live non disponibile".to_string())?
-        .insert(session_id.clone(), stop.clone())
+        .insert(viewer_id.clone(), stop.clone())
     {
         previous.store(true, Ordering::Relaxed);
     }
 
     std::thread::spawn(move || {
-        let result = broker::stream_live_video(&config.vm_host, &session_id, &stop, |chunk| {
+        let result = broker::stream_live_video(&config.vm_host, &session_id, quality.as_deref().unwrap_or("original"), &stop, |chunk| {
             on_chunk
                 .send(tauri::ipc::InvokeResponseBody::Raw(chunk))
                 .is_ok()
         });
         if let Ok(mut stops) = live_video_stops().lock() {
-            if stops.get(&session_id).is_some_and(|s| Arc::ptr_eq(s, &stop)) {
-                stops.remove(&session_id);
+            if stops.get(&viewer_id).is_some_and(|s| Arc::ptr_eq(s, &stop)) {
+                stops.remove(&viewer_id);
             }
         }
         let end = serde_json::json!({
@@ -2272,9 +2334,9 @@ fn start_live_video(
 }
 
 #[tauri::command(async)]
-fn stop_live_video(session_id: String) -> AppResult<()> {
+fn stop_live_video(viewer_id: String) -> AppResult<()> {
     if let Ok(mut stops) = live_video_stops().lock() {
-        if let Some(stop) = stops.remove(&session_id) {
+        if let Some(stop) = stops.remove(&viewer_id) {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -2305,8 +2367,17 @@ fn check_for_updates() -> AppResult<updater::UpdateInfo> {
 }
 
 #[tauri::command(async)]
-fn install_update(download_url: String) -> AppResult<String> {
+fn install_update(download_url: String) -> AppResult<updater::UpdateOutcome> {
     updater::apply_update(&download_url)
+}
+
+/// After an update: start the new version (Restart) or let the installer run (Quit).
+#[tauri::command]
+fn finish_update(app: AppHandle, outcome: updater::UpdateOutcome) {
+    match outcome {
+        updater::UpdateOutcome::Restart => app.restart(),
+        updater::UpdateOutcome::Quit => app.exit(0),
+    }
 }
 
 #[tauri::command(async)]
@@ -3158,6 +3229,9 @@ pub fn run() {
             add_multi_user,
             pair_moonlight_device,
             list_recordings,
+            session_control,
+            user_storage,
+            download_user_file,
             delete_recording,
             download_recording,
             cancel_recording_download,
@@ -3182,6 +3256,7 @@ pub fn run() {
             install_multi_user_backend,
             check_for_updates,
             install_update,
+            finish_update,
             login,
             auth_needs_setup,
             auth_setup,
@@ -3226,6 +3301,16 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recording_state_survives_broker_to_frontend() {
+        let session: crate::broker::ActiveSession = serde_json::from_value(serde_json::json!({
+            "session_id":"wolf-1", "username":"test", "client_ip":"127.0.0.1", "app_name":"Desktop",
+            "resolution":"2880x1800", "fps":60, "bitrate_kbps":20000, "vram_mb":600,
+            "started_at":1, "state":"running", "is_recording":true
+        })).unwrap();
+        assert!(serde_json::to_value(session).unwrap()["is_recording"].as_bool().unwrap());
+    }
+
     use super::*;
 
     #[test]
@@ -3348,7 +3433,7 @@ mod tests {
 
     #[test]
     fn create_user_rejects_empty_credentials() {
-        let result = broker::create_user("", "", "", "Test", "", "guest", &[], 20, &[], false);
+        let result = broker::create_user("", "", "", "Test", "", "guest", &[], 20, &[], false, 0.0);
         assert!(result.is_err());
     }
 
@@ -3603,6 +3688,9 @@ mod tests {
                 max_bitrate_mbps: 20,
                 created_at: 1700000000,
                 auto_record: false,
+                storage_limit_gb: 0.0,
+                storage_used_gb: None,
+                storage_quota_active: false,
             },
             crate::broker::UserRecord {
                 id: 2,
@@ -3616,6 +3704,9 @@ mod tests {
                 max_bitrate_mbps: 10,
                 created_at: 1700000000,
                 auto_record: false,
+                storage_limit_gb: 0.0,
+                storage_used_gb: None,
+                storage_quota_active: false,
             },
         ];
         auth::cache_users(&temp_dir, &test_users);

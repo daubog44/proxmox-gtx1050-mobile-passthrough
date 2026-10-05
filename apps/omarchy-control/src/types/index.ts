@@ -92,6 +92,9 @@ export type UserRecord = {
   status: "active" | "archived" | "banned";
   created_at: number;
   auto_record?: boolean;
+  storage_limit_gb?: number;
+  storage_used_gb?: number | null;
+  storage_quota_active?: boolean;
 };
 
 export type AdmissionStatus = {
@@ -112,6 +115,7 @@ export type UserStorageUsage = {
 export type StorageTelemetry = {
   nas_mounted: boolean;
   nas_path: string;
+  nas_mountpoint?: string;
   storage_type: string;
   max_concurrent_streams: number;
   vpn_peers_count: number;
@@ -179,6 +183,12 @@ export type NasMountResult = {
   error?: string;
 };
 
+export type PendingPairing = {
+  client_ip: string;
+  target: "wolf" | "sunshine";
+  username?: string | null;
+};
+
 export type MultiUserOverview = {
   status: string;
   timestamp: number;
@@ -191,6 +201,8 @@ export type MultiUserOverview = {
   registered_users_count: number;
   sessions: ActiveSession[];
   users: UserRecord[];
+  /** Moonlight clients waiting for a pairing PIN (Wolf). */
+  pair_pending?: PendingPairing[];
   admission?: AdmissionStatus;
   settings?: Record<string, string>;
   storage?: StorageTelemetry;
@@ -213,7 +225,10 @@ export type UpdateInfo = {
   release_date: string;
   notes: string;
   download_url?: string | null;
+  reachable?: boolean;
 };
+
+export type UpdateOutcome = "restart" | "quit";
 
 export type AuthSession = {
   token: string;
@@ -276,8 +291,6 @@ export type StreamPortTestResult = {
   latency_ms: number;
   message: string;
 };
-
-
 
 
 

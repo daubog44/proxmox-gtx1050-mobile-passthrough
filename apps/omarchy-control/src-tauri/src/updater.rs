@@ -1,11 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/daubog44/proxmox-gtx1050-mobile-passthrough/main/releases/version.json";
+
+/// Packages are only ever downloaded from this project's GitHub releases.
+const ALLOWED_DOWNLOAD_PREFIX: &str =
+    "https://github.com/daubog44/proxmox-gtx1050-mobile-passthrough/releases/download/";
+
+const BUNDLE_ID: &str = "it.daubog44.omarchy-control";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatePlatform {
@@ -30,6 +36,23 @@ pub struct UpdateInfo {
     pub release_date: String,
     pub notes: String,
     pub download_url: Option<String>,
+    /// False when the release server could not be reached.
+    #[serde(default = "default_true")]
+    pub reachable: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// What the app must do once `apply_update` returns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateOutcome {
+    /// The new version is installed: restart to use it.
+    Restart,
+    /// An installer was started and needs this app closed (Windows).
+    Quit,
 }
 
 pub fn current_platform() -> &'static str {
@@ -59,52 +82,23 @@ pub fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
 
 pub fn is_newer(latest: &str, current: &str) -> bool {
     match (parse_semver(latest), parse_semver(current)) {
-        (Some((l_maj, l_min, l_pat)), Some((c_maj, c_min, c_pat))) => {
-            (l_maj, l_min, l_pat) > (c_maj, c_min, c_pat)
-        }
+        (Some(l), Some(c)) => l > c,
         _ => false,
     }
 }
 
 pub fn fetch_manifest(url: &str) -> Result<UpdateManifest, String> {
-    // Try downloading via curl with short timeout
-    let output = Command::new("curl")
-        .args(["-fsSL", "--connect-timeout", "3", "-m", "6", url])
-        .output();
-
-    if let Ok(out) = output {
-        if out.status.success() {
-            let body = String::from_utf8_lossy(&out.stdout);
-            if let Ok(manifest) = serde_json::from_str::<UpdateManifest>(&body) {
-                return Ok(manifest);
-            }
-        }
+    let out = Command::new("curl")
+        .args(["-fsSL", "--connect-timeout", "5", "-m", "15", url])
+        .output()
+        .map_err(|e| format!("curl non disponibile: {e}"))?;
+    if !out.status.success() {
+        return Err("server degli aggiornamenti non raggiungibile".into());
     }
-
-    // Fallback: check local releases/version.json relative to current dir or resources
-    let local_paths = [
-        "releases/version.json",
-        "../releases/version.json",
-        "../../releases/version.json",
-        "../../../releases/version.json",
-        "/Users/dariusbogdan/Desktop/dev/progetti/proxmox-gtx1050-mobile-passthrough/releases/version.json",
-    ];
-
-    for path in &local_paths {
-        if let Ok(contents) = fs::read_to_string(Path::new(path)) {
-            if let Ok(manifest) = serde_json::from_str::<UpdateManifest>(&contents) {
-                return Ok(manifest);
-            }
-        }
-    }
-
-    Err(format!("Impossibile recuperare il manifest di aggiornamento da {url}"))
+    serde_json::from_slice::<UpdateManifest>(&out.stdout).map_err(|e| format!("manifest non valido: {e}"))
 }
 
-pub fn check_for_updates(
-    current_version: &str,
-    custom_manifest_url: Option<&str>,
-) -> Result<UpdateInfo, String> {
+pub fn check_for_updates(current_version: &str, custom_manifest_url: Option<&str>) -> Result<UpdateInfo, String> {
     let url = custom_manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
     let manifest = match fetch_manifest(url) {
         Ok(m) => m,
@@ -113,144 +107,213 @@ pub fn check_for_updates(
                 has_update: false,
                 current_version: current_version.to_string(),
                 latest_version: current_version.to_string(),
-                release_date: "Offline / Non raggiungibile".into(),
-                notes: "Impossibile contattare il server degli aggiornamenti in questo momento.".into(),
+                release_date: String::new(),
+                notes: String::new(),
                 download_url: None,
+                reachable: false,
             });
         }
     };
-
-    let platform = current_platform();
-    let download_url = manifest
-        .platforms
-        .get(platform)
-        .map(|p| p.url.clone());
-
-    let has_update = is_newer(&manifest.version, current_version);
-
+    let download_url = manifest.platforms.get(current_platform()).map(|p| p.url.clone());
     Ok(UpdateInfo {
-        has_update,
+        has_update: is_newer(&manifest.version, current_version) && download_url.is_some(),
         current_version: current_version.to_string(),
         latest_version: manifest.version,
         release_date: manifest.release_date,
         notes: manifest.notes,
         download_url,
+        reachable: true,
     })
 }
 
-pub fn apply_update(download_url: &str) -> Result<String, String> {
-    if download_url.trim().is_empty() {
-        return Err("URL di download non valido o mancante".into());
+/// Private work directory for one update attempt (removed by the caller).
+fn work_dir() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join(format!("omarchy-update-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("cartella temporanea: {e}"))?;
+    Ok(dir)
+}
+
+fn download(url: &str, dest: &Path) -> Result<(), String> {
+    if !url.starts_with(ALLOWED_DOWNLOAD_PREFIX) {
+        return Err("URL di aggiornamento non attendibile".into());
+    }
+    let out = Command::new("curl")
+        .args(["-fSL", "--connect-timeout", "15", "-m", "900", "-o"])
+        .arg(dest)
+        .arg(url)
+        .output()
+        .map_err(|e| format!("curl non disponibile: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "download fallito: {}",
+            String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("errore di rete")
+        ));
+    }
+    let size = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    if size < 1024 * 1024 {
+        return Err("pacchetto scaricato incompleto".into());
+    }
+    Ok(())
+}
+
+/// The .app bundle this process runs from (falls back to /Applications).
+#[cfg(target_os = "macos")]
+fn current_app_bundle() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("/Applications/Omarchy Control.app"))
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos(dmg: &Path, work: &Path, target: &Path) -> Result<UpdateOutcome, String> {
+    let mount = work.join("mnt");
+    fs::create_dir_all(&mount).map_err(|e| e.to_string())?;
+    let attach = Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"])
+        .arg(&mount)
+        .arg(dmg)
+        .output()
+        .map_err(|e| format!("hdiutil: {e}"))?;
+    if !attach.status.success() {
+        return Err("immagine DMG non valida".into());
+    }
+    let result = (|| {
+        let source = fs::read_dir(&mount)
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "app"))
+            .ok_or("nessuna app nel DMG")?;
+        let plist = source.join("Contents/Info.plist");
+        let id = Command::new("defaults")
+            .arg("read")
+            .arg(&plist)
+            .arg("CFBundleIdentifier")
+            .output()
+            .map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&id.stdout).trim() != BUNDLE_ID {
+            return Err("il DMG non contiene Omarchy Control".to_string());
+        }
+
+        // Copy next to the installed app, then swap: a failed copy never
+        // leaves a half-written app in place.
+        let parent = target.parent().ok_or("percorso app non valido")?;
+        let staged = parent.join(".Omarchy Control.app.update");
+        let previous = parent.join(".Omarchy Control.app.previous");
+        let _ = fs::remove_dir_all(&staged);
+        let _ = fs::remove_dir_all(&previous);
+        let copy = Command::new("ditto").arg(&source).arg(&staged).output().map_err(|e| e.to_string())?;
+        if !copy.status.success() {
+            let _ = fs::remove_dir_all(&staged);
+            return Err(format!(
+                "copia in {} non riuscita: {}",
+                parent.display(),
+                String::from_utf8_lossy(&copy.stderr).trim()
+            ));
+        }
+        let _ = Command::new("xattr").args(["-dr", "com.apple.quarantine"]).arg(&staged).output();
+        if target.exists() {
+            fs::rename(target, &previous).map_err(|e| format!("sostituzione app: {e}"))?;
+        }
+        if let Err(e) = fs::rename(&staged, target) {
+            let _ = fs::rename(&previous, target);
+            return Err(format!("sostituzione app: {e}"));
+        }
+        let _ = fs::remove_dir_all(&previous);
+        Ok(UpdateOutcome::Restart)
+    })();
+    let _ = Command::new("hdiutil").arg("detach").arg(&mount).args(["-quiet", "-force"]).output();
+    result
+}
+
+pub fn apply_update(download_url: &str) -> Result<UpdateOutcome, String> {
+    let work = work_dir()?;
+    let result = (|| {
+        #[cfg(target_os = "macos")]
+        {
+            let dmg = work.join("update.dmg");
+            download(download_url, &dmg)?;
+            install_macos(&dmg, &work, &current_app_bundle())
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // The NSIS installer replaces the files once this app has exited.
+            let exe = std::env::temp_dir().join(format!("omarchy-control-setup-{}.exe", std::process::id()));
+            download(download_url, &exe)?;
+            Command::new(&exe).spawn().map_err(|e| format!("avvio installer: {e}"))?;
+            Ok(UpdateOutcome::Quit)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let rpm = work.join("omarchy-control.rpm");
+            download(download_url, &rpm)?;
+            let out = Command::new("pkexec")
+                .args(["dnf", "install", "-y"])
+                .arg(&rpm)
+                .output()
+                .map_err(|e| format!("pkexec: {e}"))?;
+            if !out.status.success() {
+                return Err("installazione annullata o fallita (dnf)".into());
+            }
+            Ok(UpdateOutcome::Restart)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            let _ = download_url;
+            Err("piattaforma non supportata".to_string())
+        }
+    })();
+    let _ = fs::remove_dir_all(&work);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compares_versions() {
+        assert!(is_newer("0.4.0", "0.3.9"));
+        assert!(is_newer("v1.0", "0.9.9"));
+        assert!(!is_newer("0.4.0", "0.4.0"));
+        assert!(!is_newer("garbage", "0.1.0"));
     }
 
-    if cfg!(target_os = "macos") {
-        let temp_dmg = "/tmp/omarchy_update.dmg";
-        let mount_point = "/tmp/omarchy_update_mount";
-
-        // Determine if download_url is already a local path or file://
-        let mut source_dmg = String::new();
-        let stripped_url = download_url.trim_start_matches("file://");
-        if Path::new(stripped_url).exists() {
-            source_dmg = stripped_url.to_string();
-        }
-
-        // Clean up previous attempts if present
-        let _ = Command::new("hdiutil").args(["detach", mount_point, "-force"]).output();
-        let _ = fs::remove_file(temp_dmg);
-
-        if source_dmg.is_empty() {
-            // Attempt curl download
-            let download_res = Command::new("curl")
-                .args(["-fSL", "--connect-timeout", "10", "-m", "60", "-o", temp_dmg, download_url])
-                .output();
-
-            if let Ok(res) = download_res {
-                if res.status.success() && Path::new(temp_dmg).exists() {
-                    source_dmg = temp_dmg.to_string();
-                }
-            }
-
-            // If curl failed (e.g. GitHub release not yet uploaded or offline), check local release bundle DMGs
-            if source_dmg.is_empty() {
-                let local_dmg_candidates = [
-                    "/Users/dariusbogdan/Desktop/dev/progetti/proxmox-gtx1050-mobile-passthrough/apps/omarchy-control/src-tauri/target/release/bundle/dmg/Omarchy Control_0.3.0_aarch64.dmg",
-                    "/Users/dariusbogdan/Desktop/dev/progetti/proxmox-gtx1050-mobile-passthrough/releases/Omarchy Control_0.3.0_aarch64.dmg",
-                    "/Users/dariusbogdan/Desktop/dev/progetti/proxmox-gtx1050-mobile-passthrough/apps/omarchy-control/src-tauri/target/release/bundle/dmg/Omarchy Control_0.2.9_aarch64.dmg",
-                ];
-                for cand in &local_dmg_candidates {
-                    if Path::new(cand).exists() {
-                        source_dmg = cand.to_string();
-                        break;
-                    }
-                }
-            }
-        }
-
-        if source_dmg.is_empty() {
-            return Err("Impossibile scaricare l'aggiornamento da internet e nessun pacchetto DMG locale trovato.".into());
-        }
-
-        // Mount DMG
-        let _ = fs::create_dir_all(mount_point);
-        let mount_res = Command::new("hdiutil")
-            .args(["attach", &source_dmg, "-mountpoint", mount_point, "-nobrowse", "-quiet"])
+    /// Downloads the published macOS release and installs it over a scratch
+    /// copy. `cargo test -- --ignored live_macos_update`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn live_macos_update() {
+        let info = check_for_updates("0.0.1", None).expect("manifest");
+        let url = info.download_url.expect("download url");
+        let work = work_dir().unwrap();
+        let target = work.join("apps/Omarchy Control.app");
+        fs::create_dir_all(target.join("Contents")).unwrap();
+        fs::write(target.join("Contents/old-marker"), "old").unwrap();
+        let dmg = work.join("update.dmg");
+        download(&url, &dmg).expect("download");
+        let outcome = install_macos(&dmg, &work, &target).expect("install");
+        assert!(matches!(outcome, UpdateOutcome::Restart));
+        assert!(!target.join("Contents/old-marker").exists(), "old bundle replaced");
+        assert!(!target.join("Omarchy Control.app").exists(), "no nested copy");
+        let version = Command::new("defaults")
+            .arg("read")
+            .arg(target.join("Contents/Info.plist"))
+            .arg("CFBundleShortVersionString")
             .output()
-            .map_err(|e| format!("Impossibile montare immagine aggiornamento: {e}"))?;
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), info.latest_version);
+        assert!(!work.join("apps/.Omarchy Control.app.previous").exists());
+        let _ = fs::remove_dir_all(&work);
+    }
 
-        if !mount_res.status.success() {
-            if source_dmg == temp_dmg {
-                let _ = fs::remove_file(temp_dmg);
-            }
-            return Err("Impossibile aprire il file DMG di aggiornamento".into());
-        }
-
-        // Locate .app inside mount
-        let app_source = format!("{mount_point}/Omarchy Control.app");
-        let app_target = "/Applications/Omarchy Control.app";
-
-        let copy_res = Command::new("cp")
-            .args(["-R", &app_source, app_target])
-            .output();
-
-        // Always detach and clean up
-        let _ = Command::new("hdiutil").args(["detach", mount_point, "-quiet"]).output();
-        if source_dmg == temp_dmg {
-            let _ = fs::remove_file(temp_dmg);
-        }
-
-        if let Ok(c) = copy_res {
-            if c.status.success() {
-                return Ok("Aggiornamento installato con successo in /Applications! Riavvia l'applicazione per applicare i cambiamenti.".into());
-            } else {
-                let err = String::from_utf8_lossy(&c.stderr);
-                return Err(format!("Errore copia in /Applications: {err}"));
-            }
-        }
-
-        Ok("File di aggiornamento installato in /Applications.".into())
-    } else if cfg!(target_os = "linux") {
-        let temp_rpm = "/tmp/omarchy-fedora-client-latest.rpm";
-        let download_res = Command::new("curl")
-            .args(["-fSL", "-o", temp_rpm, download_url])
-            .output()
-            .map_err(|e| format!("Errore download: {e}"))?;
-
-        if !download_res.status.success() {
-            return Err("Download del pacchetto RPM fallito".into());
-        }
-
-        let install_res = Command::new("pkexec")
-            .args(["dnf", "upgrade", "-y", temp_rpm])
-            .output();
-
-        if let Ok(res) = install_res {
-            if res.status.success() {
-                return Ok("Pacchetto aggiornato con successo con DNF!".into());
-            }
-        }
-
-        Ok(format!("Pacchetto RPM scaricato in {temp_rpm}. Installa con: sudo dnf upgrade {temp_rpm}"))
-    } else {
-        Ok("Aggiornamento scaricato con successo.".into())
+    #[test]
+    fn refuses_foreign_download_urls() {
+        let dest = std::env::temp_dir().join("omarchy-update-test.bin");
+        let err = download("https://example.com/omarchy.dmg", &dest).unwrap_err();
+        assert!(err.contains("non attendibile"));
     }
 }
