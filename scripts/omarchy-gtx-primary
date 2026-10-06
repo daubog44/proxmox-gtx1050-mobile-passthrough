@@ -68,16 +68,14 @@ validate_stream_mode() {
 }
 
 write_monitor_block() {
-  local mode=$1 scale
-  scale="$(sed -n 's/.*output = "omarchy-gtx".*scale = \([0-9.]*\).*/\1/p' "$MONITORS_FILE" | tail -n 1)"
-  [[ "$scale" =~ ^[1-4](\.[0-9]+)?$ ]] || scale=1
+  local mode=$1
   sed -i '/-- BEGIN sunshine-virtual-display (managed locally)/,/-- END sunshine-virtual-display/d' "$MONITORS_FILE"
   printf '%s\n' \
     '' \
     '-- BEGIN sunshine-virtual-display (managed locally)' \
     '-- schema: 2 (16:9 default; explicit user modes are preserved)' \
     '-- GTX-only Wayland output for Sunshine/Moonlight; no VirtIO display ownership.' \
-    "hl.monitor({ output = \"omarchy-gtx\", mode = \"$mode\", position = \"0x0\", scale = $scale })" \
+    "hl.monitor({ output = \"omarchy-gtx\", mode = \"$mode\", position = \"0x0\", scale = omarchy_monitor_scale or 1 })" \
     '-- END sunshine-virtual-display' \
     >>"$MONITORS_FILE"
   chown "$USER_NAME:$USER_NAME" "$MONITORS_FILE"
@@ -215,8 +213,8 @@ hyprland_env() {
 
 apply_mode() {
   local mode=$1 scale
-  scale="$(sed -n 's/.*output = "omarchy-gtx".*scale = \([0-9.]*\).*/\1/p' "$MONITORS_FILE" | tail -n 1)"
-  [[ "$scale" =~ ^[1-4](\.[0-9]+)?$ ]] || scale=1
+  scale="$(awk '$1 == "local" && $2 == "omarchy_monitor_scale" && $3 == "=" && $4 ~ /^[0-9]+([.][0-9]+)?$/ && $4 >= 0.5 && $4 <= 4 { print $4; exit }' "$MONITORS_FILE")"
+  [[ -n "$scale" ]] || scale=1
   # Hyprland 0.55+ uses the Lua API. `hyprctl keyword monitor` is a legacy
   # parser and silently does not change an Omarchy 0.56 monitor.
   hyprctl eval "hl.monitor({ output = \"$OUTPUT\", mode = \"$mode\", position = \"0x0\", scale = $scale })" >/dev/null
@@ -378,10 +376,12 @@ verify_headless() {
   grep -Fxq 'adapter_name = /dev/dri/gtx1050' "$SUNSHINE_FILE" || die 'Sunshine non punta alla GTX'
   grep -Fxq 'nvenc_preset = 3' "$SUNSHINE_FILE" || die 'preset NVENC P3 non configurato'
   grep -Fq 'output = "omarchy-gtx"' "$MONITORS_FILE" || die 'monitor headless non configurato'
+  grep -Fq 'scale = omarchy_monitor_scale or 1' "$MONITORS_FILE" || die 'scala monitor Omarchy non collegata a Moonlight'
   mode="$(managed_stream_mode)"
   validate_stream_mode "$mode"
   [[ -x "$HEADLESS_HELPER" ]] || die 'helper di creazione output mancante'
   [[ -x "$DYNAMIC_MODE_HELPER" ]] || die 'helper di risoluzione dinamica Moonlight mancante'
+  grep -Fq '"omarchy_monitor_scale"' "$DYNAMIC_MODE_HELPER" || die 'helper Moonlight non legge la scala monitor Omarchy'
   grep -Fxq "ExecStartPre=$HEADLESS_HELPER" "$SUNSHINE_DROPIN" || die 'pre-start Sunshine mancante'
   [[ -x "$RESOLUTION_COMMAND" && -x "$HEALTH_COMMAND" ]] || die 'comandi utente stream mancanti'
   grep -Fq 'omarchy_stream_resolution()' "$BASHRC" || die 'funzione Bash di risoluzione mancante'
