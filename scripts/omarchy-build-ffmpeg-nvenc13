@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Build a private FFmpeg for Pascal / NVIDIA 580xx without replacing Arch's FFmpeg.
+# Pinned sources: FFmpeg n9.0.2 + nv-codec-headers n13.0.19.0 (NVENC API 13.0).
+set -euo pipefail
+
+FFMPEG_ROOT="${FFMPEG_ROOT:-/opt/ffmpeg-nvenc/usr}"
+WORK="${WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-ffmpeg-nvenc13-build}"
+JOBS="${JOBS:-4}"
+readonly FFMPEG_REF=n9.0.2
+readonly FFMPEG_COMMIT=946fcce07b6dcd0331c8cc609192aeff5e1924f8
+readonly HEADERS_REF=n13.0.19.0
+readonly HEADERS_COMMIT=e844e5b26f46bb77479f063029595293aa8f812d
+
+die() { printf 'Errore: %s\n' "$*" >&2; exit 1; }
+[[ "$FFMPEG_ROOT" == /* && "$FFMPEG_ROOT" != / ]] || die 'FFMPEG_ROOT deve essere un percorso assoluto'
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die 'JOBS deve essere un intero positivo'
+for tool in git make gcc pkg-config perl; do command -v "$tool" >/dev/null || die "manca $tool"; done
+
+stamp="$FFMPEG_ROOT/.omarchy-nvenc13-build"
+if [[ -f "$stamp" && "${OMARCHY_FFMPEG_REBUILD:-0}" != 1 ]]; then
+  [[ "$(cat "$stamp")" == "$FFMPEG_COMMIT $HEADERS_COMMIT" ]] || die 'build diversa già installata; imposta OMARCHY_FFMPEG_REBUILD=1'
+  printf 'FFmpeg NVENC 13.0 già installato in %s\n' "$FFMPEG_ROOT"
+  exit 0
+fi
+if [[ -e "$FFMPEG_ROOT/lib/pkgconfig/libavcodec.pc" && ! -f "$stamp" && "${OMARCHY_FFMPEG_REBUILD:-0}" != 1 ]]; then
+  die "FFmpeg preesistente in $FFMPEG_ROOT: non lo sovrascrivo senza OMARCHY_FFMPEG_REBUILD=1"
+fi
+
+mkdir -p "$WORK"
+clone_pinned() {
+  local url="$1" ref="$2" commit="$3" dest="$4"
+  [[ -d "$dest/.git" ]] || git clone --quiet --depth 1 --branch "$ref" "$url" "$dest"
+  [[ "$(git -C "$dest" rev-parse HEAD)" == "$commit" ]] || die "sorgenti inattese in $dest"
+}
+clone_pinned https://github.com/FFmpeg/nv-codec-headers.git "$HEADERS_REF" "$HEADERS_COMMIT" "$WORK/nv-codec-headers"
+clone_pinned https://github.com/FFmpeg/FFmpeg.git "$FFMPEG_REF" "$FFMPEG_COMMIT" "$WORK/FFmpeg"
+
+# Stage the 13.0 headers privately: the system headers may already require 13.1.
+headers="$WORK/headers"
+make -C "$WORK/nv-codec-headers" PREFIX="$headers" install >/dev/null
+grep -q '^#define NVENCAPI_MAJOR_VERSION 13$' "$headers/include/ffnvcodec/nvEncodeAPI.h" || die 'header NVENC major inatteso'
+grep -q '^#define NVENCAPI_MINOR_VERSION 0$' "$headers/include/ffnvcodec/nvEncodeAPI.h" || die 'header NVENC minor inatteso'
+
+build="$WORK/build"
+mkdir -p "$build"
+cd "$build"
+PKG_CONFIG_PATH="$headers/lib/pkgconfig" "$WORK/FFmpeg/configure" \
+  --prefix="$FFMPEG_ROOT" --enable-shared --disable-static --disable-doc \
+  --disable-debug --disable-autodetect --disable-ffplay --disable-x86asm \
+  --enable-ffnvcodec --enable-nvenc --enable-nvdec \
+  --extra-ldflags="-Wl,--disable-new-dtags,-rpath,$FFMPEG_ROOT/lib"
+make -j "$JOBS"
+make install
+make -C "$WORK/nv-codec-headers" PREFIX="$FFMPEG_ROOT" install >/dev/null
+
+ffmpeg="$FFMPEG_ROOT/bin/ffmpeg"
+[[ -x "$ffmpeg" && -f "$FFMPEG_ROOT/lib/pkgconfig/libavcodec.pc" ]] || die 'installazione FFmpeg incompleta'
+PKG_CONFIG_PATH="$FFMPEG_ROOT/lib/pkgconfig" pkg-config --variable=prefix libavcodec | grep -Fxq "$FFMPEG_ROOT" \
+  || die 'pkg-config non punta alla build privata'
+LD_LIBRARY_PATH="$FFMPEG_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+  "$ffmpeg" -hide_banner -loglevel error -f lavfi -i color=c=black:s=128x128:r=1 \
+  -frames:v 1 -c:v hevc_nvenc -f null - \
+  || die 'HEVC NVENC non funziona con il driver/GPU attuali'
+printf '%s %s\n' "$FFMPEG_COMMIT" "$HEADERS_COMMIT" > "$stamp"
+printf 'FFmpeg NVENC 13.0 compilato e verificato in %s\n' "$FFMPEG_ROOT"

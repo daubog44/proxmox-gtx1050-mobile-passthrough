@@ -240,7 +240,13 @@ install_live_video() {
 
   # Pascal / NVIDIA 580xx: distro gsr needs NVENC API 13.1, build it against
   # the legacy-NVENC FFmpeg so the full-GPU capture path works.
+  install -m 0755 "$repo_root/scripts/omarchy-build-ffmpeg-nvenc13" /usr/local/bin/omarchy-build-ffmpeg-nvenc13
   install -m 0755 "$repo_root/scripts/omarchy-build-gsr-legacy-nvenc" /usr/local/bin/omarchy-build-gsr-legacy-nvenc
+  if [[ ! -f /opt/ffmpeg-nvenc/usr/lib/pkgconfig/libavcodec.pc ]]; then
+    pacman_install_missing git base-devel pkgconf perl \
+      || note 'strumenti di build FFmpeg non installati: provo comunque'
+    omarchy-build-ffmpeg-nvenc13 || note 'build FFmpeg NVENC 13.0 fallita: resterà il fallback wf-recorder'
+  fi
   if [[ -f /opt/ffmpeg-nvenc/usr/lib/pkgconfig/libavcodec.pc ]]; then
     pacman_install_missing git base-devel ninja vulkan-headers \
       || note 'strumenti di build non installati: provo comunque'

@@ -139,7 +139,7 @@ MediaMTX (omarchy-mediamtx.service, avvio/arresto on-demand)
   al picker di xdg-desktop-portal-hyprland scegliendo sempre l'output in streaming.
 - Sessioni Wolf: il gioco gira nel compositor del container, invisibile all'host.
   `omarchy-wolf-live-tap` aggiunge a `default_sink` di Wolf un `tee` che copia lo stream gia'
-  codificato (nessuna seconda codifica) in un socket `shmsink`; la coda leaky garantisce che il
+  codificato (nessuna seconda codifica) in un socket `unixfdsink`; la coda leaky garantisce che il
   giocatore non venga mai rallentato. Imposta anche un GOP finito (120 frame) sugli encoder NVENC,
   altrimenti chi si collega a meta' sessione non riceverebbe mai un keyframe. Le sessioni sono lette
   da `GET /api/v1/sessions` sul socket di Wolf (id `wolf-<session_id>`) e terminate con
@@ -154,8 +154,17 @@ MediaMTX (omarchy-mediamtx.service, avvio/arresto on-demand)
   Wolf non ha variabili di "session sharing": la condivisione tra client usa le lobby dell'API
   (vedi `docs/omarchy-multi-user-gaming.md`, "Visualizza e Prendi Controllo").
 - Pascal / NVIDIA 580xx: la gpu-screen-recorder di Arch richiede l'API NVENC 13.1 (driver >= 610,
-  mai disponibile per Pascal). `scripts/omarchy-build-gsr-legacy-nvenc` la ricompila contro
-  `/opt/ffmpeg-nvenc` (API 13.0): cattura portale -> NVENC al 25% di CPU su 2880x1800.
+  mai disponibile per Pascal). `scripts/omarchy-build-ffmpeg-nvenc13` costruisce FFmpeg n9.0.2
+  dai sorgenti ufficiali con `nv-codec-headers` n13.0.19.0 (API 13.0) in
+  `/opt/ffmpeg-nvenc/usr`, senza sostituire il pacchetto di sistema. Le revisioni Git sono
+  fissate nello script; la compilazione verifica un fotogramma HEVC sulla GPU. Poi
+  `scripts/omarchy-build-gsr-legacy-nvenc` ricompila gpu-screen-recorder contro queste librerie:
+  cattura portale -> NVENC al 25% di CPU su 2880x1800 nel setup verificato.
+  Su una VM pulita: `sudo scripts/omarchy-build-ffmpeg-nvenc13` e poi
+  `sudo scripts/omarchy-build-gsr-legacy-nvenc`. `omarchy-setup ... live-video --apply`
+  esegue entrambi quando manca FFmpeg dedicato. Per provarlo senza toccare la build esistente,
+  impostare `FFMPEG_ROOT` e `PREFIX` su percorsi privati per i due script. Non includiamo il
+  binario nel repository: dipende da architettura, librerie e driver della VM.
   Se il portale non negozia, controllare WirePlumber (`assertion 'core != NULL' failed` nel journal).
 - ffmpeg non codifica mai nel percorso principale: sposta solo i pacchetti tra contenitori
   (MPEG-TS -> RTSP, RTSP -> MP4 frammentato).
@@ -164,6 +173,27 @@ MediaMTX (omarchy-mediamtx.service, avvio/arresto on-demand)
 - HLS (`.m3u8`) non e' usato: segmenti da 1-6 s danno 2-10 s di ritardo, adatti a molti
   spettatori via CDN, non al controllo di una sessione.
 - Installazione: `sudo scripts/omarchy-setup guest multi-user live-video --apply` (MediaMTX: `yay -S mediamtx-bin`).
+
+### Ricostruire NVENC 13.0 da una VM pulita
+
+```bash
+sudo pacman -S --needed git base-devel pkgconf perl gpu-screen-recorder ninja meson vulkan-headers
+sudo scripts/omarchy-build-ffmpeg-nvenc13
+sudo scripts/omarchy-build-gsr-legacy-nvenc
+ldd /usr/local/lib/omarchy/gsr-legacy-nvenc/bin/gpu-screen-recorder | grep /opt/ffmpeg-nvenc/usr/lib/libavcodec
+```
+
+Il primo script scarica solo i tag ufficiali FFmpeg `n9.0.2` e `nv-codec-headers`
+`n13.0.19.0`, verifica i commit indicati nel sorgente, installa le librerie in
+`/opt/ffmpeg-nvenc/usr` e prova `hevc_nvenc` sulla GPU. Il secondo compila
+gpu-screen-recorder con quelle librerie e verifica il collegamento dinamico.
+Su una VM che ha già una build FFmpeg in `/opt`, usare prima un `FFMPEG_ROOT`
+alternativo per la prova: lo script non sovrascrive una build senza il proprio
+marcatore, salvo `OMARCHY_FFMPEG_REBUILD=1` esplicito.
+Verificato sulla GTX 1050 con driver 580.178.04 in un prefisso di prova:
+codifica HEVC riuscita; gpu-screen-recorder 6.1.3 compilato e collegato con
+`DT_RPATH` alle librerie FFmpeg private. La cattura portale non fa parte di
+questa prova di compilazione.
 
 ## Pairing, dispositivi e registrazioni
 
