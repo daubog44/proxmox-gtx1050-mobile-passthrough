@@ -179,7 +179,7 @@ MediaMTX (omarchy-mediamtx.service, avvio/arresto on-demand)
 ```bash
 sudo pacman -S --needed git base-devel pkgconf perl gpu-screen-recorder ninja meson vulkan-headers
 sudo scripts/omarchy-build-ffmpeg-nvenc13
-sudo scripts/omarchy-build-gsr-legacy-nvenc
+sudo env GSR_REF=6.1.3 scripts/omarchy-build-gsr-legacy-nvenc
 ldd /usr/local/lib/omarchy/gsr-legacy-nvenc/bin/gpu-screen-recorder | grep /opt/ffmpeg-nvenc/usr/lib/libavcodec
 ```
 
